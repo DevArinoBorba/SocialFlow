@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.next/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+**/generated/
+test-results/
+playwright-report/
+.impeccable/
+.local/
+coverage/

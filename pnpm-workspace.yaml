@@ -1,0 +1,16 @@
+packages:
+  - apps/*
+  - packages/*
+overrides:
+  deepmerge-ts@<8.0.0: 8.0.2
+  mysql2@<3.24.4: 3.24.4
+  multer@<2.3.0: 2.3.0
+allowBuilds:
+  "@prisma/engines": true
+  prisma: true
+  esbuild: true
+  sharp: true
+  "@nestjs/core": false
+  msgpackr-extract: false
+minimumReleaseAgeExclude:
+  - zod@4.6.2

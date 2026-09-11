@@ -1,0 +1,36 @@
+{
+  "name": "socialflow",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "pnpm -r typecheck",
+    "build": "pnpm -r build",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "node scripts/run-tests.mjs integration",
+    "test:e2e": "node scripts/run-tests.mjs e2e",
+    "db:generate": "pnpm --filter @socialflow/db generate",
+    "db:migrate": "pnpm --filter @socialflow/db migrate",
+    "db:seed": "pnpm --filter @socialflow/db seed"
+  },
+  "devDependencies": {
+    "@socialflow/db": "workspace:*",
+    "bullmq": "6.3.4",
+    "ioredis": "6.0.0",
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.2",
+    "eslint": "10.10.0",
+    "prettier": "3.9.6",
+    "tsx": "4.21.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.70.0",
+    "vitest": "5.0.0"
+  }
+}

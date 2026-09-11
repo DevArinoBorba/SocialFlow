@@ -1,0 +1,44 @@
+name: Foundation
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: foundation-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  foundation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.19.0"
+      - run: npm install --global pnpm@11.19.0
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm db:generate
+      - run: pnpm build
+      - run: pnpm lint
+      - run: pnpm format:check
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm audit --prod --audit-level high
+      - run: node scripts/local-env.mjs .local/test.env
+      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test config --quiet
+      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test up --build --wait --wait-timeout 180
+      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test run --rm seed
+      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test run --rm seed
+      - run: pnpm test:integration
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+      - if: failure()
+        run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test logs --tail 100
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-results
+          path: test-results
+      - if: always()
+        run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test down

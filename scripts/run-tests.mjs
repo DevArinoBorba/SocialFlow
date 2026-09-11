@@ -1,0 +1,41 @@
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { parseEnv } from "node:util";
+const values = parseEnv(
+  readFileSync(process.env.TEST_ENV_FILE ?? ".local/test.env", "utf8"),
+);
+const env = {
+  ...process.env,
+  ...values,
+  NODE_ENV: "test",
+  ALLOW_DEV_SEED: "true",
+  DATABASE_URL: `postgresql://socialflow_runtime:${values.RUNTIME_DB_PASSWORD}@127.0.0.1:55432/socialflow`,
+  MIGRATION_DATABASE_URL: `postgresql://socialflow_migration:${values.POSTGRES_PASSWORD}@127.0.0.1:55432/socialflow`,
+  REDIS_URL: `redis://:${values.REDIS_PASSWORD}@127.0.0.1:56379`,
+};
+const mode = process.argv[2];
+const args =
+  mode === "integration"
+    ? [
+        "node_modules/vitest/vitest.mjs",
+        "run",
+        "--config",
+        "vitest.integration.config.ts",
+      ]
+    : mode === "e2e"
+      ? ["node_modules/@playwright/test/cli.js", "test"]
+      : mode === "migrate"
+        ? ["node_modules/prisma/build/index.js", "migrate", "deploy"]
+        : mode === "seed"
+          ? ["--import", "tsx", "src/seed.ts"]
+          : null;
+if (!args)
+  throw new Error(
+    "Execute via pnpm exec node scripts/run-tests.mjs integration|e2e|migrate|seed",
+  );
+const result = spawnSync(process.execPath, args, {
+  env,
+  stdio: "inherit",
+  cwd: ["migrate", "seed"].includes(mode) ? "packages/db" : ".",
+});
+process.exit(result.status ?? 1);

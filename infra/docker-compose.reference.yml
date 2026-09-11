@@ -1,0 +1,30 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: socialflow
+      POSTGRES_USER: socialflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dev-only-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U socialflow -d socialflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+# web/api/worker serão adicionados pela Fase 1 após os Dockerfiles existirem.
+volumes:
+  postgres_data:
+  redis_data:

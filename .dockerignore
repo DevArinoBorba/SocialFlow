@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/.next
+**/dist
+**/generated
+**/.env
+**/.env.*
+!**/.env.example
+.local
+.impeccable
+test-results
+playwright-report
+*.log

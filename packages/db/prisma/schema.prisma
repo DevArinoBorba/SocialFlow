@@ -1,0 +1,114 @@
+generator client {
+  provider = "prisma-client"
+  output = "../src/generated"
+}
+datasource db {
+  provider = "postgresql"
+}
+enum Role {
+  OWNER
+  ADMIN
+  EDITOR
+  APPROVER
+  CLIENT_VIEWER
+}
+model User {
+  id String @id
+  name String
+  email String @unique
+  emailVerified Boolean @default(false)
+  image String?
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  sessions Session[]
+  accounts Account[]
+  memberships Membership[]
+}
+model Session {
+  id String @id
+  token String @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId])
+}
+model Account {
+  id String @id
+  accountId String
+  providerId String
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken String?
+  refreshToken String?
+  idToken String?
+  accessTokenExpiresAt DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope String?
+  password String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+model Verification {
+  id String @id
+  identifier String
+  value String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@index([identifier])
+}
+model RateLimit {
+  id String @id
+  key String @unique
+  count Int
+  lastRequest BigInt
+}
+model Organization {
+  id String @id @default(uuid())
+  name String
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  clients Client[]
+  memberships Membership[]
+}
+model Client {
+  id String @id @default(uuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  name String
+  slug String
+  active Boolean @default(true)
+  createdAt DateTime @default(now())
+  memberships Membership[]
+  @@unique([organizationId, slug])
+  @@unique([organizationId, id])
+}
+model Membership {
+  id String @id @default(uuid())
+  userId String
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  clientId String?
+  client Client? @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  role Role
+  active Boolean @default(true)
+  @@unique([userId, organizationId, clientId])
+  @@index([userId, organizationId])
+}
+model AuditLog {
+  id String @id @default(uuid())
+  organizationId String
+  actorUserId String
+  action String
+  entityId String
+  createdAt DateTime @default(now())
+  @@index([organizationId, createdAt])
+}

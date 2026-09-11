@@ -1,0 +1,10 @@
+# Test-only overrides; no data service ports in the base production topology.
+services:
+  postgres:
+    ports: ["127.0.0.1:55432:5432"]
+  redis:
+    ports: ["127.0.0.1:56379:6379"]
+  api:
+    ports: ["127.0.0.1:53001:3001"]
+  worker:
+    ports: ["127.0.0.1:53002:3002"]
