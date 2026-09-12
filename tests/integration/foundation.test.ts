@@ -1,12 +1,16 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { randomUUID } from "node:crypto";
-import { createDatabase, asActor } from "../../packages/db/src/index.js";
+import {
+  createDatabase,
+  asActor,
+  assertRuntimeRole,
+} from "../../packages/db/src/index.js";
 import { Redis } from "ioredis";
 import { Queue } from "bullmq";
 
 const db = createDatabase(process.env.DATABASE_URL!);
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
-const base = "http://127.0.0.1:53001";
+const base = `http://127.0.0.1:${process.env.TEST_API_PORT ?? 53001}`;
 const origin = process.env.APP_URL!;
 const redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 1 });
 const queue = new Queue("diagnostics", { connection: redis });
@@ -54,6 +58,78 @@ afterAll(async () => {
 });
 
 describe("real PostgreSQL runtime isolation", () => {
+  it("rejects privileged runtime and filters nested relations", async () => {
+    await assertRuntimeRole(db);
+    await expect(assertRuntimeRole(migration)).rejects.toThrow("Unsafe");
+    const organizations = await asActor(db, "viewer-a", (tx) =>
+      tx.organization.findMany({
+        include: { clients: true, memberships: true },
+      }),
+    );
+    expect(organizations.map((o) => o.id)).toEqual(["org-a"]);
+    expect(organizations[0]?.clients.map((c) => c.id)).toEqual(["client-a"]);
+    expect(
+      organizations[0]?.memberships.every((m) => m.userId === "viewer-a"),
+    ).toBe(true);
+    await expect(
+      asActor(db, "admin-a", (tx) =>
+        tx.client.update({
+          where: { id: "client-a" },
+          data: { organizationId: "org-b" },
+        }),
+      ),
+    ).rejects.toThrow();
+    await expect(
+      asActor(db, "admin-a", (tx) =>
+        tx.membership.create({
+          data: {
+            userId: "viewer-a",
+            organizationId: "org-a",
+            clientId: "client-b",
+            role: "CLIENT_VIEWER",
+          },
+        }),
+      ),
+    ).rejects.toThrow();
+  });
+  it("revocation removes direct reads, writes and historical audit access", async () => {
+    const audit = await asActor(db, "editor-a", (tx) =>
+      tx.auditLog.create({
+        data: {
+          organizationId: "org-a",
+          actorUserId: "editor-a",
+          entityId: "client-a",
+          action: "test.revocation",
+        },
+      }),
+    );
+    await migration.membership.update({
+      where: { id: "membership-editor-a" },
+      data: { active: false },
+    });
+    try {
+      await asActor(db, "editor-a", async (tx) => {
+        expect(await tx.client.findMany()).toEqual([]);
+        expect(await tx.auditLog.findMany({ where: { id: audit.id } })).toEqual(
+          [],
+        );
+        expect(
+          (
+            await tx.client.updateMany({
+              where: { id: "client-a" },
+              data: { name: "Forbidden" },
+            })
+          ).count,
+        ).toBe(0);
+      });
+    } finally {
+      await migration.membership.update({
+        where: { id: "membership-editor-a" },
+        data: { active: true },
+      });
+      await migration.auditLog.delete({ where: { id: audit.id } });
+    }
+  });
   it("runtime cannot bypass RLS or own tables", async () => {
     const roles = await db.$queryRaw<
       { rolsuper: boolean; rolbypassrls: boolean; current_user: string }[]
@@ -412,5 +488,30 @@ describe("HTTP authentication and authorization", () => {
       .poll(() => forged.getState(), { timeout: 10000 })
       .toBe("failed");
     expect(await redis.ping()).toBe("PONG");
+  });
+  it("worker revalidates permissions after a queued job loses authorization", async () => {
+    const job = await queue.add(
+      "diagnostic",
+      {
+        userId: "admin-b",
+        organizationId: "org-b",
+      },
+      { delay: 1500 },
+    );
+    await migration.membership.update({
+      where: { id: "membership-admin-b" },
+      data: { active: false },
+    });
+    try {
+      await expect
+        .poll(() => job.getState(), { timeout: 10000 })
+        .toBe("failed");
+    } finally {
+      await job.remove();
+      await migration.membership.update({
+        where: { id: "membership-admin-b" },
+        data: { active: true },
+      });
+    }
   });
 });

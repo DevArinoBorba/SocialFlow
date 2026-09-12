@@ -1,5 +1,12 @@
 # Architecture Decision Records
 
+## ADR-010 — fechamento operacional da fundação (12/09/2026)
+
+Bootstrap offline com hashing Better Auth, verificação da role runtime,
+revogação de leitura de auditoria e ensaio isolado com pg_dump/pg_restore.
+Pesquisa, licenças, manutenção, riscos e decisões estão em
+[discovery/FOUNDATION-CLOSURE.md](discovery/FOUNDATION-CLOSURE.md).
+
 ## ADR-001 --- Plataforma própria vs Postiz
 
 Status: PENDENTE. Investigar funcionalidades, API pública, self-host,

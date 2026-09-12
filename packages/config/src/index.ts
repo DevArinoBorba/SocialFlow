@@ -20,6 +20,27 @@ const schema = z.object({
 });
 export function readConfig(env: Record<string, string | undefined>) {
   const config = schema.parse(env);
+  if (config.NODE_ENV === "production") {
+    const database = new URL(config.DATABASE_URL);
+    const redis = new URL(config.REDIS_URL);
+    const passwords = [database.password, redis.password].map(
+      decodeURIComponent,
+    );
+    if (
+      database.username !== "socialflow_runtime" ||
+      passwords.some(
+        (p) => p.length < 24 || /CHANGE_ME|GENERATE_|placeholder/i.test(p),
+      ) ||
+      passwords[0] === passwords[1] ||
+      passwords.includes(config.SESSION_SECRET) ||
+      env.MIGRATION_DATABASE_URL ||
+      env.POSTGRES_PASSWORD ||
+      env.ALLOW_DEV_SEED === "true"
+    )
+      throw new Error(
+        "Production requires independent secrets and runtime-only credentials",
+      );
+  }
   if (
     config.NODE_ENV === "production" &&
     !config.APP_URL.startsWith("https://")

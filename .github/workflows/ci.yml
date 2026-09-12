@@ -25,20 +25,13 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm audit --prod --audit-level high
-      - run: node scripts/local-env.mjs .local/test.env
-      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test config --quiet
-      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test up --build --wait --wait-timeout 180
-      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test run --rm seed
-      - run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test run --rm seed
-      - run: pnpm test:integration
       - run: pnpm exec playwright install --with-deps chromium
-      - run: pnpm test:e2e
-      - if: failure()
-        run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test logs --tail 100
+      - run: pnpm test:foundation
       - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: browser-results
-          path: test-results
-      - if: always()
-        run: docker compose --env-file .local/test.env -f compose.yaml -f compose.test.yaml -p socialflow-test down
+          path: |
+            test-results/*.png
+            .local/socialflow-acceptance-*/result.json
+          include-hidden-files: true

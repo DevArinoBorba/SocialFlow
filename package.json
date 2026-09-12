@@ -10,14 +10,16 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm -r typecheck && tsc -p tsconfig.tools.json",
     "build": "pnpm -r build",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node scripts/run-tests.mjs integration",
     "test:e2e": "node scripts/run-tests.mjs e2e",
     "db:generate": "pnpm --filter @socialflow/db generate",
     "db:migrate": "pnpm --filter @socialflow/db migrate",
-    "db:seed": "pnpm --filter @socialflow/db seed"
+    "db:seed": "pnpm --filter @socialflow/db seed",
+    "db:bootstrap": "pnpm --filter @socialflow/db bootstrap",
+    "test:foundation": "node scripts/foundation-drill.mjs"
   },
   "devDependencies": {
     "@socialflow/db": "workspace:*",

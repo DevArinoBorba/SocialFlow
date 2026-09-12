@@ -21,7 +21,12 @@ import express, {
 import { fromNodeHeaders, toNodeHandler } from "better-auth/node";
 import { Redis } from "ioredis";
 import { Queue } from "bullmq";
-import { asActor, createDatabase, type Prisma } from "@socialflow/db";
+import {
+  asActor,
+  createDatabase,
+  assertRuntimeRole,
+  type Prisma,
+} from "@socialflow/db";
 import { bounded, type Config } from "@socialflow/config";
 import { clientInput, clientUpdate, isAdmin } from "@socialflow/contracts";
 import { createAuth } from "./auth.js";
@@ -36,6 +41,7 @@ class HttpError extends Error {
 }
 export async function createApplication(config: Config) {
   const db = createDatabase(config.DATABASE_URL);
+  await assertRuntimeRole(db);
   const redis = new Redis(config.REDIS_URL, {
     maxRetriesPerRequest: 1,
     connectTimeout: 2500,

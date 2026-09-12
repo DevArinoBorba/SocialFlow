@@ -5,8 +5,9 @@ export default defineConfig({
   workers: 1,
   retries: 0,
   use: {
-    baseURL: "http://localhost:3000",
-    trace: "retain-on-failure",
+    baseURL: process.env.APP_URL ?? "http://localhost:3000",
+    // Traces contain credentials and authenticated request data.
+    trace: "off",
     channel: process.env.PLAYWRIGHT_CHANNEL || undefined,
   },
   projects: [

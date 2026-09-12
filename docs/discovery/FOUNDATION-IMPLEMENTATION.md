@@ -1,5 +1,9 @@
 # Fase 1 — registro de implementação
 
+Atualização: o fechamento de 12/09/2026, correções e evidências atuais estão em
+[FOUNDATION-CLOSURE.md](FOUNDATION-CLOSURE.md). Os resultados abaixo permanecem
+como histórico da rodada anterior.
+
 Iniciada em 11/09/2026, seguindo PR-01 a PR-06. O Master Pack foi preservado. O remoto informado, https://github.com/DevArinoBorba/SocialFlow, não retornou refs na consulta inicial. Nenhum deploy externo autorizado ou realizado.
 
 ## ADR-007 — dependências e reutilização

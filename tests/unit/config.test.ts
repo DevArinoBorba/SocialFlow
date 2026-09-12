@@ -29,8 +29,30 @@ describe("configuration fails closed", () => {
         ...valid,
         NODE_ENV: "production",
         APP_URL: "https://socialflow.example.test",
+        DATABASE_URL: `postgresql://socialflow_runtime:${"d".repeat(32)}@localhost/db`,
+        REDIS_URL: `redis://:${"r".repeat(32)}@localhost:6379`,
       }).NODE_ENV,
     ).toBe("production");
+  });
+  it.each([
+    {
+      DATABASE_URL: `postgresql://socialflow_migration:${"d".repeat(32)}@localhost/db`,
+    },
+    { REDIS_URL: "redis://localhost:6379" },
+    { MIGRATION_DATABASE_URL: "postgresql://operator@localhost/db" },
+    { ALLOW_DEV_SEED: "true" },
+    { REDIS_URL: `redis://:${"d".repeat(32)}@localhost:6379` },
+  ])("rejects unsafe production credentials %j", (patch) => {
+    expect(() =>
+      readConfig({
+        ...valid,
+        NODE_ENV: "production",
+        APP_URL: "https://socialflow.example.test",
+        DATABASE_URL: `postgresql://socialflow_runtime:${"d".repeat(32)}@localhost/db`,
+        REDIS_URL: `redis://:${"r".repeat(32)}@localhost:6379`,
+        ...patch,
+      }),
+    ).toThrow();
   });
   it("bounds a stalled dependency", async () => {
     await expect(bounded(new Promise(() => {}), 5)).rejects.toThrow("timeout");

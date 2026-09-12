@@ -1,0 +1,21 @@
+# Opt-in operator tool. Never include this file in the regular deployment.
+services:
+  bootstrap:
+    profiles: [tools]
+    build: { context: . }
+    environment:
+      NODE_ENV: production
+      ALLOW_INITIAL_BOOTSTRAP: ${ALLOW_INITIAL_BOOTSTRAP:-false}
+      BOOTSTRAP_EMAIL: ${BOOTSTRAP_EMAIL:-}
+      BOOTSTRAP_NAME: ${BOOTSTRAP_NAME:-}
+      BOOTSTRAP_ORGANIZATION: ${BOOTSTRAP_ORGANIZATION:-}
+      BOOTSTRAP_PASSWORD_FILE: /run/secrets/bootstrap_password
+      MIGRATION_DATABASE_URL: postgresql://socialflow_migration:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/socialflow
+    secrets: [bootstrap_password]
+    command: [pnpm, db:bootstrap]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+    restart: "no"
+secrets:
+  bootstrap_password:
+    file: ${BOOTSTRAP_PASSWORD_FILE:?Set an operator-owned password file}

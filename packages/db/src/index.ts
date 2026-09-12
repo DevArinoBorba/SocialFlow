@@ -12,6 +12,15 @@ export function createDatabase(url: string) {
     }),
   });
 }
+export async function assertRuntimeRole(db: PrismaClient) {
+  const rows = await db.$queryRaw<{ safe: boolean }[]>`
+    SELECT current_user = 'socialflow_runtime'
+      AND NOT rolsuper AND NOT rolbypassrls AND NOT rolcreaterole AND NOT rolcreatedb
+      AND NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tableowner = current_user)
+      AND NOT EXISTS (SELECT 1 FROM pg_auth_members WHERE member = (SELECT oid FROM pg_roles WHERE rolname = current_user))
+      AS safe FROM pg_roles WHERE rolname = current_user`;
+  if (!rows[0]?.safe) throw new Error("Unsafe database runtime identity");
+}
 // Never set session-wide context: a pooled connection can serve another actor next.
 export function asActor<T>(
   db: PrismaClient,

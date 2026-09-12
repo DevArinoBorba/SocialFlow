@@ -22,6 +22,32 @@ No Windows, use `npm.cmd`/`npx.cmd` quando a política do PowerShell impedir scr
 
 ## Verificações
 
+Para aceite completo em ambiente novo, mantendo a instalação existente:
+
+```sh
+pnpm install --frozen-lockfile
+pnpm db:generate
+pnpm build
+pnpm lint
+pnpm format:check
+pnpm typecheck
+pnpm test
+pnpm exec playwright install chromium
+pnpm test:foundation
+```
+
+O último comando inclui `test:integration`, `test:e2e`, migration em volume
+vazio/repetida, seed repetido com comparação de dados/hashes, bootstrap
+concorrente e backup/restore. Ele gera `.local/socialflow-acceptance-*/test.env`
+com secrets de teste; somente `result.json` pode ser compartilhado. Portas livres
+são selecionadas automaticamente. Os containers são encerrados ao final, mas
+os volumes ficam preservados para inspeção. Cada nova execução usa outros volumes.
+No Windows, defina `DOCKER_BIN` com o caminho completo caso Docker não esteja no
+PATH e `PLAYWRIGHT_CHANNEL=chrome` se usar o navegador já instalado.
+
+As instruções abaixo são para executar suites individualmente em portas fixas;
+não substituem o ensaio de banco vazio/restore acima.
+
 ```sh
 pnpm build
 pnpm lint

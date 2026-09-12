@@ -9,6 +9,7 @@
     "generate": "prisma generate",
     "migrate": "prisma migrate deploy",
     "seed": "tsx src/seed.ts",
+    "bootstrap": "tsx src/bootstrap-cli.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

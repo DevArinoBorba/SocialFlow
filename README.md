@@ -41,6 +41,9 @@ Nunca commitar `.env`, tokens OAuth, client secrets ou chaves privadas.
 
 ## Continuidade — auditoria de 11/09/2026
 
+Fechamento da fundação de 12/09/2026: veja
+[relatório de aceite e roteiro de revisão](docs/discovery/FOUNDATION-CLOSURE.md).
+
 A inspeção local e a pesquisa de reutilização estão documentadas em
 [docs/discovery/AUDIT-2026-09-11.md](docs/discovery/AUDIT-2026-09-11.md).
 Consulte esse relatório antes de executar os prompts de implementação.

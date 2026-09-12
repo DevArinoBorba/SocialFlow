@@ -3,9 +3,10 @@ import { Worker } from "bullmq";
 import { Redis } from "ioredis";
 import { z } from "zod";
 import { readConfig, bounded } from "@socialflow/config";
-import { createDatabase, asActor } from "@socialflow/db";
+import { createDatabase, asActor, assertRuntimeRole } from "@socialflow/db";
 const config = readConfig(process.env);
 const db = createDatabase(config.DATABASE_URL);
+await assertRuntimeRole(db);
 const redis = new Redis(config.REDIS_URL, {
   maxRetriesPerRequest: null,
   connectTimeout: 2500,

@@ -9,9 +9,9 @@ const env = {
   ...values,
   NODE_ENV: "test",
   ALLOW_DEV_SEED: "true",
-  DATABASE_URL: `postgresql://socialflow_runtime:${values.RUNTIME_DB_PASSWORD}@127.0.0.1:55432/socialflow`,
-  MIGRATION_DATABASE_URL: `postgresql://socialflow_migration:${values.POSTGRES_PASSWORD}@127.0.0.1:55432/socialflow`,
-  REDIS_URL: `redis://:${values.REDIS_PASSWORD}@127.0.0.1:56379`,
+  DATABASE_URL: `postgresql://socialflow_runtime:${values.RUNTIME_DB_PASSWORD}@127.0.0.1:${values.TEST_DB_PORT ?? 55432}/socialflow`,
+  MIGRATION_DATABASE_URL: `postgresql://socialflow_migration:${values.POSTGRES_PASSWORD}@127.0.0.1:${values.TEST_DB_PORT ?? 55432}/socialflow`,
+  REDIS_URL: `redis://:${values.REDIS_PASSWORD}@127.0.0.1:${values.TEST_REDIS_PORT ?? 56379}`,
 };
 const mode = process.argv[2];
 const args =

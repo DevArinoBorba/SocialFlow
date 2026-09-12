@@ -70,3 +70,56 @@ test("viewer sees only assigned client and API rejects direct creation", async (
   );
   expect(status).toBe(403);
 });
+
+test("invalid login displays visible error alert and supports keyboard submission", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill("admin-a@socialflow.test");
+  await page.getByLabel("Senha", { exact: true }).fill("wrong-password");
+  await page.getByLabel("Senha", { exact: true }).press("Enter");
+  const alert = page.locator("p.error");
+  await expect(alert).toBeVisible();
+  await expect(alert).toContainText("Não foi possível entrar");
+});
+
+test("displays empty state when organization has no clients", async ({
+  page,
+}) => {
+  const emptyOrgId = `org-empty-${Date.now()}`;
+  await migration.organization.create({
+    data: { id: emptyOrgId, name: "Agência Vazia Teste" },
+  });
+  await migration.membership.create({
+    data: {
+      userId: "admin-a",
+      organizationId: emptyOrgId,
+      role: "ADMIN",
+    },
+  });
+  try {
+    await page.goto("/");
+    await page.getByLabel("E-mail").fill("admin-a@socialflow.test");
+    await page
+      .getByLabel("Senha", { exact: true })
+      .fill(process.env.DEV_SEED_PASSWORD!);
+    await page.getByRole("button", { name: "Entrar", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Clientes", exact: true }),
+    ).toBeVisible();
+    await page.getByLabel("Organização").selectOption(emptyOrgId);
+    await expect(
+      page.getByRole("heading", { name: "Nenhum cliente por aqui ainda" }),
+    ).toBeVisible();
+    await expect(
+      page.getByText("Crie o primeiro cliente desta organização para começar."),
+    ).toBeVisible();
+  } finally {
+    await migration.membership.deleteMany({
+      where: { organizationId: emptyOrgId },
+    });
+    await migration.organization.deleteMany({
+      where: { id: emptyOrgId },
+    });
+  }
+});
