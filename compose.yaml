@@ -1,9 +1,14 @@
 name: socialflow
+# Each key here must equal the variable name in its own ${...} reference:
+# some deployment tools only substitute required (":?") variables when the
+# environment key matches the referenced name, and silently skip it otherwise.
+# Compound values (URLs built from a password) are assembled by the
+# container's own shell at startup instead, from these self-named parts.
 x-app-env: &app-env
-  NODE_ENV: ${APP_ENV:?Set APP_ENV}
+  APP_ENV: ${APP_ENV:?Set APP_ENV}
   APP_URL: ${APP_URL:?Set APP_URL}
-  DATABASE_URL: postgresql://socialflow_runtime:${RUNTIME_DB_PASSWORD:?Set RUNTIME_DB_PASSWORD}@postgres:5432/socialflow
-  REDIS_URL: redis://:${REDIS_PASSWORD:?Set REDIS_PASSWORD}@redis:6379
+  RUNTIME_DB_PASSWORD: ${RUNTIME_DB_PASSWORD:?Set RUNTIME_DB_PASSWORD}
+  REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
   SESSION_SECRET: ${SESSION_SECRET:?Set SESSION_SECRET}
 x-health: &health
   interval: 10s
@@ -49,8 +54,13 @@ services:
     build:
       context: .
     environment:
-      MIGRATION_DATABASE_URL: postgresql://socialflow_migration:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/socialflow
-    command: [pnpm, db:migrate]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    command:
+      [
+        sh,
+        -c,
+        'export MIGRATION_DATABASE_URL="postgresql://socialflow_migration:$$POSTGRES_PASSWORD@postgres:5432/socialflow" && exec pnpm db:migrate',
+      ]
     depends_on:
       postgres: { condition: service_healthy }
     restart: "no"
@@ -59,6 +69,12 @@ services:
       context: .
       args: { SERVICE: api }
     environment: *app-env
+    command:
+      [
+        sh,
+        -c,
+        'export NODE_ENV="$$APP_ENV" DATABASE_URL="postgresql://socialflow_runtime:$$RUNTIME_DB_PASSWORD@postgres:5432/socialflow" REDIS_URL="redis://:$$REDIS_PASSWORD@redis:6379" && exec pnpm --filter @socialflow/api start',
+      ]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -77,6 +93,12 @@ services:
       context: .
       args: { SERVICE: worker }
     environment: *app-env
+    command:
+      [
+        sh,
+        -c,
+        'export NODE_ENV="$$APP_ENV" DATABASE_URL="postgresql://socialflow_runtime:$$RUNTIME_DB_PASSWORD@postgres:5432/socialflow" REDIS_URL="redis://:$$REDIS_PASSWORD@redis:6379" && exec pnpm --filter @socialflow/worker start',
+      ]
     depends_on:
       migrate: { condition: service_completed_successfully }
       redis: { condition: service_healthy }
@@ -116,11 +138,16 @@ services:
     profiles: [tools]
     build: { context: . }
     environment:
-      NODE_ENV: ${APP_ENV:?Set APP_ENV}
+      APP_ENV: ${APP_ENV:?Set APP_ENV}
       ALLOW_DEV_SEED: "true"
       DEV_SEED_PASSWORD: ${DEV_SEED_PASSWORD:-}
-      MIGRATION_DATABASE_URL: postgresql://socialflow_migration:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/socialflow
-    command: [pnpm, db:seed]
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    command:
+      [
+        sh,
+        -c,
+        'export NODE_ENV="$$APP_ENV" MIGRATION_DATABASE_URL="postgresql://socialflow_migration:$$POSTGRES_PASSWORD@postgres:5432/socialflow" && exec pnpm db:seed',
+      ]
     depends_on:
       migrate: { condition: service_completed_successfully }
 volumes:
