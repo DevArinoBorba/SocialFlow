@@ -17,4 +17,5 @@ COPY --from=build --chown=node:node /app /app
 USER node
 ARG SERVICE=api
 ENV SERVICE=$SERVICE
+EXPOSE 3000
 CMD ["sh", "-c", "exec pnpm --filter @socialflow/$SERVICE start"]

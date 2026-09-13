@@ -117,6 +117,8 @@ services:
     build:
       context: .
       args: { SERVICE: web }
+    expose:
+      - "3000"
     environment:
       NODE_ENV: production
       API_INTERNAL_URL: http://api:3001
