@@ -1,0 +1,5 @@
+# Local development overrides. Merged automatically by docker compose when no -f flag is passed.
+services:
+  web:
+    ports:
+      - "127.0.0.1:${WEB_PORT:-3000}:3000"

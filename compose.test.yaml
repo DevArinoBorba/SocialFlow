@@ -8,3 +8,5 @@ services:
     ports: ["127.0.0.1:${TEST_API_PORT:-53001}:3001"]
   worker:
     ports: ["127.0.0.1:${TEST_WORKER_PORT:-53002}:3002"]
+  web:
+    ports: ["127.0.0.1:${WEB_PORT:-3000}:3000"]
