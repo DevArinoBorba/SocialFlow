@@ -11,6 +11,7 @@ export default ts.config(
       "test-results/**",
       "playwright-report/**",
       ".impeccable/**",
+      ".local/**",
     ],
   },
   js.configs.recommended,
