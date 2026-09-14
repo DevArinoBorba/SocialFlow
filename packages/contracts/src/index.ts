@@ -34,3 +34,33 @@ export type CurrentUser = {
   memberships: Access[];
 };
 export const isAdmin = (role: string) => role === "OWNER" || role === "ADMIN";
+
+const optionalText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .max(max)
+    .optional()
+    .nullable()
+    .transform((val) => (val === "" || val === undefined ? null : val));
+
+export const brandInput = z.strictObject({
+  name: z.string().trim().min(2).max(120),
+  description: optionalText(2000),
+  targetAudience: optionalText(1000),
+  toneOfVoice: optionalText(1000),
+});
+
+export const brandUpdate = brandInput;
+
+export type Brand = {
+  id: string;
+  organizationId: string;
+  clientId: string;
+  name: string;
+  description: string | null;
+  targetAudience: string | null;
+  toneOfVoice: string | null;
+  createdAt: string | Date;
+  updatedAt: string | Date;
+};

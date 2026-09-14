@@ -30,6 +30,7 @@ async function fingerprint(db: PrismaClient) {
     db.account.findMany({ orderBy: { id: "asc" } }),
     db.organization.findMany({ orderBy: { id: "asc" } }),
     db.client.findMany({ orderBy: { id: "asc" } }),
+    db.brand.findMany({ orderBy: { id: "asc" } }),
     db.membership.findMany({ orderBy: { id: "asc" } }),
     db.auditLog.findMany({ orderBy: { id: "asc" } }),
     db.session.findMany({ orderBy: { id: "asc" } }),
@@ -68,7 +69,7 @@ try {
       const migrations = await source.$queryRaw<
         { count: bigint }[]
       >`SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL`;
-      assert.equal(Number(migrations[0]?.count), 3);
+      assert.equal(Number(migrations[0]?.count), 4);
       break;
     }
     case "seed": {
@@ -180,10 +181,11 @@ try {
         { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
       >`
         SELECT relrowsecurity, relforcerowsecurity FROM pg_class
-        WHERE oid IN ('"Client"'::regclass, '"Organization"'::regclass, '"Membership"'::regclass, '"AuditLog"'::regclass)`;
-      assert.equal(rls.length, 4);
+        WHERE oid IN ('"Client"'::regclass, '"Brand"'::regclass, '"Organization"'::regclass, '"Membership"'::regclass, '"AuditLog"'::regclass)`;
+      assert.equal(rls.length, 5);
       assert.ok(rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
       assert.equal(await runtime.client.count(), 0);
+      assert.equal(await runtime.brand.count(), 0);
       for (const suffix of ["a", "b"]) {
         const rows = await asActor(runtime, `admin-${suffix}`, (tx) =>
           tx.client.findMany(),

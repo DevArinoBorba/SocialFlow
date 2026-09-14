@@ -28,7 +28,13 @@ import {
   type Prisma,
 } from "@socialflow/db";
 import { bounded, type Config } from "@socialflow/config";
-import { clientInput, clientUpdate, isAdmin } from "@socialflow/contracts";
+import {
+  brandInput,
+  brandUpdate,
+  clientInput,
+  clientUpdate,
+  isAdmin,
+} from "@socialflow/contracts";
 import { createAuth } from "./auth.js";
 
 class HttpError extends Error {
@@ -354,6 +360,192 @@ export async function createApplication(config: Config) {
           return { jobId: job.id };
         },
         202,
+      );
+    }
+    @Get("api/organizations/:org/clients/:clientId/brands") listBrands(
+      @Req() req: Request,
+      @Res() res: Response,
+      @Param("org") org: string,
+      @Param("clientId") clientId: string,
+    ) {
+      return respond(res, () =>
+        scoped(req, org, async (tx, userId, admin) => {
+          const client = await tx.client.findFirst({
+            where: { id: clientId, organizationId: org, active: true },
+          });
+          if (!client) throw new HttpError(404, "Cliente não encontrado.");
+          if (!admin) {
+            const member = await tx.membership.findFirst({
+              where: {
+                userId,
+                organizationId: org,
+                clientId,
+                active: true,
+              },
+            });
+            if (!member) throw new HttpError(404, "Cliente não encontrado.");
+          }
+          return tx.brand.findMany({
+            where: { organizationId: org, clientId },
+            orderBy: { name: "asc" },
+            take: 100,
+          });
+        }),
+      );
+    }
+    @Get("api/organizations/:org/clients/:clientId/brands/:brandId")
+    detailBrand(
+      @Req() req: Request,
+      @Res() res: Response,
+      @Param("org") org: string,
+      @Param("clientId") clientId: string,
+      @Param("brandId") brandId: string,
+    ) {
+      return respond(res, () =>
+        scoped(req, org, async (tx, userId, admin) => {
+          const client = await tx.client.findFirst({
+            where: { id: clientId, organizationId: org, active: true },
+          });
+          if (!client) throw new HttpError(404, "Cliente não encontrado.");
+          if (!admin) {
+            const member = await tx.membership.findFirst({
+              where: {
+                userId,
+                organizationId: org,
+                clientId,
+                active: true,
+              },
+            });
+            if (!member) throw new HttpError(404, "Cliente não encontrado.");
+          }
+          const brand = await tx.brand.findFirst({
+            where: { id: brandId, organizationId: org, clientId },
+          });
+          if (!brand) throw new HttpError(404, "Marca não encontrada.");
+          return brand;
+        }),
+      );
+    }
+    @Post("api/organizations/:org/clients/:clientId/brands") createBrand(
+      @Req() req: Request,
+      @Res() res: Response,
+      @Param("org") org: string,
+      @Param("clientId") clientId: string,
+    ) {
+      return respond(
+        res,
+        () =>
+          scoped(req, org, async (tx, userId, admin) => {
+            const client = await tx.client.findFirst({
+              where: { id: clientId, organizationId: org, active: true },
+            });
+            if (!client) throw new HttpError(404, "Cliente não encontrado.");
+            let canWrite = admin;
+            if (!canWrite) {
+              const member = await tx.membership.findFirst({
+                where: {
+                  userId,
+                  organizationId: org,
+                  clientId,
+                  active: true,
+                },
+              });
+              if (!member) throw new HttpError(404, "Cliente não encontrado.");
+              if (member.role === "EDITOR") canWrite = true;
+            }
+            if (!canWrite) {
+              throw new HttpError(403, "Seu perfil não pode criar marcas.");
+            }
+            const parsed = brandInput.safeParse(req.body);
+            if (!parsed.success) {
+              throw new HttpError(
+                400,
+                "Informe dados válidos para a marca, sem campos adicionais.",
+              );
+            }
+            const brand = await tx.brand.create({
+              data: {
+                name: parsed.data.name,
+                description: parsed.data.description,
+                targetAudience: parsed.data.targetAudience,
+                toneOfVoice: parsed.data.toneOfVoice,
+                organizationId: org,
+                clientId,
+              },
+            });
+            await tx.auditLog.create({
+              data: {
+                organizationId: org,
+                actorUserId: userId,
+                entityId: brand.id,
+                action: "brand.created",
+              },
+            });
+            return brand;
+          }),
+        201,
+      );
+    }
+    @Patch("api/organizations/:org/clients/:clientId/brands/:brandId")
+    updateBrand(
+      @Req() req: Request,
+      @Res() res: Response,
+      @Param("org") org: string,
+      @Param("clientId") clientId: string,
+      @Param("brandId") brandId: string,
+    ) {
+      return respond(res, () =>
+        scoped(req, org, async (tx, userId, admin) => {
+          const client = await tx.client.findFirst({
+            where: { id: clientId, organizationId: org, active: true },
+          });
+          if (!client) throw new HttpError(404, "Cliente não encontrado.");
+          let canWrite = admin;
+          if (!canWrite) {
+            const member = await tx.membership.findFirst({
+              where: {
+                userId,
+                organizationId: org,
+                clientId,
+                active: true,
+              },
+            });
+            if (!member) throw new HttpError(404, "Cliente não encontrado.");
+            if (member.role === "EDITOR") canWrite = true;
+          }
+          if (!canWrite) {
+            throw new HttpError(403, "Seu perfil não pode editar marcas.");
+          }
+          const brand = await tx.brand.findFirst({
+            where: { id: brandId, organizationId: org, clientId },
+          });
+          if (!brand) throw new HttpError(404, "Marca não encontrada.");
+          const parsed = brandUpdate.safeParse(req.body);
+          if (!parsed.success) {
+            throw new HttpError(
+              400,
+              "Informe dados válidos para a marca, sem campos adicionais.",
+            );
+          }
+          const updated = await tx.brand.update({
+            where: { organizationId_id: { organizationId: org, id: brandId } },
+            data: {
+              name: parsed.data.name,
+              description: parsed.data.description,
+              targetAudience: parsed.data.targetAudience,
+              toneOfVoice: parsed.data.toneOfVoice,
+            },
+          });
+          await tx.auditLog.create({
+            data: {
+              organizationId: org,
+              actorUserId: userId,
+              entityId: brandId,
+              action: "brand.updated",
+            },
+          });
+          return updated;
+        }),
       );
     }
   }

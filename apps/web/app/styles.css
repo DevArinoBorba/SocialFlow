@@ -30,7 +30,8 @@ a {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button {
@@ -51,7 +52,8 @@ button:disabled {
   cursor: wait;
 }
 input,
-select {
+select,
+textarea {
   width: 100%;
   border: 1px solid #84998c;
   border-radius: var(--radius);
@@ -61,8 +63,13 @@ select {
   min-height: 46px;
   caret-color: var(--accent);
 }
+textarea {
+  min-height: 96px;
+  resize: vertical;
+}
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 button:focus-visible,
 a:focus-visible {
   outline: 3px solid var(--focus);
@@ -249,6 +256,72 @@ small {
   background: #e1eddf;
   border-radius: 4px;
 }
+.client-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.breadcrumb {
+  margin-bottom: 24px;
+}
+.brand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 24px;
+}
+.brand-card {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+  padding: 24px;
+}
+.brand-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 12px;
+}
+.brand-header h3 {
+  font-size: 1.25rem;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.brand-description {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  margin: 0 0 16px;
+  overflow-wrap: anywhere;
+}
+.brand-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  background: var(--paper);
+  padding: 16px;
+  border-radius: var(--radius);
+}
+.brand-item strong {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
+}
+.brand-item p {
+  margin: 0;
+  font-size: 0.9rem;
+  overflow-wrap: anywhere;
+}
+.form-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 20px;
+}
 .create-form {
   border: 1px solid var(--line);
   padding: 28px;
@@ -334,6 +407,9 @@ footer {
     flex-direction: column;
   }
   .fields {
+    grid-template-columns: 1fr;
+  }
+  .brand-grid {
     grid-template-columns: 1fr;
   }
   .organization {

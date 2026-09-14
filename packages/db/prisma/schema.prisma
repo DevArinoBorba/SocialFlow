@@ -77,6 +77,7 @@ model Organization {
   createdAt DateTime @default(now())
   clients Client[]
   memberships Membership[]
+  brands Brand[]
 }
 model Client {
   id String @id @default(uuid())
@@ -87,6 +88,7 @@ model Client {
   active Boolean @default(true)
   createdAt DateTime @default(now())
   memberships Membership[]
+  brands Brand[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -102,6 +104,21 @@ model Membership {
   active Boolean @default(true)
   @@unique([userId, organizationId, clientId])
   @@index([userId, organizationId])
+}
+model Brand {
+  id String @id @default(uuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  clientId String
+  client Client @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  name String
+  description String?
+  targetAudience String?
+  toneOfVoice String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([organizationId, id])
+  @@index([organizationId, clientId])
 }
 model AuditLog {
   id String @id @default(uuid())
