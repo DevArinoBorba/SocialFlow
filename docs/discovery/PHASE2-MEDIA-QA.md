@@ -174,9 +174,9 @@ Após a correção integral dos três achados da revisão final do Item 6, o có
    - **Evidência**: Resposta `503 Service Unavailable`, registro mantido em status `uploading` sem publicação, emissão de `media_upload_failed` e `media_reconciliation_needed`, 0 eventos `media.created` e 0 eventos `media.upload_failed`, conteúdo inacessível (`GET /content` retorna 404).
 
 5. **Sanitização e Desacoplamento do `correlationId`**:
-   - O servidor reutiliza prioritariamente o identificador interno `X-Request-Id` gerado pelo Express ou `randomUUID()` v4 (UUID aleatório), que é o identificador soberano nos logs (`correlationId`).
-   - O cabeçalho fornecido pelo cliente `x-correlation-id` é mantido separado (`clientCorrelationId`) e rigorosamente sanitizado via regex `/^[a-zA-Z0-9_-]{1,64}$/`. Entradas inválidas, com quebra de linha, espaços, caracteres de injeção ou tamanho excessivo (>64 caracteres) são descartadas (convertidas para `null`).
-   - 10 novos testes unitários dedicados em `tests/unit/media.test.ts` comprovam a sanitização e a validação do formato UUID aleatório v4.
+   - O servidor reutiliza prioritariamente o identificador interno `X-Request-Id` gerado pelo middleware da aplicação com `randomUUID()` ou um novo UUID v4 aleatório e não determinístico, que é o identificador soberano nos logs (`correlationId`).
+   - O cabeçalho fornecido pelo cliente `x-correlation-id` é mantido separado (`clientCorrelationId`) e rigorosamente sanitizado via regex `/^[a-zA-Z0-9_-]{1,64}$/`. Após remover espaços nas extremidades, entradas com formato inválido, espaços internos ou tamanho superior a 64 caracteres são descartadas (convertidas para `null`).
+   - 3 testes unitários dedicados em `tests/unit/media.test.ts` comprovam a sanitização e a validação do formato UUID aleatório v4.
 
 ---
 
@@ -246,3 +246,11 @@ Screenshots reais inspecionados em `test-results/`:
    - Definir exclusivamente no serviço `api` as 4 variáveis dedicadas (`MEDIA_S3_ENDPOINT`, `MEDIA_S3_BUCKET`, `MEDIA_S3_ACCESS_KEY_ID`, `MEDIA_S3_SECRET_ACCESS_KEY`) com HTTPS obrigatório.
 3. **Plano Operacional de Storage**:
    - Elaborar procedimento de cópia/replicação independente para os objetos de mídia no R2 antes de promover o sistema a produção.
+
+### Complemento local do Item 6 — 16/09/2026
+
+Corrigido `markedFailed` nos dois caminhos: a recuperação só é considerada persistida após `access()` resolver, incluindo a confirmação da transação. Se essa confirmação falhar, o log de reconciliação é emitido. Ambos os logs de reconciliação agora incluem `stage`.
+
+Validação desta revisão: 26 testes aprovados em `tests/unit/media-handler.test.ts` e `tests/unit/media.test.ts`; lint dos arquivos de código alterados e checagens de tipos da API e ferramentas aprovados. Os 8 novos casos executam HTTP em loopback, validação real da imagem e o handler real, com armazenamento e persistência em memória. Cobrem headers ignorados em `production`, `development` e `test`, recuperação nos dois estágios, preservação do 404 após perda do vínculo e falha na confirmação da recuperação. Verificam UUID v4 interno, descarte do identificador externo excessivo e ausência da credencial sentinela dos erros nos logs e respostas.
+
+Limite: esses testes não comprovam RLS nem integração com PostgreSQL/MinIO. `.local/media-integration-item6.log` permanece como evidência histórica de 48 testes; a integração não foi reexecutada nesta revisão. Registro local: `.local/media-item6-local-review.log`. Sem acesso à VPS, commit, push ou deploy.

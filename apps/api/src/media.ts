@@ -334,7 +334,7 @@ export function registerMedia(
           );
           let markedFailed = false;
           try {
-            await access(req, true, async (tx, userId) => {
+            markedFailed = await access(req, true, async (tx, userId) => {
               const updated = await tx.mediaAsset.updateMany({
                 where: { ...where(req), status: "uploading" },
                 data: { status: "failed" },
@@ -347,8 +347,8 @@ export function registerMedia(
                   param(req, "id"),
                   "media.upload_failed",
                 );
-                markedFailed = true;
               }
+              return updated.count > 0;
             });
           } catch {
             // best-effort reconciliation
@@ -357,6 +357,7 @@ export function registerMedia(
             console.warn(
               JSON.stringify({
                 event: "media_reconciliation_needed",
+                stage: "storage_put",
                 organizationId: param(req, "org"),
                 clientId: param(req, "clientId"),
                 assetId: param(req, "id"),
@@ -406,7 +407,7 @@ export function registerMedia(
           );
           let markedFailed = false;
           try {
-            await access(req, true, async (tx, userId) => {
+            markedFailed = await access(req, true, async (tx, userId) => {
               const updated = await tx.mediaAsset.updateMany({
                 where: { ...where(req), status: "uploading" },
                 data: { status: "failed" },
@@ -419,8 +420,8 @@ export function registerMedia(
                   param(req, "id"),
                   "media.upload_failed",
                 );
-                markedFailed = true;
               }
+              return updated.count > 0;
             });
           } catch {
             // caller's authorization revoked or database down
@@ -429,6 +430,7 @@ export function registerMedia(
             console.warn(
               JSON.stringify({
                 event: "media_reconciliation_needed",
+                stage: "database_commit",
                 organizationId: param(req, "org"),
                 clientId: param(req, "clientId"),
                 assetId: param(req, "id"),
