@@ -65,103 +65,141 @@ Rollback de aplicação: mantenha imagem/commit anterior e restaure apenas se co
 
 ## Backup e restore
 
-### Arquitetura de Backup Criptografado
+### Estado operacional (verificação de 15/09/2026)
 
-O SocialFlow utiliza backup automatizado do PostgreSQL com criptografia assimétrica ponta a ponta e transmissão para armazenamento de objetos compatível com S3 (Cloudflare R2):
+Bucket dedicado `socialflow-backups`, prefixo `backups/socialflow/homolog`.
+Configuração protegida: `/root/.config/socialflow/backup.env` (0600).
+Scripts: `/root/scripts/backup/`. Não exibir configuração, cookies, URLs
+assinadas, senhas ou chaves em logs. Variáveis passadas por `docker -e` ainda
+podem ser lidas por administradores via inspect; não representam isolamento
+contra root ou acesso ao daemon Docker.
 
-1. **Geração consistente**: Execução de `pg_dump -Fc` pelo usuário `socialflow_migration` dentro do container de banco de dados.
-2. **Validação estrutural**: Verificação do catálogo do dump via `pg_restore -l` antes de qualquer transmissão.
-3. **Criptografia assimétrica**: Criptografia usando a chave pública GPG (`SocialFlow Backup <security@oriumdigital.com.br>`) na VPS. A chave privada de recuperação **não existe na VPS**, ficando custodiada exclusivamente com o operador (Arino Borba, OWNER). A separação de custódia (VPS só decripta com a pública; só o operador decripta) foi demonstrada em ambiente de teste isolado — a alegação de cofre físico/MFA é atestada pelo operador e não verificável por este repositório.
-4. **Integridade**: Geração do checksum SHA256 do artefato criptografado (`.sha256`).
-5. **Transmissão segura**: Upload para Cloudflare R2 utilizando container efêmero `rclone/rclone` (versão fixa, ver abaixo), com credenciais passadas como variáveis de ambiente do container (nunca em argumento de linha de comando, que ficaria visível via `docker inspect`/`ps` a qualquer usuário local).
-6. **Semântica de sucesso**: geração local do dump e envio externo confirmado são estados **distintos e registrados separadamente**. Ausência de credenciais R2 ou falha de upload nunca é reportada como sucesso de backup externo: `last_backup.json` registra `status: "success_local_only"` nesse caso e **não** cria/atualiza `last_successful_remote_backup.json` — apenas um upload verificado (tamanho conferido no destino) atualiza esse segundo arquivo, que é a única fonte válida para RPO/monitoramento.
-7. **Retenção e isolamento**: Prunagem automática de arquivos com mais de 30 dias restrita estritamente ao prefixo do SocialFlow (`backups/socialflow/homolog/`), preservando backups existentes fora do escopo.
-8. **Proteção de concorrência**: `flock` exclusivo via descritor de arquivo impede execuções concorrentes acidentais.
-9. **Alertas e monitoramento**: Webhook para Discord relatando sucesso completo (local+remoto), sucesso local apenas (aviso, sem envio externo) ou falha crítica, além de registro em `/root/backups/socialflow/last_backup.json`. Um verificador independente (`check-backup-freshness.sh`) detecta atraso mesmo se o cron do backup parar de rodar — ver seção de agendamento.
+O token permanente R2 deve ter **Object Read & Write**, limitado ao bucket
+SocialFlow. A política desse token usa recursos Account/Bucket, não prefixos.
+Para recuperação, preferir credencial separada Object Read only ou GETs
+assinados de curta duração. Não inferir o escopo efetivamente configurado
+apenas porque uma operação S3 teve sucesso.
+Fonte: [autenticação oficial R2](https://developers.cloudflare.com/r2/api/tokens/).
 
-A imagem `rclone/rclone` é fixada em uma versão explícita (atualmente `1.68.2`, não `:latest`) nos três scripts que a usam, para que uma mudança na imagem upstream nunca altere o comportamento de upload/download/retenção sem uma atualização deliberada e re-execução do drill.
+### Geração, envio e recuperação são estados distintos
 
-### Configuração na VPS
+- `last_backup.json`: resultado da execução local, com `success_local_only`,
+  `success_remote` ou `failed`.
+- `last_successful_remote_backup.json`: atualizado somente após upload de
+  ambos os arquivos, tamanho exatamente igual, leitura integral do ciphertext
+  e SHA256 correspondente, mais leitura e comparação do checksum remoto.
+  Uma falha preserva o marcador anterior.
+- Recuperação: evidência separada do ensaio. Upload confirmado não prova
+  restore nem disponibilidade da aplicação.
 
-Arquivo de configuração em `/root/.config/socialflow/backup.env` com permissões estritas `0600`:
+A criptografia usa a chave pública GPG na VPS. A privada é utilizada pelo GPG
+no computador de recuperação; nunca deve ser copiada para a VPS. O operador
+confirmou custódia externa nesta conversa; cofre/MFA não foram inspecionados.
+Rclone fixado em `1.68.2`; atualização exige verificação deliberada.
 
-```sh
-# /root/.config/socialflow/backup.env (chmod 0600)
-POSTGRES_USER=socialflow_migration
-POSTGRES_DB=socialflow
-GPG_RECIPIENT="SocialFlow Backup"
-R2_ENDPOINT="https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
-R2_BUCKET="socialflow-backups"
-R2_PREFIX="backups/socialflow/homolog"
-R2_ACCESS_KEY_ID="<R2_ACCESS_KEY_ID>"
-R2_SECRET_ACCESS_KEY="<R2_SECRET_ACCESS_KEY>"
-RETENTION_DAYS=30
-DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/..."
+### Agendamento real e fuso
+
+VPS: Ubuntu 22.04, cron `3.0pl1-137ubuntu3`, fuso `America/Sao_Paulo`.
+Este cron interpreta as linhas no fuso do daemon/sistema. Definir `TZ=UTC`
+para um comando não muda o horário de disparo. Não depender de `CRON_TZ`
+sem suporte comprovado no cron instalado.
+
+| Tarefa            | Linha atual | America/Sao_Paulo | UTC   | America/Cuiaba               |
+| ----------------- | ----------- | ----------------- | ----- | ---------------------------- |
+| Backup            | `0 0 * * *` | 00:00             | 03:00 | 23:00 do dia anterior ao UTC |
+| Monitor de atraso | `0 6 * * *` | 06:00             | 09:00 | 05:00                        |
+
+Disparo automático de 15/09 às 03:00 UTC confirmado pelo marcador e pelo
+alerta recebido pelo operador. O log do watchdog confirma execução posterior.
+Preservar os demais agendamentos da VPS compartilhada ao editar cron.
+
+O watchdog é independente da entrada de backup, mas depende do mesmo cron
+e da mesma VPS. **Não detecta queda total da VPS nem a parada do daemon cron.**
+Um monitor externo de ausência de sinal permanece pendente. O limite é 26h;
+com execução diária às 09:00 UTC, a primeira falha de backup pode ser percebida
+cerca de 30h após o último backup, não imediatamente ao ultrapassar 26h.
+Datas inválidas/futuras e ausência de marcador causam falha explícita.
+
+### Retenção e primeiro ensaio
+
+`RETENTION_DAYS=0` desativa exclusões; atualmente a configuração persistente
+na VPS está em 30 dias (já estava assim quando esta retomada começou).
+O ensaio manual de 15/09 usou uma configuração temporária protegida que carrega
+a original e redefine `RETENTION_DAYS=0` e `DISCORD_WEBHOOK_URL=""`.
+Não houve exclusão de retenção nem envio de teste nesse ensaio.
+Não usar a raiz de bucket ou prefixo compartilhado como destino de retenção.
+A limpeza atual usa `rclone delete --min-age`; uma falha nessa limpeza ainda é
+ignorada pelo script: sucesso do upload não comprova sucesso da retenção.
+
+### Recuperação reproduzível fora da VPS
+
+O ensaio operacional revisado é `scripts/backup/verify-real-recovery.mjs`:
+
+```powershell
+node scripts/backup/verify-real-recovery.mjs
 ```
 
-### Execução e Agendamento
+Requer Windows com Node 24, Git Bash/GPG, Docker Desktop e SSH autorizado.
+O caminho de Docker pode ser definido em `DOCKER_BIN`. A chave já custodiada
+fica em `.local/recovery/socialflow-recovery.sec.key`; o programa não lê seu
+conteúdo, apenas a entrega ao GPG. Não gerar nem substituir essa chave.
 
-- **Execução manual**:
-  ```sh
-  /root/scripts/backup/socialflow-backup.sh
-  ```
-- **Agendamento diário via cron, com fuso explícito (03:00 UTC)**: confirme antes o fuso real do crond da VPS com `timedatectl` e `date -u`; o `TZ=UTC` abaixo remove a ambiguidade independentemente da configuração do sistema, mas **não foi verificado nesta revisão** por falta de acesso à VPS real:
-  ```sh
-  TZ=UTC
-  0 3 * * * /root/scripts/backup/socialflow-backup.sh >> /var/log/socialflow-backup.log 2>&1
-  ```
-- **Verificador independente de atraso** (detecta backup atrasado mesmo se a linha acima for removida, o crond travar, ou o script falhar silenciosamente): agende em um horário **diferente** do backup, por exemplo:
-  ```sh
-  TZ=UTC
-  30 4 * * * /root/scripts/backup/check-backup-freshness.sh >> /var/log/socialflow-backup-freshness.log 2>&1
-  ```
-  Este script só lê `last_successful_remote_backup.json` (nunca invoca `socialflow-backup.sh`), então continua funcionando como sentinela mesmo se a entrada de cron do backup for apagada.
+O script referencia as imagens da versão `b50ded1eae3149cbb796fca8ebf40a04b59a6c47`
+instalada na VPS. Verificar essa referência a cada mudança de versão:
 
-### Procedimento de Recuperação de Desastres
+1. Obtém os IDs reais de API e web. Se necessário, transfere as imagens via
+   `docker image save` por SSH para `docker image load`, sem deploy. Verifica
+   identidade local/remota. Um nome `latest` não comprova equivalência.
+2. Usa a configuração R2 na VPS somente para listar e assinar dois GETs com
+   validade de dez minutos. As URLs ficam na memória e não são registradas.
+3. Baixa os bytes **diretamente do R2 para o computador de recuperação**,
+   confere SHA256 e descriptografa localmente em keyring temporário.
+4. Cria rede Docker `--internal`, sem portas públicas, e banco/Redis com
+   dados em tmpfs. Restaura com `--no-owner --single-transaction --exit-on-error`
+   usando migration como dono; não toca em volumes existentes.
+5. Verifica migrations, donos, atributos de roles, grants selecionados,
+   RLS/FORCE RLS e ausência de default grants amplos para runtime.
+6. Cria usuários efêmeros somente no banco restaurado, com senha aleatória,
+   para testar login e isolamento. Se faltar segunda organização ativa,
+   cria uma fixture identificada como sintética no banco descartável.
+7. Valida aplicação restaurada e acesso autorizado/negado. Compara os usuários
+   e contas originais restaurados antes/depois sem registrar seus dados.
+8. Remove apenas containers/rede/arquivos temporários desta execução.
+   Grava resultado sem segredos em `.local/sfverify-*/result.json`.
 
-`scripts/backup/socialflow-restore.sh` executa o procedimento completo e é a via oficial (o passo a passo manual abaixo descreve o que ele faz por baixo, para auditoria ou execução manual se o script não estiver disponível):
+A transferência de imagens e assinatura dependem de acesso à VPS neste
+procedimento. Isso prova recuperação da cópia externa, mas não independência
+operacional em uma perda total da VPS: ainda é necessário disponibilizar
+imagens e uma credencial de recuperação fora dela.
 
-```sh
-# Sem argumento: baixa o mais recente do R2 configurado em backup.env.
-# Um caminho local só deve ser usado para depuração — não conta como
-# evidência de recuperação a partir do destino externo (ver ponto 2 abaixo).
-BACKUP_CONFIG_FILE=/root/.config/socialflow/backup.env \
-  /root/scripts/backup/socialflow-restore.sh
-```
+O `socialflow-restore.sh` continua disponível para diagnóstico em Linux; exige
+checksum e permite `INIT_SQL_SCRIPT` para deployments fora do checkout.
+Seu healthcheck/401 e teste SQL de ator não substituem login HTTP real. Para
+aceite operacional, usar o ensaio acima e examinar o resultado completo.
 
-Passo a passo equivalente:
+### Métricas e alertas
 
-1. **Baixar artefato e checksum do R2** (não de uma cópia local/manual — isso é o que precisa ser comprovado; ver `DOWNLOAD_SOURCE`/"Backup source exercised" na saída do script, que deve começar com `r2:`).
-2. **Conferir SHA256** contra o arquivo `.sha256` companheiro.
-3. **Descriptografar fora da VPS** usando a chave privada custodiada (nunca a mesma chave/keyring usado para criptografar na VPS).
-4. **Subir PostgreSQL 17.11 isolado em rede Docker dedicada e descartável** (nunca a rede de produção), com roles inicializadas por `infra/postgres/init.sh`.
-5. **Criar banco limpo e restaurar** com `pg_restore --exit-on-error --single-transaction --no-owner`.
-6. **Validar invariantes de segurança**, cobrindo **todas** as tabelas de `public` dinamicamente (não uma lista fixa que fica desatualizada a cada tabela nova):
-   - Migrations Prisma aplicadas.
-   - RLS e FORCE RLS ativos em `Brand`, `Client`, `Organization`, `Membership`, `AuditLog`.
-   - **Todas** as tabelas de `public` pertencem a `socialflow_migration`; nenhuma pertence a `socialflow_runtime` (ownership verificado dinamicamente contra `pg_tables`, não uma lista fixa de 3 tabelas).
-   - Role `socialflow_runtime` sem `SUPERUSER`, `BYPASSRLS`, `CREATEDB` ou `CREATEROLE`.
-   - Role `socialflow_runtime` sem `DELETE` em `User`, `Organization`, `Membership`, `Client`, `Brand`, `AuditLog`, `Account` (apenas as tabelas efêmeras `Session`/`Verification`/`RateLimit` permitem `DELETE`, por desenho).
-7. **Subir a aplicação isolada na mesma rede descartável** apontando para o banco restaurado com a role `socialflow_runtime`, validar `GET /health/ready` e confirmar que uma requisição não autenticada a uma rota protegida é rejeitada (401) — prova que autenticação funciona contra o esquema restaurado, sem precisar de credenciais reais de nenhum usuário. `socialflow-restore.sh` faz isso automaticamente se a imagem da API estiver disponível localmente (`SOCIALFLOW_APP_IMAGE`); caso contrário, reporta `[PENDING]` explicitamente — trate como validação pendente, não como aprovada.
-8. **Destruir containers, rede e arquivos temporários** ao final (o script faz isso via `trap`).
+Medir do início da obtenção de imagens/acessos e download até o fim das
+validações. Registrar separadamente cache de imagens e escopo coberto.
+Duração de `pg_restore` ou backup não é RTO completo. A retomada do domínio,
+TLS, detecção do incidente e decisão do operador não são medidas neste ensaio.
 
-O tempo total reportado como RTO cobre o procedimento inteiro, do início da localização/download do artefato até a validação concluída — não apenas o passo de `pg_restore` isoladamente. O RPO reportado é a idade do último backup **externo confirmado** (`last_successful_remote_backup.json`), nunca a data do último registro de auditoria (que reflete quando o sistema de origem escreveu dado, não quando esse dado foi copiado com segurança para fora da VPS).
+Idade do último upload é **frescor do backup**, não comprovação do RPO real.
+O RPO depende do snapshot consistente recuperado e do instante do incidente;
+o marcador atual registra término de upload, não o instante exato do snapshot.
+Não usar data de auditoria como substituto dessa evidência.
 
-### Verificador de Frescor (independente do cron de backup)
+Webhook Discord: teste anterior autorizado, HTTP 204 e recebimento confirmado
+pelo operador. O print comprova recebimento do alerta automático. Não repetir
+mensagens de teste sem autorização. O nome do canal/servidor não foi informado.
 
-`scripts/backup/check-backup-freshness.sh` lê apenas `last_successful_remote_backup.json` e sai com código 0 (fresco), 1 (atrasado além do limite) ou 2 (nunca houve backup externo confirmado). Por não invocar `socialflow-backup.sh` nem depender do seu cron, continua detectando atraso mesmo se essa entrada de cron for removida ou o crond falhar. Deve rodar em um horário de cron **separado** do backup (ver seção de agendamento).
+Testes direcionados: `scripts/backup/test-upload-confirmation.sh` executa em
+container Linux descartável, com `/repo` montado somente leitura e sem rede.
+Cobre sete casos de confirmação de upload e cinco de frescor. O ensaio MinIO
+antigo continua disponível, mas não equivale ao R2 real.
 
-### Ensaio Automatizado Contínuo
-
-O repositório inclui `scripts/backup/drill-backup-recovery.mjs`, que executa os scripts de produção reais (não uma reimplementação paralela) contra um destino S3 compatível local (MinIO, sem qualquer credencial real do R2) e valida 25 verificações: geração e separação de custódia GPG (o keyring "só público" simulando a VPS comprovadamente não consegue descriptografar), roundtrip de criptografia, corte/corrupção/adulteração, retenção com arquivos realmente com data retroativa, upload real, listagem independente no bucket, download real a partir do S3 (não cópia manual) seguido de descriptografia/restauração/validação completa, verificação dinâmica de ownership/grants, checagem de saúde/autenticação da aplicação restaurada, verificador de frescor (fresco/atrasado/nunca), proteção de concorrência via `flock` real (container Linux) e ausência de referências a `:latest` nas imagens rclone. Execute via:
-
-```sh
-node scripts/backup/drill-backup-recovery.mjs
-```
-
-Pré-requisito: um stack de teste do SocialFlow rodando localmente (ex.: `docker compose -f compose.yaml -f compose.test.yaml up`) com um container Postgres cujo nome contenha `socialflow`; se a imagem da API de teste também existir localmente, a validação de aplicação (passo 7) roda automaticamente, senão é reportada como pendência explícita.
-
-Redis usa AOF e volume persistente. Nesta fase contém somente diagnósticos descartáveis; PostgreSQL é a fonte de verdade de identidade e autorização. Antes das fases de publicação, implementar persistência de intenção/outbox e reconciliação, conforme discovery.
+Redis contém diagnósticos descartáveis nesta fase; PostgreSQL é a fonte de
+verdade. Filas de publicação futuras exigirão persistência/reconciliação própria.
 
 ## Incidentes e recursos
 

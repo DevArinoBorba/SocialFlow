@@ -61,7 +61,7 @@ if [[ -z "$BACKUP_SRC" ]]; then
       exit 1
     fi
     docker run --rm "${RCLONE_ENV_ARGS[@]}" -v "${RECOVERY_DIR}:/data" "$RCLONE_IMAGE" copy "${REMOTE_TARGET}/${LATEST_NAME}" /data/
-    docker run --rm "${RCLONE_ENV_ARGS[@]}" -v "${RECOVERY_DIR}:/data" "$RCLONE_IMAGE" copy "${REMOTE_TARGET}/${LATEST_NAME%.dump.gpg}.sha256" /data/ || true
+    docker run --rm "${RCLONE_ENV_ARGS[@]}" -v "${RECOVERY_DIR}:/data" "$RCLONE_IMAGE" copy "${REMOTE_TARGET}/${LATEST_NAME%.dump.gpg}.sha256" /data/
     BACKUP_SRC="${RECOVERY_DIR}/${LATEST_NAME}"
     DOWNLOAD_SOURCE="r2:${R2_BUCKET}/${R2_PREFIX}"
   else
@@ -91,6 +91,10 @@ echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting recovery verification for: $BA
 
 # 2. Check SHA256 if .sha256 companion exists
 CHECKSUM_FILE="${BACKUP_SRC%.dump.gpg}.sha256"
+if [[ ! -s "$CHECKSUM_FILE" ]]; then
+  echo '[ERROR] Required checksum companion is missing or empty.' >&2
+  exit 3
+fi
 if [[ -f "$CHECKSUM_FILE" ]]; then
   EXPECTED_SHA256="$(cut -d' ' -f1 < "$CHECKSUM_FILE")"
   ACTUAL_SHA256="$(sha256sum "$BACKUP_SRC" | cut -d' ' -f1)"

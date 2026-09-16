@@ -5,8 +5,9 @@
 # reads the "last successful external backup" marker and alerts if it is
 # missing or stale. It must be scheduled as a SEPARATE cron/systemd-timer
 # entry (different time of day) from the backup job itself, so that if the
-# backup cron entry is ever removed, disabled, or the box's cron daemon dies,
-# this watchdog still fires and detects the staleness -- a check that only
+# backup cron entry is removed or disabled, this watchdog can still detect
+# staleness. It cannot run if its own scheduler or the VPS is unavailable.
+# A check that only
 # runs as a side effect of the backup script succeeding cannot do that.
 #
 # Exit codes: 0 = fresh, 1 = stale, 2 = never backed up / marker missing.
@@ -42,7 +43,7 @@ if [[ ! -f "$REMOTE_STATUS_FILE" ]]; then
   exit 2
 fi
 
-LAST_TS="$(grep -o '"timestamp": *"[^"]*"' "$REMOTE_STATUS_FILE" | head -n1 | cut -d'"' -f4)"
+LAST_TS="$(grep -o '"timestamp": *"[^"]*"' "$REMOTE_STATUS_FILE" | head -n1 | cut -d'"' -f4 || true)"
 if [[ -z "$LAST_TS" ]]; then
   MSG="Arquivo ${REMOTE_STATUS_FILE} presente mas sem timestamp legivel."
   echo "[CRITICAL] $MSG" >&2
@@ -50,11 +51,23 @@ if [[ -z "$LAST_TS" ]]; then
   exit 2
 fi
 
-LAST_EPOCH="$(date -u -d "$LAST_TS" +%s)"
+if [[ ! "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || ! LAST_EPOCH="$(date -u -d "$LAST_TS" +%s 2>/dev/null)"; then
+  MSG='Configuracao de idade ou timestamp de backup invalido.'
+  echo "[CRITICAL] $MSG" >&2
+  send_discord_alert "$MSG"
+  exit 2
+fi
 NOW_EPOCH="$(date -u +%s)"
-AGE_HOURS=$(( (NOW_EPOCH - LAST_EPOCH) / 3600 ))
+AGE_SECONDS=$((NOW_EPOCH - LAST_EPOCH))
+AGE_HOURS=$((AGE_SECONDS / 3600))
+if [[ "$AGE_SECONDS" -lt 0 ]]; then
+  MSG='Timestamp de backup esta no futuro; conferir os relogios.'
+  echo "[CRITICAL] $MSG" >&2
+  send_discord_alert "$MSG"
+  exit 2
+fi
 
-if [[ "$AGE_HOURS" -gt "$MAX_AGE_HOURS" ]]; then
+if [[ "$AGE_SECONDS" -gt $((MAX_AGE_HOURS * 3600)) ]]; then
   MSG="Ultimo backup externo confirmado foi ha ${AGE_HOURS}h (limite ${MAX_AGE_HOURS}h). Verifique o cron e o script socialflow-backup.sh na VPS."
   echo "[CRITICAL] $MSG" >&2
   send_discord_alert "$MSG"

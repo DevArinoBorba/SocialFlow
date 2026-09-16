@@ -1,3 +1,165 @@
+# Backup e recuperação — verificação operacional de 15/09/2026
+
+**Parecer: envio real, recuperação isolada de web/API e execução automática
+comprovados. Recuperação independente de uma perda total da VPS ainda pendente.**
+
+Esta seção substitui as conclusões do histórico de 14/09 preservado abaixo.
+Em particular, o histórico não comprova RPO pelo horário de upload, não prova
+RTO completo por uma etapa parcial, nem equivalência de imagens pelo nome
+`latest`. `TZ=UTC` não determina o horário do cron Ubuntu instalado.
+
+## Resultado atual por etapa
+
+| Etapa                         | Resultado e evidência                                                                                                                                                                               |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Validação local anterior      | Histórico 25/25 MinIO; não repetido integralmente nesta retomada.                                                                                                                                   |
+| Backup automático             | Objeto `socialflow_backup_20260915_030001.dump.gpg`, marcador `success_remote` às 03:00:14 UTC, 15.336 bytes. Print do operador mostra alerta recebido.                                             |
+| Integridade do automático     | Em 15/09, leitura integral do R2 produziu `be65184dedbeba4dc12e3357420378e43e95ee98e3fd873f7c99333524668818`, igual ao checksum remoto e ao marcador.                                               |
+| Novo upload real com correção | `socialflow_backup_20260915_133033.dump.gpg`, 15.338 bytes, `success_remote` às 13:30:39 UTC, 6s; leitura integral e checksum confirmados. Retenção e mensagens desativadas somente nesta execução. |
+| Recuperação real              | Novo objeto baixado diretamente do R2 para Windows/Docker, descriptografado pelo GPG local, restaurado em rede interna descartável, web e API testadas.                                             |
+| Agendamento ativo             | Backup `0 0 * * *` e watchdog `0 6 * * *`, já existentes, preservados. Log do watchdog confirma execução e resultado fresco.                                                                        |
+| Alertas testados              | Teste anterior autorizado: HTTP 204 e recebimento confirmado. Alerta automático confirmado pelo print. Nenhuma nova mensagem de teste enviada nesta retomada.                                       |
+| Queda total da VPS            | Não coberta pelo watchdog local; monitor externo ainda não configurado.                                                                                                                             |
+
+Evidência estruturada sem segredos:
+[evidence/backup-recovery-20260915.json](evidence/backup-recovery-20260915.json).
+Reprodução: [verify-real-recovery.mjs](../../scripts/backup/verify-real-recovery.mjs).
+
+## Dados e segurança do restore
+
+- Objeto novo: `socialflow_backup_20260915_133033.dump.gpg`.
+- SHA256: `e042f0ab901182718b2748efa6aea7d230e76862cd185cbb8f28f34d968a136c`.
+- Download direto via HTTPS R2 com GETs assinados de dez minutos. URLs em
+  memória; credencial permanente permaneceu na configuração protegida da VPS.
+- Chave externa: uso pelo GPG autorizado explicitamente pelo operador; conteúdo
+  não lido/exibido pelo agente. Custódia externa é atestação do operador,
+  não inspeção de cofre/MFA.
+- PostgreSQL 17.11, restore `--no-owner --single-transaction --exit-on-error`.
+- Todas as tabelas públicas pertencem a `socialflow_migration`; runtime não é dono.
+- Runtime sem superuser, BYPASSRLS, CREATEDB, CREATEROLE, REPLICATION ou
+  memberships de roles; sem CREATE no schema público.
+- SELECT permitido e DELETE/TRUNCATE/REFERENCES/TRIGGER negados nas sete
+  tabelas centrais; sem default grants amplos de DELETE/TRUNCATE/TRIGGER.
+  Não confundir essa verificação com auditoria exaustiva de cada ACL de coluna.
+- RLS e FORCE RLS confirmados nas cinco tabelas protegidas.
+- Quatro migrations: foundation, isolation, audit_revocation e brands.
+- Inventário antes das fixtures: 6 organizações, 15 usuários, 15 clientes,
+  6 marcas e 45 registros de auditoria. Contagens descrevem o dump; não medem RPO.
+- Rede Docker `--internal`, nenhuma porta publicada, PostgreSQL/Redis em tmpfs.
+  Nenhum dado ou volume existente usado como destino de restauração.
+
+O dataset tinha apenas uma organização ativa com cliente utilizável para o
+ensaio. Criou-se a segunda organização e dois usuários efêmeros **somente no
+banco descartável**. Houve login Better Auth real em produção, emissão de
+sessão e chamadas pelo proxy web: identidade correta, clientes restaurados
+visíveis, marcas acessíveis e HTTP 404 nas tentativas entre organizações,
+nos dois sentidos. Health retornou 200; chamada anônima a `/api/me`, 401.
+A página web `/` retornou HTML. Não houve teste visual com navegador.
+
+Hashes internos dos registros originais de User/Account foram comparados
+antes/depois e permaneceram iguais; hashes/dados de usuários não foram
+registrados. Containers/rede/arquivos de dump desta execução foram removidos;
+imagens obtidas permanecem no cache local.
+
+## Versão e tempos medidos
+
+As imagens reais da VPS são da versão
+`b50ded1eae3149cbb796fca8ebf40a04b59a6c47`. O script verifica seus IDs e obtém
+as imagens por streaming `docker image save` via SSH para `docker image load`.
+Os IDs de API e web estão no JSON de evidência. A API local anterior tinha ID
+diferente; sua suposta equivalência não foi usada neste aceite.
+
+**20,528 segundos** no ensaio final: resolução/verificação das imagens em
+cache, obtenção de GETs assinados, download R2, hash, GPG, banco, validações de
+segurança, API/web prontas e testes autenticados completos pelo proxy web.
+Download finalizado em 5,941s desde o início. Esse tempo inclui internet real,
+mas foi medido no computador local com imagens já obtidas — não numa máquina
+nova sem cache. Não inclui incidente/detecção, decisão humana, DNS, TLS ou
+corte de tráfego; portanto não comprova sozinho RTO global de 30 minutos.
+
+O primeiro ensaio trouxe a imagem API (etapa até imagem pronta: 37,855s), mas
+falhou por exigir duas organizações ativas; a tentativa inicial com web usava
+uma rota `/login` inexistente. Ambos foram corrigidos e os recursos descartáveis
+limpos. Não somar trechos de tentativas diferentes para fabricar um RTO.
+
+**RPO permanece não medido.** O marcador registra término de upload, não o
+snapshot nem o último commit recuperável. A idade dele serve ao monitoramento
+de atraso. Falta registrar o ponto consistente do dump e compará-lo com o
+instante do incidente/ensaio e um marcador transacional apropriado.
+
+## Correções instaladas e reversão
+
+1. Upload só confirma sucesso após tamanho exatamente igual, download integral
+   para SHA256 e comparação do arquivo de checksum; tamanho maior agora falha.
+2. Restore Linux exige checksum; falha de download desse arquivo não é ignorada.
+3. Watchdog usa segundos para o limite, e trata marcador ausente, inválido ou
+   futuro como falha explícita. Corrigida a alegação de funcionar com cron parado.
+4. Novo ensaio operacional usa imagens exatas e login HTTP passando pela web.
+
+Versões anteriores preservadas na VPS em:
+`/root/scripts/backup/previous_versions/20260915_integrity_1789479014/`.
+Configuração persistente (0600), chave, cron e demais aplicações preservados.
+O terminal retornou erro por CR residual após a instalação; a execução manual
+subsequente confirmou os scripts funcionais. Verificação final compara hashes.
+
+Retenção persistente já estava em 30 dias e não foi alterada. O ensaio manual
+usou override temporário de retenção 0 e webhook vazio. Não houve exclusões
+por retenção nesta retomada. Falhas de retenção ainda são ignoradas no script:
+o sucesso de backup não comprova a limpeza do destino.
+
+## Horários efetivos
+
+| Tarefa          | America/Sao_Paulo (VPS) | UTC   | America/Cuiaba               |
+| --------------- | ----------------------- | ----- | ---------------------------- |
+| Backup diário   | 00:00                   | 03:00 | 23:00 do dia anterior ao UTC |
+| Watchdog diário | 06:00                   | 09:00 | 05:00                        |
+
+Cron instalado: Ubuntu `3.0pl1-137ubuntu3`, fuso America/Sao_Paulo.
+O watchdog de 09:00 UTC foi observado em log com estado fresco. A autorização
+para ativação já havia sido aplicada antes desta retomada; não criamos linhas
+duplicadas nem alteramos o cron de outra aplicação existente na VPS.
+
+## Testes desta retomada
+
+- 12 testes direcionados em container Linux sem rede: credencial ausente,
+  falha de upload, tamanho maior, corrupção, falha de leitura, checksum ausente,
+  sucesso; frescor normal, atraso de 26h01min, ausência, data inválida e futura.
+  Casos de falha preservam o marcador anterior.
+- Integração real R2 → banco → API/web: resultado no JSON, com 12 respostas
+  HTTP verificadas e login real nas duas identidades efêmeras.
+- Lint, typecheck completo, 15 testes unitários e build de todos os pacotes:
+  aprovados. A suíte de integração que modifica o banco de teste existente
+  não foi executada; a integração desta revisão usou apenas banco descartável.
+
+## Pendências operacionais explícitas
+
+1. Disponibilizar fora da VPS as imagens corretas e acesso R2 de recuperação.
+   O procedimento atual depende da VPS para obter imagens e assinar os GETs;
+   ainda não prova recuperação com perda completa da VPS.
+2. Confirmar no painel a política efetiva do token permanente: Object Read &
+   Write limitado ao bucket dedicado. Sucesso de GET/PUT não atesta escopo.
+   A [documentação R2](https://developers.cloudflare.com/r2/api/tokens/)
+   descreve recursos Bucket/Account para esse token; não presumir prefixo.
+   Credenciais temporárias têm mecanismos próprios de escopo.
+3. Monitor externo de ausência de sinal e teste de indisponibilidade: pendentes.
+   O watchdog diário local pode levar até o próximo horário para perceber
+   atraso; cron/VPS parados impedem seu funcionamento.
+4. Medição de RPO e recuperação global com DNS/TLS/corte de tráfego: pendentes.
+5. Identificação nominal do canal/servidor de alerta não informada; recebimento
+   confirmado pelo operador. Novos testes de mensagens exigem autorização.
+6. Retenção: restringir/validar configuração de destino e tornar suas falhas
+   observáveis antes de tratar limpeza automática como homologada.
+
+Sem commit, push ou deploy da aplicação nesta retomada. O commit `87abf0c`
+já existia quando começamos; mudanças não relacionadas foram preservadas.
+
+---
+
+# Histórico de 14/09 — preservado, conclusões substituídas pela revisão acima
+
+Os textos abaixo contêm afirmações antigas e contraditórias. Servem apenas
+como histórico; o estado vigente e suas limitações estão na seção de 15/09.
+
 # Relatório de Aceite de Backup Externo e Recuperação de Desastres (Revisão Independente)
 
 Data da revisão: 14/09/2026

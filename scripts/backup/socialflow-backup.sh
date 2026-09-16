@@ -186,14 +186,20 @@ if [[ -n "$R2_BUCKET" && -n "${R2_ACCESS_KEY_ID:-}" && -n "${R2_SECRET_ACCESS_KE
     exit 5
   fi
 
-  # Verify remote existence and size -- upload is only "confirmed" once the
-  # remote object is independently read back and matches the local artifact.
+  # Verify the actual bytes, not only object metadata. Preserve the previous
+  # success marker if either object cannot be read back or has changed.
   REMOTE_SIZE="$(docker run --rm "${RCLONE_ENV_ARGS[@]}" "$RCLONE_IMAGE" size "$REMOTE_TARGET/$(basename "$ENCRYPTED_DUMP")" --json | grep -o '"bytes":[0-9]*' | cut -d: -f2 || echo '0')"
-  if [[ "$REMOTE_SIZE" -lt "$ENC_SIZE" ]]; then
+  if [[ ! "$REMOTE_SIZE" =~ ^[0-9]+$ || "$REMOTE_SIZE" -ne "$ENC_SIZE" ]]; then
     echo "[ERROR] Remote verification failed: remote size ($REMOTE_SIZE) does not match local ($ENC_SIZE)" >&2
     exit 5
   fi
-  echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Remote verification passed: ${REMOTE_SIZE} bytes in R2"
+  REMOTE_SHA256="$(docker run --rm "${RCLONE_ENV_ARGS[@]}" "$RCLONE_IMAGE" cat "$REMOTE_TARGET/$(basename "$ENCRYPTED_DUMP")" | sha256sum | cut -d' ' -f1)"
+  REMOTE_CHECKSUM="$(docker run --rm "${RCLONE_ENV_ARGS[@]}" "$RCLONE_IMAGE" cat "$REMOTE_TARGET/$(basename "$CHECKSUM_FILE")")"
+  if [[ "$REMOTE_SHA256" != "$SHA256_VAL" || "$REMOTE_CHECKSUM" != "$(cat "$CHECKSUM_FILE")" ]]; then
+    echo '[ERROR] Remote ciphertext/checksum read-back verification failed.' >&2
+    exit 5
+  fi
+  echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Remote verification passed: ${REMOTE_SIZE} bytes and SHA256 in R2"
   REMOTE_UPLOAD_CONFIRMED=true
 
   # 7. Retention: delete files older than RETENTION_DAYS strictly inside R2_PREFIX
