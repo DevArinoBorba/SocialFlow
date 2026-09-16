@@ -164,3 +164,63 @@ Após um deploy autorizado (fora do escopo desta sessão), repetir manualmente c
 5. Revogar uma membership de teste com sessão de navegador real aberta e confirmar corte imediato (sem logout) tanto no acesso a marcas quanto na leitura de auditoria via RLS direto.
 6. Inativar um cliente de teste (mantendo membership/organização ativas) e confirmar que os endpoints de marca retornam 404 mesmo assim.
 7. Confirmar que nenhum dado de teste permanece ativo/visível após a limpeza (mesmo padrão de "Situação Pós-Limpeza" usado em `FOUNDATION-ACCESS-ACCEPTANCE.md`).
+
+---
+
+## 8. Acompanhamento e Fechamento das Pendências A-1 e A-2 (14/09/2026)
+
+Esta seção foi redigida em 14/09/2026 para documentar a consolidação formal da cobertura automatizada e o fechamento definitivo das observações A-1 e A-2 apontadas na seção 5. As seções 1 a 7 anteriores permanecem integralmente preservadas como registro histórico de aceite.
+
+### 8.1. Situação de A-1 e A-2
+
+| Item    | Pendência Original                                                                                   | Situação Atual | Resumo da Consolidação                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| ------- | ---------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **A-1** | Textos longos no E2E com pior caso sem espaços nos limites documentados                              | **FECHADO**    | Cenário automatizado versionado em `tests/e2e/brands.spec.ts` testando criação, persistência após reload e edição com strings contínuas sem espaços no limite máximo exato (descrição com 2000 caracteres, público-alvo com 1000 caracteres e tom de voz com 1000 caracteres). Inspeção visual de screenshots reais comprovando 1 coluna no mobile, 2 no desktop, ausência de scroll horizontal e integridade total salva no PostgreSQL.                           |
+| **A-2** | Entidades inativas (Cliente, Organização, Usuário) sem teste de integração HTTP dedicado para marcas | **FECHADO**    | Suíte automatizada versionada em `tests/integration/brands.test.ts` testando cliente inativo (`Client.active=false`), organização inativa (`Organization.active=false`) e usuário inativo (`User.active=false`) com sessão autenticada aberta. Todos os 4 endpoints (listagem, detalhe, criação e edição) testados, validando códigos de status (404/401), ausência de vazamento de dados, ausência de mutação no banco e ausência de logs de auditoria indevidos. |
+
+### 8.2. Arquivos Alterados
+
+1. `tests/e2e/brands.spec.ts`:
+   - Adicionado teste `admin creates, verifies persistence after reload, and edits brand with long continuous text at field limits`.
+   - Exercita criação com `description` (2000 chars contínuos `"D"`), `targetAudience` (1000 chars contínuos `"A"`), `toneOfVoice` (1000 chars contínuos `"T"`).
+   - Valida colunas de `.brand-grid` (1 no mobile, 2 no desktop), ausência de scroll horizontal (`scrollWidth <= innerWidth`) e ausência de sobreposição vertical (`descBox.y + descBox.height <= gridBox.y + 4`).
+   - Valida integridade do registro no banco via Prisma (`findFirstOrThrow`).
+   - Valida persistência após recarregamento da página (`page.reload()` e reabertura do cliente).
+   - Executa edição com novo conjunto de limites contínuos (`updatedDesc` 2000 chars `"E"`, `updatedAudience` 1000 chars `"B"`, `updatedTone` 1000 chars `"U"`).
+   - Valida persistência da edição no banco e após novo reload da interface.
+   - Gera capturas de tela inspecionadas: `test-results/brands-longtext-desktop.png` e `test-results/brands-longtext-mobile.png`.
+2. `tests/integration/brands.test.ts`:
+   - Adicionado bloco `describe("inactive entities blocking with open session (A-2)")` contendo 3 testes completos e isolados:
+     - `inactive client: blocks brand list, detail, creation, and edition with open session without data leakage or mutation` (HTTP 404).
+     - `inactive organization: blocks brand list, detail, creation, and edition with open session without data leakage or mutation` (HTTP 404).
+     - `inactive user: rejects open session with 401 across brand list, detail, creation, and edition without data leakage or mutation` (HTTP 401).
+   - Cada cenário realiza baseline positivo prévio, inativação pontual em banco, 4 tentativas na mesma sessão com asserções de não-vazamento/não-mutação/auditoria inalterada, e restauração em bloco `finally`.
+3. `eslint.config.mjs`:
+   - Adicionado `".local/**"` aos padrões de ignore do ESLint para espelhar `.gitignore` e garantir conformidade de linting em todo o repositório.
+
+### 8.3. Bateria de Verificações Executada e Resultados
+
+Todos os checks foram executados no ambiente local isolado e passaram com 100% de sucesso:
+
+| Check                       | Comando                 | Resultado                   | Observações                                                                                                                                                                                                                            |
+| --------------------------- | ----------------------- | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Formatação                  | `pnpm format:check`     | **Passou**                  | 100% dos arquivos compatíveis com o Prettier.                                                                                                                                                                                          |
+| Linting                     | `pnpm lint`             | **Passou**                  | 0 erros, 0 avisos em todo o projeto.                                                                                                                                                                                                   |
+| Tipagem estática            | `pnpm typecheck`        | **Passou**                  | 6 pacotes monorepo + ferramentas validados sem erro.                                                                                                                                                                                   |
+| Testes unitários            | `pnpm test`             | **Passou**                  | 15/15 testes unitários passaram.                                                                                                                                                                                                       |
+| Build monorepo              | `pnpm build`            | **Passou**                  | Build completo de todos os pacotes e apps (`next build` em Turbopack concluído).                                                                                                                                                       |
+| Testes de integração        | `pnpm test:integration` | **Passou**                  | **31/31 testes passaram** (15 de foundation + 16 de marcas, incluindo os 3 novos de A-2).                                                                                                                                              |
+| Testes E2E (Playwright)     | `pnpm test:e2e`         | **Passou**                  | **14/14 testes passaram** (8 de clients + 6 de marcas, em Chrome desktop e mobile emulado).                                                                                                                                            |
+| Ensaio operacional completo | `pnpm test:foundation`  | **Passou de ponta a ponta** | Docker efêmero `socialflow-acceptance-1789412228161-c07a41`: build de 4 imagens, 4 migrations aplicadas, seed, bootstrap concorrente, 31 integrações, 14 E2E, `pg_dump`, `pg_restore` e verificação pós-restore aprovados com saída 0. |
+
+### 8.4. Inspeção Visual das Screenshots
+
+As imagens geradas pela execução oficial do Playwright foram inspecionadas:
+
+- `test-results/brands-longtext-desktop.png` (1280x800): `.brand-grid` perfeitamente alinhado em 2 colunas, texto de 2000 caracteres quebrando continuamente sem estourar o container, texto de 1000 caracteres de público-alvo e tom de voz quebrando sem overflow.
+- `test-results/brands-longtext-mobile.png` (390x844): `.brand-grid` colapsado em 1 coluna vertical, todos os textos quebrando perfeitamente dentro dos 390px, sem barra de rolagem horizontal (`scrollWidth <= innerWidth`).
+
+### 8.5. Limitações e Pendências Operacionais Remanescentes
+
+- Backup externo criptografado e ensaio de restauração de desastres **na VPS remota** continuam sendo uma pendência operacional separada (já registrada desde o encerramento da fundação).
+- O arquivo `docs/discovery/PHASE2-BRANDS-HOMOLOGATION.md` permanece untracked pelo Git nesta sessão (aguardando autorização explícita do usuário para commit futuro).

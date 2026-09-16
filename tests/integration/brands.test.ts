@@ -726,4 +726,370 @@ describe("HTTP Brand API permissions and validation across all 5 profiles", () =
     );
     expect(restoredRes.status).toBe(200);
   });
+
+  describe("inactive entities blocking with open session (A-2)", () => {
+    it("inactive client: blocks brand list, detail, creation, and edition with open session without data leakage or mutation", async () => {
+      await migration.rateLimit.deleteMany();
+      const cookie = await login("editor-a");
+
+      const brandName = `Marca Ativa Antes ${randomUUID().slice(0, 8)}`;
+      const brandDesc = "Descricao Secreta Cliente Inativo";
+      const testBrand = await migration.brand.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          name: brandName,
+          description: brandDesc,
+          targetAudience: "Publico Secreto Cliente Inativo",
+          toneOfVoice: "Tom Secreto Cliente Inativo",
+        },
+      });
+
+      try {
+        // 1. Positive baseline: confirm allowed access with open session before deactivation
+        const baseList = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(baseList.status).toBe(200);
+        const baseListData = (await baseList.json()) as { id: string }[];
+        expect(baseListData.some((b) => b.id === testBrand.id)).toBe(true);
+
+        const baseDetail = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(baseDetail.status).toBe(200);
+
+        // 2. Inactivate client
+        await migration.client.update({
+          where: { id: "client-a" },
+          data: { active: false },
+        });
+
+        // 3. Reusing the SAME open session:
+        // 3a. Listagem (GET): 404, no brand data exposed
+        const listRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(listRes.status).toBe(404);
+        const listBody = await listRes.text();
+        expect(listBody).not.toContain(brandName);
+        expect(listBody).not.toContain(brandDesc);
+
+        // 3b. Detalhe (GET): 404, no brand data exposed
+        const detailRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(detailRes.status).toBe(404);
+        const detailBody = await detailRes.text();
+        expect(detailBody).not.toContain(brandName);
+        expect(detailBody).not.toContain(brandDesc);
+        expect(detailBody).not.toContain("Publico Secreto");
+
+        // 3c. Criação (POST): 404, no creation in DB, no audit log
+        const auditsBefore = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        const failCreateName = `Marca Indevida Cliente Inativo ${randomUUID().slice(0, 8)}`;
+        const createRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+          "POST",
+          { name: failCreateName },
+        );
+        expect(createRes.status).toBe(404);
+        const createdInDb = await migration.brand.findFirst({
+          where: { name: failCreateName },
+        });
+        expect(createdInDb).toBeNull();
+        const auditsAfterCreate = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterCreate).toBe(auditsBefore);
+
+        // 3d. Edição (PATCH): 404, no DB mutation, no audit log
+        const brandBefore = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        const editRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+          "PATCH",
+          {
+            name: `Tentativa Alteracao ${randomUUID().slice(0, 8)}`,
+            toneOfVoice: "Tom Alterado Indevidamente",
+          },
+        );
+        expect(editRes.status).toBe(404);
+        const brandAfter = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        expect(brandAfter.name).toBe(brandBefore.name);
+        expect(brandAfter.toneOfVoice).toBe(brandBefore.toneOfVoice);
+        expect(brandAfter.updatedAt.getTime()).toBe(
+          brandBefore.updatedAt.getTime(),
+        );
+        const auditsAfterEdit = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterEdit).toBe(auditsBefore);
+      } finally {
+        await migration.client.update({
+          where: { id: "client-a" },
+          data: { active: true },
+        });
+        await migration.brand.deleteMany({ where: { id: testBrand.id } });
+      }
+
+      // 4. Positive restoration: verify access restored after reactivation with same session
+      const restoredRes = await request(
+        "/api/organizations/org-a/clients/client-a/brands",
+        cookie,
+      );
+      expect(restoredRes.status).toBe(200);
+    });
+
+    it("inactive organization: blocks brand list, detail, creation, and edition with open session without data leakage or mutation", async () => {
+      await migration.rateLimit.deleteMany();
+      const cookie = await login("editor-a");
+
+      const brandName = `Marca Org Ativa Antes ${randomUUID().slice(0, 8)}`;
+      const brandDesc = "Descricao Secreta Org Inativa";
+      const testBrand = await migration.brand.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          name: brandName,
+          description: brandDesc,
+          targetAudience: "Publico Secreto Org Inativa",
+          toneOfVoice: "Tom Secreto Org Inativa",
+        },
+      });
+
+      try {
+        // 1. Positive baseline
+        const baseList = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(baseList.status).toBe(200);
+        const baseDetail = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(baseDetail.status).toBe(200);
+
+        // 2. Inactivate organization
+        await migration.organization.update({
+          where: { id: "org-a" },
+          data: { active: false },
+        });
+
+        // 3. Reusing the SAME open session:
+        // 3a. Listagem: 404, no data leakage
+        const listRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(listRes.status).toBe(404);
+        const listBody = await listRes.text();
+        expect(listBody).not.toContain(brandName);
+        expect(listBody).not.toContain(brandDesc);
+
+        // 3b. Detalhe: 404, no data leakage
+        const detailRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(detailRes.status).toBe(404);
+        const detailBody = await detailRes.text();
+        expect(detailBody).not.toContain(brandName);
+        expect(detailBody).not.toContain(brandDesc);
+
+        // 3c. Criação: 404, no creation, no audit log
+        const auditsBefore = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        const failCreateName = `Marca Indevida Org Inativa ${randomUUID().slice(0, 8)}`;
+        const createRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+          "POST",
+          { name: failCreateName },
+        );
+        expect(createRes.status).toBe(404);
+        const createdInDb = await migration.brand.findFirst({
+          where: { name: failCreateName },
+        });
+        expect(createdInDb).toBeNull();
+        const auditsAfterCreate = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterCreate).toBe(auditsBefore);
+
+        // 3d. Edição: 404, no mutation, no audit log
+        const brandBefore = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        const editRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+          "PATCH",
+          {
+            name: `Tentativa Alteracao Org ${randomUUID().slice(0, 8)}`,
+            toneOfVoice: "Tom Alterado Org",
+          },
+        );
+        expect(editRes.status).toBe(404);
+        const brandAfter = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        expect(brandAfter.name).toBe(brandBefore.name);
+        expect(brandAfter.toneOfVoice).toBe(brandBefore.toneOfVoice);
+        expect(brandAfter.updatedAt.getTime()).toBe(
+          brandBefore.updatedAt.getTime(),
+        );
+        const auditsAfterEdit = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterEdit).toBe(auditsBefore);
+      } finally {
+        await migration.organization.update({
+          where: { id: "org-a" },
+          data: { active: true },
+        });
+        await migration.brand.deleteMany({ where: { id: testBrand.id } });
+      }
+
+      // 4. Positive restoration
+      const restoredRes = await request(
+        "/api/organizations/org-a/clients/client-a/brands",
+        cookie,
+      );
+      expect(restoredRes.status).toBe(200);
+    });
+
+    it("inactive user: rejects open session with 401 across brand list, detail, creation, and edition without data leakage or mutation", async () => {
+      await migration.rateLimit.deleteMany();
+      const cookie = await login("editor-a");
+
+      const brandName = `Marca User Ativo Antes ${randomUUID().slice(0, 8)}`;
+      const brandDesc = "Descricao Secreta User Inativo";
+      const testBrand = await migration.brand.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          name: brandName,
+          description: brandDesc,
+          targetAudience: "Publico Secreto User Inativo",
+          toneOfVoice: "Tom Secreto User Inativo",
+        },
+      });
+
+      try {
+        // 1. Positive baseline
+        const baseList = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(baseList.status).toBe(200);
+        const baseDetail = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(baseDetail.status).toBe(200);
+
+        // 2. Inactivate user
+        await migration.user.update({
+          where: { id: "editor-a" },
+          data: { active: false },
+        });
+
+        // 3. Reusing the SAME open session:
+        // 3a. Listagem: 401, no data leakage
+        const listRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+        );
+        expect(listRes.status).toBe(401);
+        const listBody = await listRes.text();
+        expect(listBody).not.toContain(brandName);
+        expect(listBody).not.toContain(brandDesc);
+
+        // 3b. Detalhe: 401, no data leakage
+        const detailRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+        );
+        expect(detailRes.status).toBe(401);
+        const detailBody = await detailRes.text();
+        expect(detailBody).not.toContain(brandName);
+        expect(detailBody).not.toContain(brandDesc);
+
+        // 3c. Criação: 401, no creation, no audit log
+        const auditsBefore = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        const failCreateName = `Marca Indevida User Inativo ${randomUUID().slice(0, 8)}`;
+        const createRes = await request(
+          "/api/organizations/org-a/clients/client-a/brands",
+          cookie,
+          "POST",
+          { name: failCreateName },
+        );
+        expect(createRes.status).toBe(401);
+        const createdInDb = await migration.brand.findFirst({
+          where: { name: failCreateName },
+        });
+        expect(createdInDb).toBeNull();
+        const auditsAfterCreate = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterCreate).toBe(auditsBefore);
+
+        // 3d. Edição: 401, no mutation, no audit log
+        const brandBefore = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        const editRes = await request(
+          `/api/organizations/org-a/clients/client-a/brands/${testBrand.id}`,
+          cookie,
+          "PATCH",
+          {
+            name: `Tentativa Alteracao User ${randomUUID().slice(0, 8)}`,
+            toneOfVoice: "Tom Alterado User",
+          },
+        );
+        expect(editRes.status).toBe(401);
+        const brandAfter = await migration.brand.findUniqueOrThrow({
+          where: { id: testBrand.id },
+        });
+        expect(brandAfter.name).toBe(brandBefore.name);
+        expect(brandAfter.toneOfVoice).toBe(brandBefore.toneOfVoice);
+        expect(brandAfter.updatedAt.getTime()).toBe(
+          brandBefore.updatedAt.getTime(),
+        );
+        const auditsAfterEdit = await migration.auditLog.count({
+          where: { organizationId: "org-a" },
+        });
+        expect(auditsAfterEdit).toBe(auditsBefore);
+      } finally {
+        await migration.user.update({
+          where: { id: "editor-a" },
+          data: { active: true },
+        });
+        await migration.brand.deleteMany({ where: { id: testBrand.id } });
+      }
+
+      // 4. Positive restoration
+      const restoredRes = await request(
+        "/api/organizations/org-a/clients/client-a/brands",
+        cookie,
+      );
+      expect(restoredRes.status).toBe(200);
+    });
+  });
 });

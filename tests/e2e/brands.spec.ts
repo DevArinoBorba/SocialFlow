@@ -116,6 +116,179 @@ test("admin logs in, opens client, creates and edits a brand", async ({
   await migration.brand.deleteMany({ where: { name: brandName } });
 });
 
+test("admin creates, verifies persistence after reload, and edits brand with long continuous text at field limits", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill("admin-a@socialflow.test");
+  await page
+    .getByLabel("Senha", { exact: true })
+    .fill(process.env.DEV_SEED_PASSWORD!);
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
+
+  await expect(
+    page.getByRole("heading", { name: "Clientes", exact: true }),
+  ).toBeVisible();
+
+  // Open client
+  await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+  ).toBeVisible();
+
+  // Continuous text without spaces at exact field limits (A-1)
+  const brandName = `Marca Longa E2E ${Date.now()}`;
+  const longDesc = "D".repeat(2000);
+  const longAudience = "A".repeat(1000);
+  const longTone = "T".repeat(1000);
+
+  // Create brand
+  await page.getByRole("button", { name: "Nova marca" }).click();
+  await page.getByLabel("Nome da marca *").fill(brandName);
+  await page.getByLabel("Descrição").fill(longDesc);
+  await page.getByLabel("Público-alvo").fill(longAudience);
+  await page.getByLabel("Tom de voz").fill(longTone);
+  await page.getByRole("button", { name: "Criar marca", exact: true }).click();
+
+  try {
+    // Confirm creation & visibility
+    await expect(
+      page.getByRole("heading", { name: brandName, exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(longDesc)).toBeVisible();
+    await expect(page.getByText(longAudience)).toBeVisible();
+    await expect(page.getByText(longTone)).toBeVisible();
+
+    // Verify responsive columns (1 column on mobile, 2 columns on desktop)
+    const getColumns = async () =>
+      page
+        .locator(".brand-grid")
+        .first()
+        .evaluate(
+          (el) =>
+            window
+              .getComputedStyle(el)
+              .gridTemplateColumns.split(" ")
+              .filter(Boolean).length,
+        );
+
+    const isMobile = test.info().project.name === "mobile";
+    expect(await getColumns()).toBe(isMobile ? 1 : 2);
+
+    // Verify no horizontal overflow and no overlapping content
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+
+    const descBox = await page
+      .locator(".brand-description")
+      .first()
+      .boundingBox();
+    const gridBox = await page.locator(".brand-grid").first().boundingBox();
+    expect(descBox).not.toBeNull();
+    expect(gridBox).not.toBeNull();
+    expect(descBox!.y + descBox!.height).toBeLessThanOrEqual(gridBox!.y + 4);
+
+    // Verify database record has integral content
+    const savedBrand = await migration.brand.findFirstOrThrow({
+      where: { name: brandName },
+    });
+    expect(savedBrand.description).toBe(longDesc);
+    expect(savedBrand.targetAudience).toBe(longAudience);
+    expect(savedBrand.toneOfVoice).toBe(longTone);
+
+    // Verify persistence after reload (reloads page, resetting React state, then re-opens client)
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Clientes", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+    await expect(
+      page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+    ).toBeVisible();
+
+    await expect(
+      page.getByRole("heading", { name: brandName, exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(longDesc)).toBeVisible();
+    await expect(page.getByText(longAudience)).toBeVisible();
+    await expect(page.getByText(longTone)).toBeVisible();
+    expect(await getColumns()).toBe(isMobile ? 1 : 2);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+
+    // Edit brand with new continuous text at limits
+    await page.getByRole("button", { name: "Editar", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: `Editar marca: ${brandName}` }),
+    ).toBeVisible();
+
+    const updatedDesc = "E".repeat(2000);
+    const updatedAudience = "B".repeat(1000);
+    const updatedTone = "U".repeat(1000);
+
+    await page.locator(`#edit-description-${savedBrand.id}`).fill(updatedDesc);
+    await page
+      .locator(`#edit-targetAudience-${savedBrand.id}`)
+      .fill(updatedAudience);
+    await page.locator(`#edit-toneOfVoice-${savedBrand.id}`).fill(updatedTone);
+    await page
+      .getByRole("button", { name: "Salvar alterações", exact: true })
+      .click();
+
+    await expect(
+      page.getByText(`Marca ${brandName} atualizada com sucesso.`),
+    ).toBeVisible();
+    await expect(page.getByText(updatedDesc)).toBeVisible();
+    await expect(page.getByText(updatedAudience)).toBeVisible();
+    await expect(page.getByText(updatedTone)).toBeVisible();
+
+    // Verify database has updated integral content
+    const updatedDbBrand = await migration.brand.findUniqueOrThrow({
+      where: { id: savedBrand.id },
+    });
+    expect(updatedDbBrand.description).toBe(updatedDesc);
+    expect(updatedDbBrand.targetAudience).toBe(updatedAudience);
+    expect(updatedDbBrand.toneOfVoice).toBe(updatedTone);
+
+    // Verify persistence of edits after reload
+    await page.reload();
+    await expect(
+      page.getByRole("heading", { name: "Clientes", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+    await expect(
+      page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+    ).toBeVisible();
+
+    await expect(
+      page.getByRole("heading", { name: brandName, exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText(updatedDesc)).toBeVisible();
+    await expect(page.getByText(updatedAudience)).toBeVisible();
+    await expect(page.getByText(updatedTone)).toBeVisible();
+    expect(await getColumns()).toBe(isMobile ? 1 : 2);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= window.innerWidth,
+      ),
+    ).toBe(true);
+
+    // Save screenshot for visual inspection
+    await page.screenshot({
+      path: `test-results/brands-longtext-${test.info().project.name}.png`,
+      fullPage: true,
+    });
+  } finally {
+    await migration.brand.deleteMany({ where: { name: brandName } });
+  }
+});
+
 test("viewer opens assigned client, sees brands in read-only mode without write actions", async ({
   page,
 }) => {
