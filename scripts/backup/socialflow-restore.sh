@@ -27,6 +27,29 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
+# Environment resolution: accepts optional argument 2, or SOCIALFLOW_ENV, or APP_ENV, or ENVIRONMENT
+RAW_ENV="${SOCIALFLOW_ENV:-${APP_ENV:-${ENVIRONMENT:-${2:-}}}}"
+TARGET_ENV=""
+if [[ -n "$RAW_ENV" ]]; then
+  case "${RAW_ENV,,}" in
+    prod|production) TARGET_ENV="prod" ;;
+    homolog|homologation|staging) TARGET_ENV="homolog" ;;
+    *)
+      echo "[ERROR] Invalid target environment '${RAW_ENV}'. Allowed values are 'prod' or 'homolog'." >&2
+      exit 1
+      ;;
+  esac
+fi
+
+# Default R2 prefix per target environment
+if [[ -z "${R2_PREFIX:-}" ]]; then
+  if [[ -n "$TARGET_ENV" ]]; then
+    R2_PREFIX="backups/socialflow/${TARGET_ENV}"
+  else
+    R2_PREFIX="backups/socialflow/prod"
+  fi
+fi
+
 RECOVERY_DIR="${RECOVERY_DIR:-/tmp/socialflow-recovery-$(date +%s)}"
 mkdir -p "$RECOVERY_DIR"
 chmod 700 "$RECOVERY_DIR"
@@ -45,7 +68,7 @@ trap cleanup EXIT INT TERM
 DOWNLOAD_SOURCE="unspecified_local_path"
 if [[ -z "$BACKUP_SRC" ]]; then
   if [[ -n "${R2_BUCKET:-}" && -n "${R2_ACCESS_KEY_ID:-}" ]]; then
-    echo "[INFO] Downloading latest backup from Cloudflare R2 (this is the path that must be exercised for real DR evidence)..."
+    echo "[INFO] Downloading latest backup from Cloudflare R2 (prefix: ${R2_PREFIX})..."
     RCLONE_ENV_ARGS=(
       -e "RCLONE_CONFIG_${REMOTE_ALIAS^^}_TYPE=s3"
       -e "RCLONE_CONFIG_${REMOTE_ALIAS^^}_PROVIDER=Cloudflare"
@@ -57,7 +80,7 @@ if [[ -z "$BACKUP_SRC" ]]; then
     REMOTE_TARGET="${REMOTE_ALIAS}:${R2_BUCKET}/${R2_PREFIX}"
     LATEST_NAME="$(docker run --rm "${RCLONE_ENV_ARGS[@]}" "$RCLONE_IMAGE" lsf "$REMOTE_TARGET" --files-only | grep -E '\.dump\.gpg$' | sort | tail -n 1)"
     if [[ -z "$LATEST_NAME" ]]; then
-      echo "[ERROR] No backup found in R2 bucket." >&2
+      echo "[ERROR] No backup found in R2 bucket (${REMOTE_TARGET})." >&2
       exit 1
     fi
     docker run --rm "${RCLONE_ENV_ARGS[@]}" -v "${RECOVERY_DIR}:/data" "$RCLONE_IMAGE" copy "${REMOTE_TARGET}/${LATEST_NAME}" /data/
@@ -67,10 +90,13 @@ if [[ -z "$BACKUP_SRC" ]]; then
   else
     # Local archive fallback only exists for convenience testing on the VPS
     # itself; it does NOT prove off-site recoverability and must be flagged.
-    LOCAL_ARCHIVE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/archive"
+    LOCAL_ARCHIVE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/archive${TARGET_ENV:+/$TARGET_ENV}"
+    if [[ ! -d "$LOCAL_ARCHIVE" ]]; then
+      LOCAL_ARCHIVE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/archive"
+    fi
     LATEST_BACKUP="$(ls -t "${LOCAL_ARCHIVE}"/*.dump.gpg 2>/dev/null | head -n 1 || true)"
     if [[ -z "$LATEST_BACKUP" ]]; then
-      echo "Usage: $0 [path-to-encrypted-backup.dump.gpg]" >&2
+      echo "Usage: $0 [path-to-encrypted-backup.dump.gpg] [environment: prod|homolog]" >&2
       echo "(No R2 credentials configured and no local archive found.)" >&2
       exit 1
     fi
@@ -85,6 +111,26 @@ fi
 if [[ ! -f "$BACKUP_SRC" ]]; then
   echo "[ERROR] Backup file not found: $BACKUP_SRC" >&2
   exit 2
+fi
+
+# Detect artifact provenance (production vs homologation)
+DETECTED_ENV="unknown"
+if [[ "$BACKUP_SRC" =~ (prod|production) || "$DOWNLOAD_SOURCE" =~ (prod|production) || "${R2_PREFIX:-}" =~ (prod|production) ]]; then
+  DETECTED_ENV="prod"
+elif [[ "$BACKUP_SRC" =~ (homolog|staging) || "$DOWNLOAD_SOURCE" =~ (homolog|staging) || "${R2_PREFIX:-}" =~ (homolog|staging) ]]; then
+  DETECTED_ENV="homolog"
+fi
+
+echo "================================================================="
+echo " SOCIALFLOW DISASTER RECOVERY & RESTORE VERIFICATION"
+echo " Target Environment : ${TARGET_ENV:-${DETECTED_ENV^^}}"
+echo " Artifact Origin    : ${DETECTED_ENV^^}"
+echo " Source Location    : ${DOWNLOAD_SOURCE}"
+echo " File Path          : ${BACKUP_SRC}"
+echo "================================================================="
+
+if [[ -n "$TARGET_ENV" && "$DETECTED_ENV" != "unknown" && "$TARGET_ENV" != "$DETECTED_ENV" ]]; then
+  echo "[WARNING] Environment mismatch: Requested target environment is '${TARGET_ENV^^}', but backup artifact indicates '${DETECTED_ENV^^}' provenance!" >&2
 fi
 
 echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting recovery verification for: $BACKUP_SRC (source: ${DOWNLOAD_SOURCE})"
@@ -379,7 +425,11 @@ DURATION=$((END_TIME - START_TIME))
 # RPO must be measured against the last CONFIRMED external backup, never
 # against a data field like the latest audit-log row (that reflects when the
 # source system last wrote data, not when it was last safely copied off-site).
-REMOTE_STATUS_FILE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/last_successful_remote_backup.json"
+EFFECTIVE_ENV="${TARGET_ENV:-$DETECTED_ENV}"
+REMOTE_STATUS_FILE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/last_successful_remote_backup_${EFFECTIVE_ENV}.json"
+if [[ ! -f "$REMOTE_STATUS_FILE" ]]; then
+  REMOTE_STATUS_FILE="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}/last_successful_remote_backup.json"
+fi
 RPO_NOTE="RPO indeterminado: ${REMOTE_STATUS_FILE} nao encontrado (nenhum envio externo confirmado registrado)."
 if [[ -f "$REMOTE_STATUS_FILE" ]]; then
   LAST_REMOTE_TS="$(grep -o '"timestamp": *"[^"]*"' "$REMOTE_STATUS_FILE" | head -n1 | cut -d'"' -f4)"
@@ -387,11 +437,12 @@ if [[ -f "$REMOTE_STATUS_FILE" ]]; then
     LAST_REMOTE_EPOCH="$(date -u -d "$LAST_REMOTE_TS" +%s 2>/dev/null || echo 0)"
     NOW_EPOCH="$(date -u +%s)"
     AGE_HOURS=$(( (NOW_EPOCH - LAST_REMOTE_EPOCH) / 3600 ))
-    RPO_NOTE="Ultimo backup externo confirmado: ${LAST_REMOTE_TS} (${AGE_HOURS}h atras)."
+    RPO_NOTE="Ultimo backup externo confirmado (${EFFECTIVE_ENV^^}): ${LAST_REMOTE_TS} (${AGE_HOURS}h atras)."
   fi
 fi
 
 echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] RESTORE VERIFICATION PASSED!"
+echo "Environment Context: ${EFFECTIVE_ENV^^} (target: ${TARGET_ENV:-none}, provenance: ${DETECTED_ENV})"
 echo "Recovery Time (RTO, full procedure from source resolution to validation): ${DURATION}s"
 echo "Application-level validation (health/auth): ${APP_CHECK_STATUS}"
 echo "Backup source exercised: ${DOWNLOAD_SOURCE}"

@@ -19,11 +19,40 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
+# Target environment (prod | homolog)
+# Accepts CLI argument $1, or SOCIALFLOW_ENV, or APP_ENV, or ENVIRONMENT.
+# Defaults to "prod" so production freshness is monitored by default.
+RAW_ENV="${1:-${SOCIALFLOW_ENV:-${APP_ENV:-${ENVIRONMENT:-prod}}}}"
+case "${RAW_ENV,,}" in
+  prod|production)
+    TARGET_ENV="prod"
+    ;;
+  homolog|homologation|staging)
+    TARGET_ENV="homolog"
+    ;;
+  *)
+    echo "[ERROR] Invalid target environment '${RAW_ENV}'. Allowed values are 'prod' or 'homolog'." >&2
+    exit 2
+    ;;
+esac
+
 BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}"
 # Deliberately reads the file socialflow-backup.sh writes ONLY after a
 # verified remote upload -- never last_backup.json, which also records
 # local-only runs (missing credentials, failed upload) as a local success.
-REMOTE_STATUS_FILE="${BACKUP_LOCAL_DIR}/last_successful_remote_backup.json"
+REMOTE_STATUS_FILE="${REMOTE_STATUS_FILE:-${BACKUP_LOCAL_DIR}/last_successful_remote_backup_${TARGET_ENV}.json}"
+
+# Legacy fallback: if environment-specific marker is missing, check the legacy marker ONLY if its destination matches
+if [[ ! -f "$REMOTE_STATUS_FILE" ]]; then
+  LEGACY_FILE="${BACKUP_LOCAL_DIR}/last_successful_remote_backup.json"
+  if [[ -f "$LEGACY_FILE" ]]; then
+    LEGACY_DEST="$(grep -o '"destination": *"[^"]*"' "$LEGACY_FILE" 2>/dev/null | cut -d'"' -f4 || true)"
+    if [[ -z "$LEGACY_DEST" || ("$TARGET_ENV" == "prod" && "$LEGACY_DEST" == *"prod"*) || ("$TARGET_ENV" == "homolog" && "$LEGACY_DEST" == *"homolog"*) ]]; then
+      REMOTE_STATUS_FILE="$LEGACY_FILE"
+    fi
+  fi
+fi
+
 MAX_AGE_HOURS="${MAX_AGE_HOURS:-26}" # RPO is 24h; small margin for run jitter.
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 
@@ -31,13 +60,13 @@ send_discord_alert() {
   local message="$1"
   if [[ -n "$DISCORD_WEBHOOK_URL" ]]; then
     curl -s -S -X POST -H "Content-Type: application/json" \
-      -d "{\"embeds\":[{\"title\":\"SocialFlow Backup: ATRASADO\",\"description\":\"${message}\",\"color\":15158332}]}" \
+      -d "{\"embeds\":[{\"title\":\"SocialFlow Backup Freshness [${TARGET_ENV^^}]: ATRASADO\",\"description\":\"${message}\",\"color\":15158332}]}" \
       "$DISCORD_WEBHOOK_URL" >/dev/null || true
   fi
 }
 
 if [[ ! -f "$REMOTE_STATUS_FILE" ]]; then
-  MSG="Nenhum backup externo confirmado foi registrado ainda em ${REMOTE_STATUS_FILE}."
+  MSG="Nenhum backup externo confirmado foi registrado ainda para o ambiente [${TARGET_ENV^^}] em ${REMOTE_STATUS_FILE}."
   echo "[CRITICAL] $MSG" >&2
   send_discord_alert "$MSG"
   exit 2
@@ -74,5 +103,5 @@ if [[ "$AGE_SECONDS" -gt $((MAX_AGE_HOURS * 3600)) ]]; then
   exit 1
 fi
 
-echo "[OK] Last confirmed external backup: ${LAST_TS} (${AGE_HOURS}h ago, within ${MAX_AGE_HOURS}h)."
+echo "[OK] Last confirmed external backup [${TARGET_ENV^^}]: ${LAST_TS} (${AGE_HOURS}h ago, within ${MAX_AGE_HOURS}h)."
 exit 0

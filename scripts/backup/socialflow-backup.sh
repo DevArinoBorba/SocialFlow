@@ -5,15 +5,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="${BACKUP_CONFIG_FILE:-/root/.config/socialflow/backup.env}"
-LOCK_FILE="${BACKUP_LOCK_FILE:-/tmp/socialflow-backup.lock}"
-
-# Concurrency protection
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-  echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Backup already running. Exiting." >&2
-  exit 1
-fi
-
 # Load config if present
 if [[ -f "$CONFIG_FILE" ]]; then
   # Verify secure permissions (0600 or 0400)
@@ -25,12 +16,55 @@ if [[ -f "$CONFIG_FILE" ]]; then
   source "$CONFIG_FILE"
 fi
 
+# Target environment resolution (prod | homolog)
+# Explicit specification is mandatory. Silent fallback between environments is strictly prohibited.
+RAW_ENV="${SOCIALFLOW_ENV:-${APP_ENV:-${ENVIRONMENT:-}}}"
+case "${RAW_ENV,,}" in
+  prod|production)
+    TARGET_ENV="prod"
+    ;;
+  homolog|homologation|staging)
+    TARGET_ENV="homolog"
+    ;;
+  "")
+    echo "[ERROR] Target environment must be explicitly specified (set SOCIALFLOW_ENV=prod or SOCIALFLOW_ENV=homolog). Silent fallback is prohibited." >&2
+    exit 2
+    ;;
+  *)
+    echo "[ERROR] Invalid target environment '${RAW_ENV}'. Allowed values are 'prod' or 'homolog'." >&2
+    exit 2
+    ;;
+esac
+
+# Concurrency protection isolated per environment
+LOCK_FILE="${BACKUP_LOCK_FILE:-/tmp/socialflow-backup-${TARGET_ENV}.lock}"
+exec 200>"$LOCK_FILE"
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 200; then
+    echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Backup already running for environment '${TARGET_ENV}'. Exiting." >&2
+    exit 1
+  fi
+fi
+
 # Defaults
 POSTGRES_USER="${POSTGRES_USER:-socialflow_migration}"
 POSTGRES_DB="${POSTGRES_DB:-socialflow}"
 GPG_RECIPIENT="${GPG_RECIPIENT:-SocialFlow Backup}"
 R2_BUCKET="${R2_BUCKET:-}"
-R2_PREFIX="${R2_PREFIX:-backups/socialflow/homolog}"
+
+# R2 prefix segregation: default by environment and prevent cross-environment overwrite
+DEFAULT_R2_PREFIX="backups/socialflow/${TARGET_ENV}"
+R2_PREFIX="${R2_PREFIX:-$DEFAULT_R2_PREFIX}"
+
+if [[ "$TARGET_ENV" == "prod" && "$R2_PREFIX" == *"homolog"* ]]; then
+  echo "[ERROR] Cross-environment violation: refusing to run production backup with homologation prefix '${R2_PREFIX}'." >&2
+  exit 2
+fi
+if [[ "$TARGET_ENV" == "homolog" && "$R2_PREFIX" == *"prod"* ]]; then
+  echo "[ERROR] Cross-environment violation: refusing to run homologation backup with production prefix '${R2_PREFIX}'." >&2
+  exit 2
+fi
+
 RETENTION_DAYS="${RETENTION_DAYS:-30}"
 DISCORD_WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
 BACKUP_LOCAL_DIR="${BACKUP_LOCAL_DIR:-/root/backups/socialflow}"
@@ -41,15 +75,17 @@ RCLONE_IMAGE="${RCLONE_IMAGE:-rclone/rclone:1.68.2}"
 
 START_TIME="$(date +%s)"
 TIMESTAMP="$(date -u +'%Y%m%d_%H%M%S')"
-BACKUP_BASE_NAME="socialflow_backup_${TIMESTAMP}"
+BACKUP_BASE_NAME="socialflow_${TARGET_ENV}_backup_${TIMESTAMP}"
 RAW_DUMP="${STAGING_DIR}/${BACKUP_BASE_NAME}.dump"
 ENCRYPTED_DUMP="${STAGING_DIR}/${BACKUP_BASE_NAME}.dump.gpg"
 CHECKSUM_FILE="${STAGING_DIR}/${BACKUP_BASE_NAME}.sha256"
-STATUS_FILE="${BACKUP_LOCAL_DIR}/last_backup.json"
+
+# Environment-isolated status and remote confirmation markers
+STATUS_FILE="${STATUS_FILE:-${BACKUP_LOCAL_DIR}/last_backup_${TARGET_ENV}.json}"
 # Written ONLY after a verified remote upload. This is the file monitoring/RPO
-# checks must read -- last_backup.json alone conflates local-only runs with
+# checks must read -- last_backup_<env>.json alone conflates local-only runs with
 # real off-site backups (see REMOTE_UPLOAD_CONFIRMED below).
-REMOTE_STATUS_FILE="${BACKUP_LOCAL_DIR}/last_successful_remote_backup.json"
+REMOTE_STATUS_FILE="${REMOTE_STATUS_FILE:-${BACKUP_LOCAL_DIR}/last_successful_remote_backup_${TARGET_ENV}.json}"
 REMOTE_UPLOAD_CONFIRMED=false
 
 # Staging directory setup with restricted permissions (0700)
@@ -67,11 +103,11 @@ send_discord_alert() {
     payload="$(cat <<EOF
 {
   "embeds": [{
-    "title": "SocialFlow Backup: ${status}",
+    "title": "SocialFlow Backup [${TARGET_ENV^^}]: ${status}",
     "description": "${message}",
     "color": ${color},
     "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
-    "footer": { "text": "SocialFlow Automated Backup" }
+    "footer": { "text": "SocialFlow Automated Backup (${TARGET_ENV})" }
   }]
 }
 EOF
@@ -86,28 +122,39 @@ cleanup() {
   if [[ $exit_code -ne 0 ]]; then
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Backup failed with exit code $exit_code" >&2
     rm -f "$ENCRYPTED_DUMP" "$CHECKSUM_FILE" 2>/dev/null || true
-    echo "{\"timestamp\": \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\", \"status\": \"failed\", \"exitCode\": $exit_code}" > "$STATUS_FILE"
-    send_discord_alert "FALHA" "O backup falhou com código de saída ${exit_code}. Verifique os logs do servidor." 15158332
+    if [[ -n "${STATUS_FILE:-}" ]]; then
+      echo "{\"timestamp\": \"$(date -u +'%Y-%m-%dT%H:%M:%SZ')\", \"environment\": \"${TARGET_ENV}\", \"status\": \"failed\", \"exitCode\": $exit_code}" > "$STATUS_FILE"
+    fi
+    send_discord_alert "FALHA" "O backup de [${TARGET_ENV^^}] falhou com código de saída ${exit_code}. Verifique os logs do servidor." 15158332
   fi
 }
 trap cleanup EXIT INT TERM
 
-# 1. Discover PostgreSQL container
+# 1. Discover PostgreSQL container with strict environment segregation
 if [[ -z "${POSTGRES_CONTAINER:-}" ]]; then
-  # Look for running postgres container for socialflow
-  POSTGRES_CONTAINER="$(docker ps --filter "name=postgres" --format "{{.Names}}" | grep -E "socialflow|4iuijgj7ocivevuow4yga8z7" | head -n 1 || true)"
-  if [[ -z "$POSTGRES_CONTAINER" ]]; then
-    # Fallback to any healthy container with label or name postgres
-    POSTGRES_CONTAINER="$(docker ps --filter "name=postgres" --format "{{.Names}}" | head -n 1 || true)"
+  if [[ "$TARGET_ENV" == "prod" ]]; then
+    POSTGRES_CONTAINER="$(docker ps --filter "name=postgres" --format "{{.Names}}" | grep -E "drio4inydistgaevc6az7kks|socialflow-production" | head -n 1 || true)"
+  elif [[ "$TARGET_ENV" == "homolog" ]]; then
+    POSTGRES_CONTAINER="$(docker ps --filter "name=postgres" --format "{{.Names}}" | grep -E "4iuijgj7ocivevuow4yga8z7|socialflow-homolog" | head -n 1 || true)"
   fi
 fi
 
 if [[ -z "$POSTGRES_CONTAINER" ]]; then
-  echo "[ERROR] Could not detect running PostgreSQL container." >&2
+  echo "[ERROR] Could not detect running PostgreSQL container for environment '${TARGET_ENV}'." >&2
   exit 2
 fi
 
-echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting backup from container: ${POSTGRES_CONTAINER}"
+# Prevent cross-environment targeting violations
+if [[ "$TARGET_ENV" == "prod" && "$POSTGRES_CONTAINER" =~ (4iuijgj7ocivevuow4yga8z7|homolog) ]]; then
+  echo "[ERROR] Safety violation: PostgreSQL container '${POSTGRES_CONTAINER}' belongs to homologation, but TARGET_ENV is 'prod'!" >&2
+  exit 2
+fi
+if [[ "$TARGET_ENV" == "homolog" && "$POSTGRES_CONTAINER" =~ (drio4inydistgaevc6az7kks|production) ]]; then
+  echo "[ERROR] Safety violation: PostgreSQL container '${POSTGRES_CONTAINER}' belongs to production, but TARGET_ENV is 'homolog'!" >&2
+  exit 2
+fi
+
+echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Starting backup for [${TARGET_ENV^^}] from container: ${POSTGRES_CONTAINER}"
 
 # 2. Consistent pg_dump
 DUMP_TMP="/tmp/${BACKUP_BASE_NAME}.dump"
@@ -213,10 +260,10 @@ else
   # Keep in local backup archive directory if remote not yet configured.
   # This is NOT an external backup: no off-site copy exists, so it must never
   # be reported as backup success to monitoring/RPO, only as a local artifact.
-  mkdir -p "${BACKUP_LOCAL_DIR}/archive"
-  cp "$ENCRYPTED_DUMP" "${BACKUP_LOCAL_DIR}/archive/"
-  cp "$CHECKSUM_FILE" "${BACKUP_LOCAL_DIR}/archive/"
-  echo "[WARNING] Remote storage not configured (missing R2 credentials). Encrypted dump stored ONLY locally in ${BACKUP_LOCAL_DIR}/archive/ -- this does NOT satisfy off-site backup / RPO."
+  mkdir -p "${BACKUP_LOCAL_DIR}/archive/${TARGET_ENV}"
+  cp "$ENCRYPTED_DUMP" "${BACKUP_LOCAL_DIR}/archive/${TARGET_ENV}/"
+  cp "$CHECKSUM_FILE" "${BACKUP_LOCAL_DIR}/archive/${TARGET_ENV}/"
+  echo "[WARNING] Remote storage not configured (missing R2 credentials). Encrypted dump stored ONLY locally in ${BACKUP_LOCAL_DIR}/archive/${TARGET_ENV}/ -- this does NOT satisfy off-site backup / RPO."
 fi
 
 END_TIME="$(date +%s)"
@@ -228,6 +275,7 @@ LOCAL_STATUS=$([[ "$REMOTE_UPLOAD_CONFIRMED" == "true" ]] && echo "success_remot
 cat <<EOF > "$STATUS_FILE"
 {
   "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+  "environment": "${TARGET_ENV}",
   "status": "${LOCAL_STATUS}",
   "remoteUploadConfirmed": ${REMOTE_UPLOAD_CONFIRMED},
   "backupFile": "$(basename "$ENCRYPTED_DUMP")",
@@ -235,7 +283,7 @@ cat <<EOF > "$STATUS_FILE"
   "rawSizeBytes": ${DUMP_SIZE},
   "sha256": "${SHA256_VAL}",
   "durationSeconds": ${DURATION},
-  "destination": "${R2_BUCKET:-local_archive}"
+  "destination": "${R2_BUCKET:-local_archive}/${R2_PREFIX}"
 }
 EOF
 
@@ -247,15 +295,16 @@ if [[ "$REMOTE_UPLOAD_CONFIRMED" == "true" ]]; then
   cat <<EOF > "$REMOTE_STATUS_FILE"
 {
   "timestamp": "$(date -u +'%Y-%m-%dT%H:%M:%SZ')",
+  "environment": "${TARGET_ENV}",
   "backupFile": "$(basename "$ENCRYPTED_DUMP")",
   "sizeBytes": ${ENC_SIZE},
   "sha256": "${SHA256_VAL}",
   "destination": "${R2_BUCKET}/${R2_PREFIX}"
 }
 EOF
-  send_discord_alert "SUCESSO" "Backup diário concluído e enviado ao destino externo.\nArquivo: \`$(basename "$ENCRYPTED_DUMP")\`\nTamanho: $((ENC_SIZE / 1024)) KB\nDuração: ${DURATION}s\nSHA256: \`${SHA256_VAL}\`\nRetenção: ${RETENTION_DAYS} dias" 3066993
+  send_discord_alert "SUCESSO" "Backup diário (${TARGET_ENV^^}) concluído e enviado ao destino externo.\nAmbiente: \`${TARGET_ENV}\`\nArquivo: \`$(basename "$ENCRYPTED_DUMP")\`\nDestino: \`${R2_BUCKET}/${R2_PREFIX}\`\nTamanho: $((ENC_SIZE / 1024)) KB\nDuração: ${DURATION}s\nSHA256: \`${SHA256_VAL}\`\nRetenção: ${RETENTION_DAYS} dias" 3066993
 else
-  send_discord_alert "ATENCAO: SEM ENVIO EXTERNO" "Dump local gerado e criptografado com sucesso, mas NAO foi enviado a nenhum destino externo (credenciais R2 ausentes). Isso NAO conta como backup externo valido para RPO.\nArquivo local: \`$(basename "$ENCRYPTED_DUMP")\`\nDuração: ${DURATION}s\nSHA256: \`${SHA256_VAL}\`" 16776960
+  send_discord_alert "ATENCAO: SEM ENVIO EXTERNO" "Dump local de (${TARGET_ENV^^}) gerado e criptografado com sucesso, mas NAO foi enviado a nenhum destino externo (credenciais R2 ausentes). Isso NAO conta como backup externo valido para RPO.\nAmbiente: \`${TARGET_ENV}\`\nArquivo local: \`$(basename "$ENCRYPTED_DUMP")\`\nDuração: ${DURATION}s\nSHA256: \`${SHA256_VAL}\`" 16776960
 fi
 
 echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] Backup process completed in ${DURATION}s. status=${LOCAL_STATUS} remoteUploadConfirmed=${REMOTE_UPLOAD_CONFIRMED}"

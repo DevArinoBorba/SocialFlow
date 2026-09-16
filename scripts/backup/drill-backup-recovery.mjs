@@ -444,12 +444,13 @@ EOF
   const noR2Config = resolve(baseDir, "noR2.env");
   writeFileSync(
     noR2Config,
-    `POSTGRES_USER=socialflow_migration\nPOSTGRES_DB=socialflow\nGPG_RECIPIENT="SocialFlow Backup"\nRETENTION_DAYS=30\n`,
+    `SOCIALFLOW_ENV=homolog\nPOSTGRES_USER=socialflow_migration\nPOSTGRES_DB=socialflow\nGPG_RECIPIENT="SocialFlow Backup"\nRETENTION_DAYS=30\n`,
   );
   const r2Config = resolve(baseDir, "r2.env");
   writeFileSync(
     r2Config,
     [
+      "SOCIALFLOW_ENV=homolog",
       "POSTGRES_USER=socialflow_migration",
       "POSTGRES_DB=socialflow",
       'GPG_RECIPIENT="SocialFlow Backup"',
@@ -495,9 +496,17 @@ EOF
     });
     let statusA = {};
     try {
-      statusA = JSON.parse(
-        readFileSync(resolve(backupLocalDirA, "last_backup.json"), "utf8"),
-      );
+      const fileA = [
+        resolve(backupLocalDirA, "last_backup_homolog.json"),
+        resolve(backupLocalDirA, "last_backup.json"),
+      ].find((p) => {
+        try {
+          return Boolean(readFileSync(p));
+        } catch {
+          return false;
+        }
+      });
+      statusA = JSON.parse(readFileSync(fileA, "utf8"));
     } catch (err) {
       void err;
     }
@@ -510,9 +519,17 @@ EOF
     );
     let remoteMarkerAExists = true;
     try {
-      readFileSync(
+      const markerA = [
+        resolve(backupLocalDirA, "last_successful_remote_backup_homolog.json"),
         resolve(backupLocalDirA, "last_successful_remote_backup.json"),
-      );
+      ].find((p) => {
+        try {
+          return Boolean(readFileSync(p));
+        } catch {
+          return false;
+        }
+      });
+      if (!markerA) remoteMarkerAExists = false;
     } catch (err) {
       void err;
       remoteMarkerAExists = false;
@@ -533,9 +550,17 @@ EOF
     });
     let statusB = {};
     try {
-      statusB = JSON.parse(
-        readFileSync(resolve(backupLocalDirB, "last_backup.json"), "utf8"),
-      );
+      const fileB = [
+        resolve(backupLocalDirB, "last_backup_homolog.json"),
+        resolve(backupLocalDirB, "last_backup.json"),
+      ].find((p) => {
+        try {
+          return Boolean(readFileSync(p));
+        } catch {
+          return false;
+        }
+      });
+      statusB = JSON.parse(readFileSync(fileB, "utf8"));
     } catch (err) {
       void err;
     }
