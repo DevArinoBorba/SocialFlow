@@ -3,7 +3,7 @@ import { beforeEach, afterAll, describe, it, expect } from "vitest";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
-import { createDatabase, asActor } from "../../packages/db/src/index.js";
+import { createDatabase, asActor } from "@socialflow/db";
 import { createAuth } from "../../apps/api/src/auth.js";
 
 const requireApi = createRequire(
@@ -17,11 +17,15 @@ import {
   registerMedia,
   MediaError,
   type MediaStorage,
+  type Scope,
 } from "../../apps/api/src/media.js";
+
+import type { ServerResponse } from "node:http";
+
+type AppRequest = Parameters<Scope>[0];
 import { mediaStorage } from "../../apps/api/src/media-storage.js";
 import { readConfig } from "../../packages/config/src/index.js";
 import { isAdmin } from "../../packages/contracts/src/index.js";
-import type { Prisma } from "@socialflow/db";
 import type { AddressInfo } from "node:net";
 
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
@@ -35,9 +39,9 @@ const getRealStorage = () => {
   return store;
 };
 const config = readConfig(process.env);
-const auth = createAuth(runtime as any, config);
+const auth = createAuth(runtime, config);
 
-async function actor(req: any) {
+async function actor(req: AppRequest) {
   const session = await auth.api.getSession({
     headers: fromNodeHeaders(req.headers),
   });
@@ -50,11 +54,7 @@ async function actor(req: any) {
   return user;
 }
 
-const defaultScoped = async <T>(
-  req: any,
-  organizationId: string,
-  fn: (tx: any, userId: string, admin: boolean) => Promise<T>,
-) => {
+const defaultScoped: Scope = async (req, organizationId, fn) => {
   const user = await actor(req);
   return asActor(runtime, user.id, async (tx) => {
     const memberships = await tx.membership.findMany({
@@ -77,10 +77,10 @@ const defaultScoped = async <T>(
 
 async function createMediaHarness(options?: {
   storage?: MediaStorage | null;
-  scopedOverride?: (origScoped: typeof defaultScoped) => typeof defaultScoped;
+  scopedOverride?: (origScoped: Scope) => Scope;
 }) {
   const app = express();
-  app.use((req: any, res: any, next: any) => {
+  app.use((_req: AppRequest, res: ServerResponse, next: () => void) => {
     const requestId = randomUUID();
     res.setHeader("X-Request-Id", requestId);
     next();
@@ -91,7 +91,7 @@ async function createMediaHarness(options?: {
     ? options.scopedOverride(defaultScoped)
     : defaultScoped;
 
-  const closeMedia = registerMedia(app, scoped as any, {
+  const closeMedia = registerMedia(app, scoped, {
     storage:
       options?.storage !== undefined ? options.storage : getRealStorage(),
   });
@@ -802,12 +802,8 @@ describe("private media", () => {
   it("preserves uploading state without publishing when persistence dependency fails during commit and recovery", async () => {
     let interceptPut = false;
     let callsDuringPut = 0;
-    const scopedOverride = (origScoped: typeof defaultScoped) => {
-      return (async (
-        req: any,
-        org: string,
-        fn: Parameters<typeof defaultScoped>[2],
-      ) => {
+    const scopedOverride = (origScoped: Scope): Scope => {
+      return async (req, org, fn) => {
         if (interceptPut) {
           callsDuringPut++;
           // Chamadas 1 e 2 passam: checagem de pending e transição para uploading.
@@ -819,7 +815,7 @@ describe("private media", () => {
           }
         }
         return origScoped(req, org, fn);
-      }) as typeof defaultScoped;
+      };
     };
 
     const harness = await createMediaHarness({

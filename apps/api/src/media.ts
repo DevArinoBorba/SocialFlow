@@ -8,7 +8,7 @@ import {
   validateImage,
 } from "./media-storage.js";
 
-type Scope = <T>(
+export type Scope = <T>(
   req: Request,
   org: string,
   fn: (
