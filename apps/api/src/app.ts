@@ -36,6 +36,7 @@ import {
   isAdmin,
 } from "@socialflow/contracts";
 import { createAuth } from "./auth.js";
+import { registerMedia, type MediaDependencies } from "./media.js";
 
 class HttpError extends Error {
   constructor(
@@ -45,7 +46,15 @@ class HttpError extends Error {
     super(message);
   }
 }
-export async function createApplication(config: Config) {
+
+export interface CreateApplicationOptions {
+  mediaDependencies?: MediaDependencies;
+}
+
+export async function createApplication(
+  config: Config,
+  options?: CreateApplicationOptions,
+) {
   const db = createDatabase(config.DATABASE_URL);
   await assertRuntimeRole(db);
   const redis = new Redis(config.REDIS_URL, {
@@ -166,6 +175,7 @@ export async function createApplication(config: Config) {
         .json({ message: "Serviço indisponível. Tente novamente." });
     }
   }
+  const closeMedia = registerMedia(server, scoped, options?.mediaDependencies);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {
@@ -571,6 +581,7 @@ export async function createApplication(config: Config) {
     queue,
     auth,
     close: async () => {
+      closeMedia();
       await app.close();
       await queue.close();
       redis.disconnect();

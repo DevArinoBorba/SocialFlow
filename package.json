@@ -22,14 +22,15 @@
     "test:foundation": "node scripts/foundation-drill.mjs"
   },
   "devDependencies": {
-    "@socialflow/db": "workspace:*",
-    "bullmq": "6.3.4",
-    "ioredis": "6.0.0",
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.63.0",
+    "@socialflow/db": "workspace:*",
     "@types/node": "22.20.2",
+    "bullmq": "6.3.4",
     "eslint": "10.10.0",
+    "ioredis": "6.0.0",
     "prettier": "3.9.6",
+    "sharp": "0.35.4",
     "tsx": "4.21.0",
     "typescript": "6.0.3",
     "typescript-eslint": "8.70.0",

@@ -377,7 +377,55 @@ footer {
   scrollbar-color: #84998c var(--paper);
   scrollbar-width: thin;
 }
+.media-library {
+  margin-top: 48px;
+  border-top: 1px solid var(--line);
+  padding-top: 32px;
+}
+.media-upload {
+  margin: 24px 0;
+}
+.media-upload summary {
+  cursor: pointer;
+  padding: 14px 0;
+  font-weight: 700;
+}
+.media-filter {
+  display: block;
+  max-width: 360px;
+  margin: 24px 0;
+}
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 24px;
+}
+.media-item {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.media-item img {
+  width: 100%;
+  height: 220px;
+  object-fit: contain;
+  background: white;
+  border: 1px solid var(--line);
+}
+.media-item p {
+  white-space: pre-wrap;
+}
+.media-item .form-actions {
+  flex-wrap: wrap;
+}
+.media-item input,
+.media-item textarea,
+.media-item select {
+  max-width: 100%;
+}
 @media (max-width: 720px) {
+  .media-grid {
+    grid-template-columns: 1fr;
+  }
   .login-shell {
     grid-template-columns: 1fr;
   }

@@ -1,5 +1,28 @@
 # Architecture Decision Records
 
+## ADR-011 — biblioteca privada de imagens (15/09/2026)
+
+Selecionados @aws-sdk/client-s3 3.1132.0 (Apache-2.0, publicação npm observada
+em 14/09/2026) e sharp 0.35.4 (Apache-2.0, atividade npm em 26/08/2026).
+O SDK oficial evita implementar assinatura S3. Sharp decodifica e normaliza
+os pixels; file-type/image-size isoladamente não comprovam decodificação
+completa. Dependências nativas do sharp exigem validação na imagem Docker,
+limite de pixels e concorrência. SDK fixado no lockfile; pnpm registrou a
+exceção de idade mínima para a versão publicada recentemente.
+
+Fontes: [AWS SDK](https://github.com/aws/aws-sdk-js-v3),
+[sharp](https://github.com/lovell/sharp),
+[limites do decoder](https://sharp.pixelplumbing.com/api-constructor/),
+[URLs assinadas R2](https://developers.cloudflare.com/r2/api/s3/presigned-urls/).
+
+URLs assinadas podem ser reutilizadas até expirar. Neste incremento de imagens
+pequenas, upload e leitura passam pela API autenticada; isso permite revalidar
+permissões sem janela de credencial assinada e evita substituição pós-validação.
+Risco: maior uso de memória e tráfego da API. Medir antes de ampliar escala.
+MinIO existente é reutilizado apenas no Compose de testes. Impeccable foi
+consultada para estender a interface existente, sem redesenho.
+Detalhes e limites no [relatório de mídia](discovery/PHASE2-MEDIA-IMPLEMENTATION.md).
+
 ## ADR-010 — fechamento operacional da fundação (12/09/2026)
 
 Bootstrap offline com hashing Better Auth, verificação da role runtime,

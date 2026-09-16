@@ -78,6 +78,7 @@ model Organization {
   clients Client[]
   memberships Membership[]
   brands Brand[]
+  mediaAssets MediaAsset[]
 }
 model Client {
   id String @id @default(uuid())
@@ -89,6 +90,7 @@ model Client {
   createdAt DateTime @default(now())
   memberships Membership[]
   brands Brand[]
+  mediaAssets MediaAsset[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -118,8 +120,34 @@ model Brand {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   @@unique([organizationId, id])
+  mediaAssets MediaAsset[]
+  @@unique([organizationId, clientId, id])
   @@index([organizationId, clientId])
 }
+model MediaAsset {
+  id String @id @default(uuid())
+  organizationId String
+  organization Organization @relation(fields: [organizationId], references: [id])
+  clientId String
+  client Client @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  brandId String?
+  brand Brand? @relation(fields: [organizationId, clientId, brandId], references: [organizationId, clientId, id])
+  name String
+  description String @default("")
+  storageKey String @unique
+  status String @default("pending")
+  mimeType String?
+  byteSize Int?
+  width Int?
+  height Int?
+  sha256 String?
+  archived Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([organizationId, id])
+  @@index([organizationId, clientId, createdAt, id])
+}
+
 model AuditLog {
   id String @id @default(uuid())
   organizationId String

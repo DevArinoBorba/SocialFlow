@@ -1,4 +1,5 @@
 "use client";
+import { MediaLibrary } from "./media-library";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   isAdmin,
@@ -691,6 +692,14 @@ export default function Home() {
                 </section>
               )
             )}
+            <MediaLibrary
+              key={`${org}/${selectedClientId}`}
+              org={org}
+              clientId={selectedClientId}
+              brands={brands}
+              canWrite={canWriteBrands}
+              canArchive={canCreateClient}
+            />
           </div>
         ) : (
           /* Visão da Lista de Clientes */
