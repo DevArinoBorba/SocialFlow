@@ -7,6 +7,10 @@ async function proxy(request: NextRequest) {
     /^\/api\/organizations\/[^/]+\/clients\/[^/]+\/media\/[^/]+\/content$/.test(
       incoming.pathname,
     );
+  const isBatchImport =
+    /^\/api\/organizations\/[^/]+\/clients\/[^/]+\/batches\/[^/]+\/import$/.test(
+      incoming.pathname,
+    );
   const defaultCsp = isMediaContent
     ? "default-src 'none'; sandbox"
     : "default-src 'none'; frame-ancestors 'none'";
@@ -36,8 +40,13 @@ async function proxy(request: NextRequest) {
     if (value) headers.set(key, value);
   }
   try {
-    const upload = request.method === "PUT" && isMediaContent;
-    const limit = upload ? 10 * 1024 * 1024 : 16384;
+    const isMediaUpload = request.method === "PUT" && isMediaContent;
+    const isCsvImport = request.method === "POST" && isBatchImport;
+    const limit = isMediaUpload
+      ? 10 * 1024 * 1024
+      : isCsvImport
+        ? 2 * 1024 * 1024
+        : 16384;
     let body: Buffer | undefined;
     if (!["GET", "HEAD"].includes(request.method) && request.body) {
       const reader = request.body.getReader();
@@ -70,7 +79,7 @@ async function proxy(request: NextRequest) {
       body: body ? new Uint8Array(body).buffer : undefined,
       redirect: "manual",
       cache: "no-store",
-      signal: AbortSignal.timeout(upload ? 60000 : 20000),
+      signal: AbortSignal.timeout(isMediaUpload || isCsvImport ? 60000 : 20000),
     });
     const outgoing = new Headers({
       "content-type": result.headers.get("content-type") ?? "application/json",

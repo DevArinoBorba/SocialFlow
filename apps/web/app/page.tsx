@@ -1,5 +1,6 @@
 "use client";
 import { MediaLibrary } from "./media-library";
+import { ContentManager } from "./content-manager";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   isAdmin,
@@ -354,6 +355,14 @@ export default function Home() {
         (m.clientId === selectedClientId && m.role === "EDITOR")),
   );
 
+  const canApprove = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && isAdmin(m.role)) ||
+        (m.clientId === selectedClientId &&
+          (m.role === "APPROVER" || m.role === "OWNER" || m.role === "ADMIN"))),
+  );
+
   return (
     <div className="workspace">
       <a className="skip" href="#content">
@@ -699,6 +708,15 @@ export default function Home() {
               brands={brands}
               canWrite={canWriteBrands}
               canArchive={canCreateClient}
+            />
+            <ContentManager
+              key={`content-${org}/${selectedClientId}`}
+              org={org}
+              clientId={selectedClientId}
+              brands={brands}
+              canWrite={canWriteBrands}
+              canApprove={canApprove}
+              canSubmitReview={canWriteBrands}
             />
           </div>
         ) : (
