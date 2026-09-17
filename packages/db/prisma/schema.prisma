@@ -79,6 +79,8 @@ model Organization {
   memberships Membership[]
   brands Brand[]
   mediaAssets MediaAsset[]
+  contentBatches ContentBatch[]
+  posts Post[]
 }
 model Client {
   id String @id @default(uuid())
@@ -91,6 +93,8 @@ model Client {
   memberships Membership[]
   brands Brand[]
   mediaAssets MediaAsset[]
+  contentBatches ContentBatch[]
+  posts Post[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -121,6 +125,7 @@ model Brand {
   updatedAt DateTime @updatedAt
   @@unique([organizationId, id])
   mediaAssets MediaAsset[]
+  posts Post[]
   @@unique([organizationId, clientId, id])
   @@index([organizationId, clientId])
 }
@@ -157,3 +162,67 @@ model AuditLog {
   createdAt DateTime @default(now())
   @@index([organizationId, createdAt])
 }
+
+enum BatchStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum PostStatus {
+  DRAFT
+  IN_REVIEW
+  APPROVED
+  REJECTED
+}
+
+model ContentBatch {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  clientId       String
+  client         Client       @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  name           String
+  sourceType     String       @default("CSV")
+  status         BatchStatus  @default(PENDING)
+  totalRows      Int          @default(0)
+  validRows      Int          @default(0)
+  invalidRows    Int          @default(0)
+  errorReport    Json?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  posts          Post[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@index([organizationId, clientId, createdAt])
+}
+
+model Post {
+  id              String        @id @default(uuid())
+  organizationId  String
+  organization    Organization  @relation(fields: [organizationId], references: [id])
+  clientId        String
+  client          Client        @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  batchId         String?
+  batch           ContentBatch? @relation(fields: [organizationId, clientId, batchId], references: [organizationId, clientId, id], onDelete: Restrict)
+  brandId         String?
+  brand           Brand?        @relation(fields: [organizationId, clientId, brandId], references: [organizationId, clientId, id], onDelete: Restrict)
+  status          PostStatus    @default(DRAFT)
+  title           String?
+  caption         String
+  hashtags        String?
+  callToAction    String?
+  firstComment    String?
+  suggestedDate   DateTime?
+  rejectionReason String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@index([organizationId, clientId, status, createdAt])
+  @@index([organizationId, clientId, batchId])
+}
+

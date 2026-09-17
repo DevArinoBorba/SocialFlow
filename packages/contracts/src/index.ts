@@ -64,3 +64,5 @@ export type Brand = {
   createdAt: string | Date;
   updatedAt: string | Date;
 };
+
+export * from "./content.js";
