@@ -37,3 +37,5 @@ export function asActor<T>(
     return action(tx);
   });
 }
+
+export * from "./crypto.js";

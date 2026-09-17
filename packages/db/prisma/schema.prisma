@@ -81,6 +81,8 @@ model Organization {
   mediaAssets MediaAsset[]
   contentBatches ContentBatch[]
   posts Post[]
+  socialAccounts SocialAccount[]
+  publicationAttempts PublicationAttempt[]
 }
 model Client {
   id String @id @default(uuid())
@@ -95,6 +97,8 @@ model Client {
   mediaAssets MediaAsset[]
   contentBatches ContentBatch[]
   posts Post[]
+  socialAccounts SocialAccount[]
+  publicationAttempts PublicationAttempt[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -200,29 +204,118 @@ model ContentBatch {
 }
 
 model Post {
-  id              String        @id @default(uuid())
-  organizationId  String
-  organization    Organization  @relation(fields: [organizationId], references: [id])
-  clientId        String
-  client          Client        @relation(fields: [organizationId, clientId], references: [organizationId, id])
-  batchId         String?
-  batch           ContentBatch? @relation(fields: [organizationId, clientId, batchId], references: [organizationId, clientId, id], onDelete: Restrict)
-  brandId         String?
-  brand           Brand?        @relation(fields: [organizationId, clientId, brandId], references: [organizationId, clientId, id], onDelete: Restrict)
-  status          PostStatus    @default(DRAFT)
-  title           String?
-  caption         String
-  hashtags        String?
-  callToAction    String?
-  firstComment    String?
-  suggestedDate   DateTime?
-  rejectionReason String?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  id                  String               @id @default(uuid())
+  organizationId      String
+  organization        Organization         @relation(fields: [organizationId], references: [id])
+  clientId            String
+  client              Client               @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  batchId             String?
+  batch               ContentBatch?        @relation(fields: [organizationId, clientId, batchId], references: [organizationId, clientId, id], onDelete: Restrict)
+  brandId             String?
+  brand               Brand?               @relation(fields: [organizationId, clientId, brandId], references: [organizationId, clientId, id], onDelete: Restrict)
+  status              PostStatus           @default(DRAFT)
+  title               String?
+  caption             String
+  hashtags            String?
+  callToAction        String?
+  firstComment        String?
+  suggestedDate       DateTime?
+  rejectionReason     String?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  publicationAttempts PublicationAttempt[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
   @@index([organizationId, clientId, status, createdAt])
   @@index([organizationId, clientId, batchId])
+}
+
+enum SocialPlatform {
+  FACEBOOK_PAGE
+  INSTAGRAM_BUSINESS
+}
+
+enum SocialAccountStatus {
+  ACTIVE
+  EXPIRED
+  REVOKED
+  DISCONNECTED
+}
+
+enum PublicationAttemptStatus {
+  PENDING
+  CONTAINER_CREATED
+  PUBLISHED
+  FAILED
+}
+
+model SocialAccount {
+  id                  String               @id @default(uuid())
+  organizationId      String
+  organization        Organization         @relation(fields: [organizationId], references: [id])
+  clientId            String
+  client              Client               @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  platform            SocialPlatform
+  platformAccountId    String
+  name                String
+  username            String?
+  avatarUrl           String?
+  status              SocialAccountStatus  @default(ACTIVE)
+  metadata            Json?
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  credential          OAuthCredential?
+  publicationAttempts PublicationAttempt[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@unique([organizationId, clientId, platform, platformAccountId])
+  @@index([organizationId, clientId, status])
+}
+
+model OAuthCredential {
+  id                   String        @id @default(uuid())
+  socialAccountId       String        @unique
+  socialAccount        SocialAccount @relation(fields: [socialAccountId], references: [id], onDelete: Cascade)
+  encryptedAccessToken String
+  iv                   String
+  authTag              String
+  keyVersion           Int           @default(1)
+  tokenType            String        @default("PAGE_ACCESS_TOKEN")
+  scopes               String[]      @default([])
+  expiresAt            DateTime?
+  lastRefreshedAt      DateTime      @default(now())
+  reconnectReason      String?
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+}
+
+model PublicationAttempt {
+  id                  String                   @id @default(uuid())
+  organizationId      String
+  organization        Organization             @relation(fields: [organizationId], references: [id])
+  clientId            String
+  client              Client                   @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  postId              String
+  post                Post                     @relation(fields: [organizationId, clientId, postId], references: [organizationId, clientId, id], onDelete: Cascade)
+  socialAccountId      String
+  socialAccount       SocialAccount            @relation(fields: [organizationId, clientId, socialAccountId], references: [organizationId, clientId, id], onDelete: Cascade)
+  status              PublicationAttemptStatus @default(PENDING)
+  creationContainerId String?
+  remoteMediaId       String?
+  remotePermalink     String?
+  errorCode           String?
+  errorMessage        String?
+  attemptNumber       Int                      @default(1)
+  executedAt          DateTime                 @default(now())
+  createdAt           DateTime                 @default(now())
+  updatedAt           DateTime                 @updatedAt
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@index([organizationId, clientId, status, executedAt])
+  @@index([postId, socialAccountId])
+  @@index([creationContainerId])
 }
 
