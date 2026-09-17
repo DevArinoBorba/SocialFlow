@@ -37,6 +37,7 @@ import {
 } from "@socialflow/contracts";
 import { createAuth } from "./auth.js";
 import { registerMedia, type MediaDependencies } from "./media.js";
+import { registerContent } from "./content.js";
 
 class HttpError extends Error {
   constructor(
@@ -176,6 +177,7 @@ export async function createApplication(
     }
   }
   const closeMedia = registerMedia(server, scoped, options?.mediaDependencies);
+  registerContent(server, scoped);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {
