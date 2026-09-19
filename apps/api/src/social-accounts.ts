@@ -3,6 +3,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { Redis } from "ioredis";
 import {
   createCredentialCrypto,
+  parseMasterKey,
   type Prisma,
   type CredentialContext,
 } from "@socialflow/db";
@@ -106,10 +107,7 @@ export function registerSocialAccounts(
     "https://graph.facebook.com";
   const appId = dependencies?.appId ?? config.META_APP_ID;
   const appSecret = dependencies?.appSecret ?? config.META_APP_SECRET;
-  const masterKey =
-    dependencies?.masterKey ??
-    config.CREDENTIAL_MASTER_KEY ??
-    "0123456789abcdef0123456789abcdef";
+  const masterKey = dependencies?.masterKey ?? config.CREDENTIAL_MASTER_KEY;
 
   const param = (req: Request, name: string): string => {
     const val = req.params[name];
@@ -252,10 +250,19 @@ export function registerSocialAccounts(
   // --- 1. META AUTHORIZE ---
   const authorizeHandler = handler(async (req, res) => {
     await access(req, ["OWNER", "ADMIN", "EDITOR"], async (tx, userId) => {
-      if (!appId || !appSecret) {
+      if (!appId || !appSecret || !masterKey) {
         throw new SocialAccountError(
           503,
           "Integração com a Meta não está configurada.",
+        );
+      }
+
+      try {
+        parseMasterKey(masterKey);
+      } catch {
+        throw new SocialAccountError(
+          503,
+          "Chave de criptografia de credenciais inválida no servidor.",
         );
       }
 
@@ -376,7 +383,7 @@ export function registerSocialAccounts(
       );
     }
 
-    if (!appId || !appSecret) {
+    if (!appId || !appSecret || !masterKey) {
       if (isBrowserNavigation) {
         res.redirect(302, "/?meta_error=not_configured");
         return;
@@ -384,6 +391,20 @@ export function registerSocialAccounts(
       throw new SocialAccountError(
         503,
         "Integração com a Meta não está configurada.",
+      );
+    }
+
+    let resolvedMasterKey: Buffer;
+    try {
+      resolvedMasterKey = parseMasterKey(masterKey);
+    } catch {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=not_configured");
+        return;
+      }
+      throw new SocialAccountError(
+        503,
+        "Chave de criptografia de credenciais inválida no servidor.",
       );
     }
 
@@ -580,7 +601,7 @@ export function registerSocialAccounts(
             ? (accountsData.data as Record<string, unknown>[])
             : [];
 
-          const credentialCrypto = createCredentialCrypto(masterKey, 1);
+          const credentialCrypto = createCredentialCrypto(resolvedMasterKey, 1);
           const discoveryId = randomUUID();
           const expiresAt = new Date(Date.now() + 600 * 1000).toISOString();
 

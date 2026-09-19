@@ -2791,4 +2791,173 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       await customApp.close();
     }
   });
+
+  it("comprova ausência de fallback e resposta segura de indisponibilidade quando Meta não está configurada, preservando demais módulos", async () => {
+    // Config sem nenhuma credencial Meta ou master key
+    const unconfiguredConfig = readConfig({
+      ...process.env,
+      META_APP_ID: "",
+      META_APP_SECRET: "",
+      CREDENTIAL_MASTER_KEY: "",
+    });
+
+    const unconfiguredApp = await createApplication(unconfiguredConfig);
+    await unconfiguredApp.app.listen(0, "127.0.0.1");
+    const addr = unconfiguredApp.app.getHttpServer().address() as AddressInfo;
+    const testBase = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      // 1. Autenticação funciona normalmente
+      const loginRes = await fetch(`${testBase}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+        },
+        body: JSON.stringify({
+          email: "admin-a@socialflow.test",
+          password,
+        }),
+      });
+      expect(loginRes.status).toBe(200);
+      const cookie = loginRes.headers
+        .getSetCookie()
+        .map((s) => s.split(";")[0])
+        .join("; ");
+
+      // 2. Módulos não relacionados à Meta funcionam com sucesso (200)
+      const meRes = await fetch(`${testBase}/api/me`, {
+        headers: { cookie, origin },
+      });
+      expect(meRes.status).toBe(200);
+
+      const clientsRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients`,
+        { headers: { cookie, origin } },
+      );
+      expect(clientsRes.status).toBe(200);
+
+      const brandsRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/brands`,
+        { headers: { cookie, origin } },
+      );
+      expect(brandsRes.status).toBe(200);
+
+      const mediaRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/media`,
+        { headers: { cookie, origin } },
+      );
+      expect(mediaRes.status).toBe(200);
+
+      const socialListRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/social-accounts`,
+        { headers: { cookie, origin } },
+      );
+      expect(socialListRes.status).toBe(200);
+
+      // 3. Endpoints que exigem integração Meta respondem com erro seguro 503 antes de iniciar OAuth
+      const authRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/integrations/meta/authorize`,
+        { headers: { cookie, origin } },
+      );
+      expect(authRes.status).toBe(503);
+      const authBody = (await authRes.json()) as { message: string };
+      expect(authBody.message).toBe("Serviço indisponível. Tente novamente.");
+
+      // 4. Callback em modo API responde 503 com mensagem segura
+      const callbackApiRes = await fetch(
+        `${testBase}/api/integrations/meta/callback?code=mock_code&state=mock_state`,
+        { headers: { cookie, origin } },
+      );
+      expect(callbackApiRes.status).toBe(503);
+      const callbackApiBody = (await callbackApiRes.json()) as {
+        message: string;
+      };
+      expect(callbackApiBody.message).toBe(
+        "Serviço indisponível. Tente novamente.",
+      );
+
+      // 5. Callback em modo navegador redireciona de forma segura com meta_error=not_configured
+      const callbackBrowserRes = await fetch(
+        `${testBase}/api/integrations/meta/callback?code=mock_code&state=mock_state`,
+        {
+          headers: {
+            cookie,
+            origin,
+            "sec-fetch-dest": "document",
+          },
+          redirect: "manual",
+        },
+      );
+      expect(callbackBrowserRes.status).toBe(302);
+      expect(callbackBrowserRes.headers.get("location")).toBe(
+        "/?meta_error=not_configured",
+      );
+    } finally {
+      await unconfiguredApp.close();
+    }
+  });
+
+  it("comprova rejeição de chave de criptografia inválida no servidor com erro 503", async () => {
+    const invalidKeyApp = await createApplication(
+      readConfig({
+        ...process.env,
+        META_APP_ID: "valid-app-id",
+        META_APP_SECRET: "valid-app-secret",
+        CREDENTIAL_MASTER_KEY: "0123456789abcdef".repeat(4), // valid format for config
+      }),
+      {
+        socialAccountDependencies: {
+          appId: "valid-app-id",
+          appSecret: "valid-app-secret",
+          masterKey: "chave_invalida_curta", // inválida para o módulo criptográfico (deve ter 32 bytes)
+        },
+      },
+    );
+
+    await invalidKeyApp.app.listen(0, "127.0.0.1");
+    const addr = invalidKeyApp.app.getHttpServer().address() as AddressInfo;
+    const testBase = `http://127.0.0.1:${addr.port}`;
+
+    try {
+      const loginRes = await fetch(`${testBase}/api/auth/sign-in/email`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin,
+        },
+        body: JSON.stringify({
+          email: "admin-a@socialflow.test",
+          password,
+        }),
+      });
+      expect(loginRes.status).toBe(200);
+      const cookie = loginRes.headers
+        .getSetCookie()
+        .map((s) => s.split(";")[0])
+        .join("; ");
+
+      // Rejeição antes de iniciar OAuth
+      const authRes = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/integrations/meta/authorize`,
+        { headers: { cookie, origin } },
+      );
+      expect(authRes.status).toBe(503);
+      const authBody = (await authRes.json()) as { message: string };
+      expect(authBody.message).toBe("Serviço indisponível. Tente novamente.");
+
+      // Rejeição no callback
+      const callbackRes = await fetch(
+        `${testBase}/api/integrations/meta/callback?code=mock_code&state=mock_state`,
+        { headers: { cookie, origin } },
+      );
+      expect(callbackRes.status).toBe(503);
+      const callbackBody = (await callbackRes.json()) as { message: string };
+      expect(callbackBody.message).toBe(
+        "Serviço indisponível. Tente novamente.",
+      );
+    } finally {
+      await invalidKeyApp.close();
+    }
+  });
 });

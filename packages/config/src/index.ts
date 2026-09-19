@@ -1,5 +1,10 @@
 import { z } from "zod";
 
+const masterKeySchema = z.string().refine((val) => {
+  if (/^[0-9a-fA-F]{64}$/.test(val)) return true;
+  return new TextEncoder().encode(val).length === 32;
+}, "CREDENTIAL_MASTER_KEY deve ter exatamente 32 bytes (ou 64 caracteres hexadecimais)");
+
 const schema = z.object({
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -17,13 +22,19 @@ const schema = z.object({
       "Gere um segredo",
     ),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
-  META_APP_ID: z.string().optional(),
-  META_APP_SECRET: z.string().optional(),
+  META_APP_ID: z.preprocess(
+    (val) => (val === "" ? undefined : val),
+    z.string().optional(),
+  ),
+  META_APP_SECRET: z.preprocess(
+    (val) => (val === "" ? undefined : val),
+    z.string().optional(),
+  ),
   META_GRAPH_URL: z.string().default("https://graph.facebook.com"),
-  CREDENTIAL_MASTER_KEY: z
-    .string()
-    .min(32)
-    .default("0123456789abcdef0123456789abcdef"),
+  CREDENTIAL_MASTER_KEY: z.preprocess(
+    (val) => (val === "" ? undefined : val),
+    masterKeySchema.optional(),
+  ),
 });
 export function readConfig(env: Record<string, string | undefined>) {
   const config = schema.parse(env);
