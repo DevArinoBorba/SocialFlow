@@ -24,6 +24,7 @@ model User {
   sessions Session[]
   accounts Account[]
   memberships Membership[]
+  oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
 }
 model Session {
   id String @id
@@ -83,6 +84,7 @@ model Organization {
   posts Post[]
   socialAccounts SocialAccount[]
   publicationAttempts PublicationAttempt[]
+  oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
 }
 model Client {
   id String @id @default(uuid())
@@ -99,6 +101,7 @@ model Client {
   posts Post[]
   socialAccounts SocialAccount[]
   publicationAttempts PublicationAttempt[]
+  oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -317,5 +320,23 @@ model PublicationAttempt {
   @@index([organizationId, clientId, status, executedAt])
   @@index([postId, socialAccountId])
   @@index([creationContainerId])
+}
+
+model OAuthDiscoveryConsumption {
+  id                  String       @id @default(uuid())
+  discoveryId         String       @unique
+  organizationId      String
+  organization        Organization @relation(fields: [organizationId], references: [id])
+  clientId            String
+  client              Client       @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  userId              String
+  user                User         @relation(fields: [userId], references: [id])
+  consumedAt          DateTime     @default(now())
+  selectedAssets      Json
+  connectedAccountIds String[]
+
+  @@unique([organizationId, discoveryId])
+  @@unique([organizationId, clientId, discoveryId])
+  @@index([organizationId, clientId, discoveryId])
 }
 

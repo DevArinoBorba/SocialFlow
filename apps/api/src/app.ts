@@ -38,6 +38,10 @@ import {
 import { createAuth } from "./auth.js";
 import { registerMedia, type MediaDependencies } from "./media.js";
 import { registerContent } from "./content.js";
+import {
+  registerSocialAccounts,
+  type SocialAccountDependencies,
+} from "./social-accounts.js";
 
 class HttpError extends Error {
   constructor(
@@ -50,6 +54,7 @@ class HttpError extends Error {
 
 export interface CreateApplicationOptions {
   mediaDependencies?: MediaDependencies;
+  socialAccountDependencies?: SocialAccountDependencies;
 }
 
 export async function createApplication(
@@ -178,6 +183,13 @@ export async function createApplication(
   }
   const closeMedia = registerMedia(server, scoped, options?.mediaDependencies);
   registerContent(server, scoped);
+  registerSocialAccounts(
+    server,
+    scoped,
+    redis,
+    config,
+    options?.socialAccountDependencies,
+  );
   @Controller()
   class FoundationController {
     @Get("health/live") live() {

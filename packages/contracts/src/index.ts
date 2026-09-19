@@ -66,3 +66,4 @@ export type Brand = {
 };
 
 export * from "./content.js";
+export * from "./social-account.js";

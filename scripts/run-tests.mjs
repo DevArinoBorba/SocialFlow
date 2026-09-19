@@ -25,6 +25,7 @@ const args =
         "run",
         "--config",
         "vitest.integration.config.ts",
+        ...process.argv.slice(3),
       ]
     : mode === "e2e"
       ? ["node_modules/@playwright/test/cli.js", "test"]

@@ -17,6 +17,13 @@ const schema = z.object({
       "Gere um segredo",
     ),
   PORT: z.coerce.number().int().min(1).max(65535).default(3001),
+  META_APP_ID: z.string().optional(),
+  META_APP_SECRET: z.string().optional(),
+  META_GRAPH_URL: z.string().default("https://graph.facebook.com"),
+  CREDENTIAL_MASTER_KEY: z
+    .string()
+    .min(32)
+    .default("0123456789abcdef0123456789abcdef"),
 });
 export function readConfig(env: Record<string, string | undefined>) {
   const config = schema.parse(env);
