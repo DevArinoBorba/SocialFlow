@@ -381,6 +381,10 @@ export default function Home() {
             <p className="help">
               Precisa de acesso? Fale com o administrador da sua organização.
             </p>
+            <p className="login-legal-footer">
+              <a href="/privacy">Privacidade</a> ·{" "}
+              <a href="/terms">Termos de Uso</a>
+            </p>
           </form>
         </section>
       </main>
