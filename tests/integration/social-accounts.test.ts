@@ -428,6 +428,12 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(body.url).toContain("code_challenge_method=S256");
     expect(body.authorizationUrl).toBe(body.url);
 
+    // Verifica que redirect_uri na URL de autorização aponta exatamente para a URL fixa
+    const parsedAuthUrl = new URL(body.url);
+    expect(parsedAuthUrl.searchParams.get("redirect_uri")).toBe(
+      `${origin}/api/integrations/meta/callback`,
+    );
+
     // Verifica persistência e TTL no Redis
     const stateKey = `meta:oauth:state:${body.state}`;
     const storedRaw = await redis.get(stateKey);
@@ -467,10 +473,68 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(res.status).toBe(404);
   });
 
+  it("callback válido na URL fixa descobre ativos e associa escopo do state armazenado no servidor", async () => {
+    const cookie = await login("admin-a");
+
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    expect(authRes.status).toBe(200);
+    const { state } = (await authRes.json()) as { state: string };
+
+    const stateRaw = await redis.get(`meta:oauth:state:${state}`);
+    const { codeChallenge } = JSON.parse(stateRaw!);
+
+    const code = `valid_callback_code_${randomUUID()}`;
+    metaMock.registerCode(code, {
+      codeChallenge,
+      pages: [
+        {
+          id: "page_valid_1",
+          name: "Facebook Page Valid 1",
+          access_token: "mock_token_valid_1",
+        },
+      ],
+    });
+
+    // Chamada à URL fixa sem depender de parâmetros de rota :org ou :clientId
+    const callbackRes = await request(
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
+      cookie,
+      "GET",
+    );
+    expect(callbackRes.status).toBe(200);
+    const discovery = (await callbackRes.json()) as {
+      discoveryId: string;
+      expiresAt: string;
+      assets: Array<{
+        platform: string;
+        platformAccountId: string;
+        name: string;
+      }>;
+    };
+
+    expect(discovery.discoveryId).toBeDefined();
+    expect(discovery.assets).toHaveLength(1);
+    expect(discovery.assets[0]?.platformAccountId).toBe("page_valid_1");
+
+    // Verifica que a descoberta armazenada no Redis herdou estritamente o tenant e o usuário do state
+    const discoveryRaw = await redis.get(
+      `meta:oauth:discovery:${discovery.discoveryId}`,
+    );
+    expect(discoveryRaw).not.toBeNull();
+    const storedDiscovery = JSON.parse(discoveryRaw!);
+    expect(storedDiscovery.organizationId).toBe("org-a");
+    expect(storedDiscovery.clientId).toBe("client-a");
+    expect(storedDiscovery.userId).toBe("admin-a");
+  });
+
   it("callback rejeita state adulterado com 400", async () => {
     const cookie = await login("admin-a");
     const res = await request(
-      "/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=some_code&state=tampered_fake_state_123",
+      "/api/integrations/meta/callback?code=some_code&state=tampered_fake_state_123",
       cookie,
       "GET",
     );
@@ -493,7 +557,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     await redis.del(`meta:oauth:state:${state}`);
 
     const res = await request(
-      `/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=any_code&state=${state}`,
+      `/api/integrations/meta/callback?code=any_code&state=${state}`,
       cookie,
       "GET",
     );
@@ -518,9 +582,9 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     const code = `reuse_code_${randomUUID()}`;
     metaMock.registerCode(code, { codeChallenge });
 
-    // 1ª chamada: consome o state
+    // 1ª chamada: consome o state na URL fixa
     const res1 = await request(
-      `/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
       cookie,
       "GET",
     );
@@ -528,7 +592,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
 
     // 2ª chamada com o mesmo state: deve ser rejeitada como já utilizado
     const res2 = await request(
-      `/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
       cookie,
       "GET",
     );
@@ -537,11 +601,11 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(body2.message).toContain("State inválido, expirado ou já utilizado");
   });
 
-  it("callback rejeita manipulação entre tenants com 403", async () => {
+  it("callback rejeita sessão diferente do state com 403", async () => {
     const cookieA = await login("admin-a");
     const cookieB = await login("admin-b");
 
-    // Gera state para org-a / client-a
+    // Gera state para admin-a
     const authRes = await request(
       "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
       cookieA,
@@ -551,18 +615,165 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
 
     const stateRaw = await redis.get(`meta:oauth:state:${state}`);
     const { codeChallenge } = JSON.parse(stateRaw!);
-    const code = `tamper_code_${randomUUID()}`;
+    const code = `diff_session_${randomUUID()}`;
     metaMock.registerCode(code, { codeChallenge });
 
-    // Invasor de org-b tenta usar o state de org-a em seu tenant
+    // Outro usuário (com outro cookie/sessão) tenta consumir o state
     const res = await request(
-      `/api/organizations/org-b/clients/client-b/integrations/meta/callback?code=${code}&state=${state}`,
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
       cookieB,
       "GET",
     );
     expect(res.status).toBe(403);
     const body = (await res.json()) as { message: string };
-    expect(body.message).toContain("Tentativa de manipulação de escopo");
+    expect(body.message).toContain(
+      "Tentativa de manipulação de escopo entre tenants, usuários ou sessões detectada.",
+    );
+  });
+
+  it("callback revalida permissões e rejeita permissão revogada antes do retorno com 403", async () => {
+    const cookie = await login("editor-a");
+
+    // Gera state enquanto o usuário ainda possui papel EDITOR
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    expect(authRes.status).toBe(200);
+    const { state } = (await authRes.json()) as { state: string };
+
+    const stateRaw = await redis.get(`meta:oauth:state:${state}`);
+    const { codeChallenge } = JSON.parse(stateRaw!);
+    const code = `revoked_perm_${randomUUID()}`;
+    metaMock.registerCode(code, { codeChallenge });
+
+    // Revoga permissão rebaixando o usuário para CLIENT_VIEWER antes de executar o callback
+    const membership = await migration.membership.findFirstOrThrow({
+      where: {
+        userId: "editor-a",
+        organizationId: "org-a",
+        clientId: "client-a",
+      },
+    });
+    await migration.membership.update({
+      where: { id: membership.id },
+      data: { role: "CLIENT_VIEWER" },
+    });
+
+    try {
+      // Callback com o mesmo cookie e state é rejeitado pela revalidação de permissão em banco
+      const res = await request(
+        `/api/integrations/meta/callback?code=${code}&state=${state}`,
+        cookie,
+        "GET",
+      );
+      expect(res.status).toBe(403);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toContain(
+        "Acesso não autorizado para o seu perfil.",
+      );
+    } finally {
+      // Restaura a role de EDITOR
+      await migration.membership.update({
+        where: { id: membership.id },
+        data: { role: "EDITOR" },
+      });
+    }
+  });
+
+  it("callback não aceita redirect_uri ou destino de redirecionamento arbitrário fornecido pelo cliente", async () => {
+    const cookie = await login("admin-a");
+
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    const { state } = (await authRes.json()) as { state: string };
+
+    // Tentativa de injetar redirect_uri arbitrário
+    const resWithArbitraryRedirect = await request(
+      `/api/integrations/meta/callback?code=some_code&state=${state}&redirect_uri=https://evil.attacker.com/steal`,
+      cookie,
+      "GET",
+    );
+    expect(resWithArbitraryRedirect.status).toBe(400);
+
+    // Tentativa de injetar parâmetro de destino arbitrário
+    const resWithArbitraryDestination = await request(
+      `/api/integrations/meta/callback?code=some_code&state=${state}&redirect_to=https://evil.attacker.com/steal`,
+      cookie,
+      "GET",
+    );
+    expect(resWithArbitraryDestination.status).toBe(400);
+  });
+
+  it("callback funciona sem header Origin (navegação real do browser vindo da Meta) e preserva Origin nos demais endpoints", async () => {
+    const cookie = await login("admin-a");
+
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    const { state } = (await authRes.json()) as { state: string };
+
+    const stateRaw = await redis.get(`meta:oauth:state:${state}`);
+    const { codeChallenge } = JSON.parse(stateRaw!);
+    const code = `no_origin_browser_${randomUUID()}`;
+    metaMock.registerCode(code, {
+      codeChallenge,
+      pages: [
+        {
+          id: "page_browser_nav",
+          name: "Page Browser Nav",
+          access_token: "mock_nav_token",
+        },
+      ],
+    });
+
+    // Requisição GET para o callback sem enviar header Origin (navegação do navegador)
+    const callbackRes = await fetch(
+      `${apiBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
+      {
+        method: "GET",
+        headers: {
+          cookie,
+          // Sem header Origin
+        },
+      },
+    );
+    expect(callbackRes.status).toBe(200);
+    const discovery = (await callbackRes.json()) as { discoveryId: string };
+    expect(discovery.discoveryId).toBeDefined();
+
+    // Endpoint de mutação (POST /social-accounts/connect) SEM header Origin é rejeitado com 403
+    const connectResWithoutOrigin = await fetch(
+      `${apiBase}/api/organizations/org-a/clients/client-a/social-accounts/connect`,
+      {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          // Sem header Origin
+        },
+        body: JSON.stringify({
+          discoveryId: discovery.discoveryId,
+          selectedAssets: [
+            {
+              platform: "FACEBOOK_PAGE",
+              platformAccountId: "page_browser_nav",
+            },
+          ],
+        }),
+      },
+    );
+    expect(connectResWithoutOrigin.status).toBe(403);
+    const connectBody = (await connectResWithoutOrigin.json()) as {
+      message: string;
+    };
+    expect(connectBody.message).toContain("Origem não autorizada");
   });
 
   it("callback rejeita code_verifier inválido com 400 via mock da Graph API", async () => {
@@ -583,7 +794,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     metaMock.registerCode(code, { codeChallenge: differentChallenge });
 
     const res = await request(
-      `/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
       cookie,
       "GET",
     );
@@ -613,7 +824,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     metaMock.registerCode(code, { codeChallenge, ...codeOptions });
 
     const callbackRes = await request(
-      `/api/organizations/${org}/clients/${client}/integrations/meta/callback?code=${code}&state=${state}`,
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
       cookie,
       "GET",
     );
@@ -1217,13 +1428,24 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     const cookieViewer = await login("viewer-a");
     const cookieAdmin = await login("admin-a");
 
-    // 1. Viewer tenta callback
+    // 1. Viewer tenta callback com state de outro usuário/sessão
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookieAdmin,
+      "GET",
+    );
+    const { state: adminState } = (await authRes.json()) as { state: string };
+
     const callbackRes = await request(
-      "/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=any&state=any",
+      `/api/integrations/meta/callback?code=any&state=${adminState}`,
       cookieViewer,
       "GET",
     );
     expect(callbackRes.status).toBe(403);
+    const callbackBody = (await callbackRes.json()) as { message: string };
+    expect(callbackBody.message).toContain(
+      "Tentativa de manipulação de escopo entre tenants, usuários ou sessões detectada.",
+    );
 
     // 2. Admin descobre ativos
     const { callbackRes: adminDiscoveryRes } =
@@ -1466,7 +1688,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       });
 
       const callbackRes = await fetch(
-        `${customBase}/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+        `${customBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
         { headers: { cookie, origin } },
       );
       const discovery = (await callbackRes.json()) as { discoveryId: string };
@@ -1636,7 +1858,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       });
 
       const callbackRes = await fetch(
-        `${customBase}/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+        `${customBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
         { headers: { cookie, origin } },
       );
       const discovery = (await callbackRes.json()) as { discoveryId: string };
@@ -1921,7 +2143,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       });
 
       const callbackRes = await fetch(
-        `${customBase}/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+        `${customBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
         { headers: { cookie, origin } },
       );
       const discovery = (await callbackRes.json()) as { discoveryId: string };
@@ -2121,7 +2343,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       });
 
       const callbackRes = await fetch(
-        `${customBase}/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+        `${customBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
         { headers: { cookie, origin } },
       );
       const discovery = (await callbackRes.json()) as { discoveryId: string };
@@ -2333,7 +2555,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       });
 
       const callbackRes = await fetch(
-        `${customBase}/api/organizations/org-a/clients/client-a/integrations/meta/callback?code=${code}&state=${state}`,
+        `${customBase}/api/integrations/meta/callback?code=${code}&state=${state}`,
         { headers: { cookie: cookieAdmin, origin } },
       );
       const discovery = (await callbackRes.json()) as { discoveryId: string };
