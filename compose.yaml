@@ -77,6 +77,7 @@ services:
       META_APP_ID: ${META_APP_ID:-}
       META_APP_SECRET: ${META_APP_SECRET:-}
       CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:-}
+      META_CONFIG_ID: ${META_CONFIG_ID:-}
     command:
       [
         sh,

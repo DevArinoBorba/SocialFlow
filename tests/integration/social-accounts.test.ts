@@ -437,6 +437,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(parsedAuthUrl.searchParams.get("redirect_uri")).toBe(
       `${origin}/api/integrations/meta/callback`,
     );
+    expect(parsedAuthUrl.searchParams.get("config_id")).toBeNull();
 
     // Verifica persistência e TTL no Redis
     const stateKey = `meta:oauth:state:${body.state}`;
@@ -453,6 +454,50 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     const ttl = await redis.ttl(stateKey);
     expect(ttl).toBeGreaterThan(0);
     expect(ttl).toBeLessThanOrEqual(600);
+  });
+
+  it("authorize inclui config_id na URL quando META_CONFIG_ID estiver configurado", async () => {
+    const configWithMetaConfig = readConfig({
+      ...process.env,
+      META_APP_ID: "meta-test-app-id",
+      META_APP_SECRET: "meta-test-app-secret",
+      META_GRAPH_URL: metaMock.url,
+      CREDENTIAL_MASTER_KEY: TEST_KEY_32.toString("hex"),
+      META_CONFIG_ID: "1608043467489544",
+    });
+
+    const testApp = await createApplication(configWithMetaConfig, {
+      socialAccountDependencies: {
+        graphBaseUrl: metaMock.url,
+        appId: "meta-test-app-id",
+        appSecret: "meta-test-app-secret",
+        masterKey: TEST_KEY_32,
+      },
+    });
+
+    await testApp.app.listen(0, "127.0.0.1");
+    const serverAddr = testApp.app.getHttpServer().address() as AddressInfo;
+    const testBase = `http://127.0.0.1:${serverAddr.port}`;
+
+    try {
+      const cookie = await login("admin-a");
+      const res = await fetch(
+        `${testBase}/api/organizations/org-a/clients/client-a/integrations/meta/authorize`,
+        { headers: { cookie, origin } },
+      );
+
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        url: string;
+        authorizationUrl: string;
+      };
+      const parsedAuthUrl = new URL(body.authorizationUrl);
+      expect(parsedAuthUrl.searchParams.get("config_id")).toBe(
+        "1608043467489544",
+      );
+    } finally {
+      await testApp.app.close();
+    }
   });
 
   it("rejeita CLIENT_VIEWER na tentativa de autorização com 403", async () => {

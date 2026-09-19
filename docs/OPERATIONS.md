@@ -4,6 +4,14 @@
 
 Use um único recurso Docker Compose na VPS da agência, apontando para o repositório e o compose da raiz. Build local não equivale a deploy homologado. Defina no Coolify `APP_ENV=production`, `APP_URL=https://dominio-da-agencia`, senhas independentes de PostgreSQL/Redis/runtime e SESSION_SECRET aleatório. Nenhum segredo tem fallback de desenvolvimento. Configure domínio/TLS somente no serviço web, porta interna 3000. API, worker, PostgreSQL e Redis ficam na rede privada. Remova o mapeamento loopback web se o roteador do Coolify usar apenas a rede interna; nunca adicione portas públicas aos dados. O serviço web declara `expose: ["3000"]` no `compose.yaml` (e `EXPOSE 3000` no `Dockerfile`), o que permite ao Coolify gerar automaticamente as labels `traefik.http.routers...service` e `traefik.http.services...loadbalancer.server.port=3000` sem vincular a porta 3000 ao host, prevenindo conflitos com outras aplicações na VPS. Não configure domínio nos serviços internos.
 
+Para integração com a Meta (Facebook e Instagram), configure no serviço `api`:
+
+- `META_APP_ID`: ID do aplicativo Meta.
+- `META_APP_SECRET`: Segredo do aplicativo Meta (armazenado de forma segura, nunca exposto).
+- `META_GRAPH_URL`: URL base da Graph API (padrão: `https://graph.facebook.com`).
+- `CREDENTIAL_MASTER_KEY`: Chave mestre de criptografia AES-256 (32 bytes ou 64 caracteres hexadecimais).
+- `META_CONFIG_ID`: (Opcional) ID da configuração Meta Login for Business (ex.: `1608043467489544`). Quando definido, inclui `config_id` no fluxo de autorização OAuth; quando vazio ou ausente, mantém o fluxo OAuth padrão sem o parâmetro.
+
 O Coolify utiliza os healthchecks declarados no compose. Readiness consulta banco/Redis com timeout, e web consulta a API. Migration roda uma única vez antes de API/worker. Uma migration falha bloqueia a subida. API e worker devem usar role `socialflow_runtime`, sem superuser/BYPASSRLS e sem ownership das tabelas. Nunca substitua DATABASE_URL pela URL de migration para corrigir um erro de permissão.
 
 Bootstrap de produção usa a ferramenta offline descrita abaixo. O seed de

@@ -64,6 +64,7 @@ describe("configuration fails closed", () => {
       expect(config.CREDENTIAL_MASTER_KEY).toBeUndefined();
       expect(config.META_APP_ID).toBeUndefined();
       expect(config.META_APP_SECRET).toBeUndefined();
+      expect(config.META_CONFIG_ID).toBeUndefined();
     });
 
     it("normalizes empty string to undefined without error", () => {
@@ -72,10 +73,20 @@ describe("configuration fails closed", () => {
         CREDENTIAL_MASTER_KEY: "",
         META_APP_ID: "",
         META_APP_SECRET: "",
+        META_CONFIG_ID: "",
       });
       expect(config.CREDENTIAL_MASTER_KEY).toBeUndefined();
       expect(config.META_APP_ID).toBeUndefined();
       expect(config.META_APP_SECRET).toBeUndefined();
+      expect(config.META_CONFIG_ID).toBeUndefined();
+    });
+
+    it("accepts a valid META_CONFIG_ID", () => {
+      const config = readConfig({
+        ...valid,
+        META_CONFIG_ID: "1608043467489544",
+      });
+      expect(config.META_CONFIG_ID).toBe("1608043467489544");
     });
 
     it("accepts a valid 32-byte UTF-8 string or 64-character hex key", () => {

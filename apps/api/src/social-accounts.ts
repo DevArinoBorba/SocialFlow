@@ -308,6 +308,10 @@ export function registerSocialAccounts(
         code_challenge_method: "S256",
       });
 
+      if (config.META_CONFIG_ID) {
+        authParams.set("config_id", config.META_CONFIG_ID);
+      }
+
       // Construct dialog url (allows mock base URL override for local testing)
       const dialogBase = graphBaseUrl.includes("facebook.com")
         ? "https://www.facebook.com/v21.0/dialog/oauth"

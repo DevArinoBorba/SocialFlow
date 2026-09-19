@@ -35,6 +35,10 @@ const schema = z.object({
     (val) => (val === "" ? undefined : val),
     masterKeySchema.optional(),
   ),
+  META_CONFIG_ID: z.preprocess(
+    (val) => (val === "" ? undefined : val),
+    z.string().optional(),
+  ),
 });
 export function readConfig(env: Record<string, string | undefined>) {
   const config = schema.parse(env);
