@@ -437,7 +437,11 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(parsedAuthUrl.searchParams.get("redirect_uri")).toBe(
       `${origin}/api/integrations/meta/callback`,
     );
+    expect(parsedAuthUrl.searchParams.get("response_type")).toBe("code");
     expect(parsedAuthUrl.searchParams.get("config_id")).toBeNull();
+    expect(
+      parsedAuthUrl.searchParams.get("override_default_response_type"),
+    ).toBeNull();
 
     // Verifica persistência e TTL no Redis
     const stateKey = `meta:oauth:state:${body.state}`;
@@ -456,7 +460,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(ttl).toBeLessThanOrEqual(600);
   });
 
-  it("authorize inclui config_id na URL quando META_CONFIG_ID estiver configurado", async () => {
+  it("authorize inclui config_id e override_default_response_type na URL quando META_CONFIG_ID estiver configurado", async () => {
     const configWithMetaConfig = readConfig({
       ...process.env,
       META_APP_ID: "meta-test-app-id",
@@ -494,6 +498,14 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       const parsedAuthUrl = new URL(body.authorizationUrl);
       expect(parsedAuthUrl.searchParams.get("config_id")).toBe(
         "1608043467489544",
+      );
+      expect(
+        parsedAuthUrl.searchParams.get("override_default_response_type"),
+      ).toBe("true");
+      expect(parsedAuthUrl.searchParams.get("response_type")).toBe("code");
+      expect(parsedAuthUrl.searchParams.get("code_challenge")).toBeTruthy();
+      expect(parsedAuthUrl.searchParams.get("code_challenge_method")).toBe(
+        "S256",
       );
     } finally {
       await testApp.app.close();

@@ -310,6 +310,7 @@ export function registerSocialAccounts(
 
       if (config.META_CONFIG_ID) {
         authParams.set("config_id", config.META_CONFIG_ID);
+        authParams.set("override_default_response_type", "true");
       }
 
       // Construct dialog url (allows mock base URL override for local testing)
