@@ -303,7 +303,6 @@ export function registerSocialAccounts(
         redirect_uri: callbackUrl,
         state,
         response_type: "code",
-        scope: META_DEFAULT_SCOPES.join(","),
         code_challenge: codeChallenge,
         code_challenge_method: "S256",
       });
@@ -311,6 +310,8 @@ export function registerSocialAccounts(
       if (config.META_CONFIG_ID) {
         authParams.set("config_id", config.META_CONFIG_ID);
         authParams.set("override_default_response_type", "true");
+      } else {
+        authParams.set("scope", META_DEFAULT_SCOPES.join(","));
       }
 
       // Construct dialog url (allows mock base URL override for local testing)

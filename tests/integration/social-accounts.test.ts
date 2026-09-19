@@ -438,6 +438,9 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
       `${origin}/api/integrations/meta/callback`,
     );
     expect(parsedAuthUrl.searchParams.get("response_type")).toBe("code");
+    expect(parsedAuthUrl.searchParams.get("scope")).toBe(
+      "pages_show_list,pages_read_engagement,instagram_basic,instagram_content_publish",
+    );
     expect(parsedAuthUrl.searchParams.get("config_id")).toBeNull();
     expect(
       parsedAuthUrl.searchParams.get("override_default_response_type"),
@@ -503,6 +506,7 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
         parsedAuthUrl.searchParams.get("override_default_response_type"),
       ).toBe("true");
       expect(parsedAuthUrl.searchParams.get("response_type")).toBe("code");
+      expect(parsedAuthUrl.searchParams.get("scope")).toBeNull();
       expect(parsedAuthUrl.searchParams.get("code_challenge")).toBeTruthy();
       expect(parsedAuthUrl.searchParams.get("code_challenge_method")).toBe(
         "S256",
