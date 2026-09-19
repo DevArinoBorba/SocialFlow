@@ -1,6 +1,7 @@
 "use client";
 import { MediaLibrary } from "./media-library";
 import { ContentManager } from "./content-manager";
+import { SocialAccountsManager } from "./social-accounts-manager";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   isAdmin,
@@ -39,6 +40,8 @@ export default function Home() {
   const [creating, setCreating] = useState(false);
   const [creatingBrand, setCreatingBrand] = useState(false);
   const [editingBrandId, setEditingBrandId] = useState<string | null>(null);
+  const [discoveryIdParam, setDiscoveryIdParam] = useState<string | null>(null);
+  const [metaErrorParam, setMetaErrorParam] = useState<string | null>(null);
   const [brandForm, setBrandForm] = useState({
     name: "",
     description: "",
@@ -52,16 +55,54 @@ export default function Home() {
     toneOfVoice: "",
   });
 
+  const clearMetaParams = useCallback(() => {
+    setDiscoveryIdParam(null);
+    setMetaErrorParam(null);
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      url.searchParams.delete("discoveryId");
+      url.searchParams.delete("meta_error");
+      const search = url.searchParams.toString();
+      window.history.replaceState(
+        {},
+        "",
+        url.pathname + (search ? `?${search}` : ""),
+      );
+    }
+  }, []);
+
   const refreshSession = useCallback(async () => {
     try {
       const current = await api<CurrentUser>("/me");
       setMe(current);
-      setOrg(current.memberships[0]?.organizationId ?? "");
+      setOrg((prevOrg) => {
+        if (prevOrg) return prevOrg;
+        if (typeof window !== "undefined") {
+          const params = new URLSearchParams(window.location.search);
+          const orgParam = params.get("org");
+          if (
+            orgParam &&
+            current.memberships.some((m) => m.organizationId === orgParam)
+          ) {
+            return orgParam;
+          }
+        }
+        return current.memberships[0]?.organizationId ?? "";
+      });
     } catch {
       setMe(null);
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const params = new URLSearchParams(window.location.search);
+    const dId = params.get("discoveryId");
+    const mErr = params.get("meta_error");
+    if (dId) setDiscoveryIdParam(dId);
+    if (mErr) setMetaErrorParam(mErr);
   }, []);
 
   useEffect(() => {
@@ -78,7 +119,16 @@ export default function Home() {
     setCreating(false);
     void api<Client[]>(`/organizations/${org}/clients`)
       .then((data) => {
-        if (active) setClients(data);
+        if (active) {
+          setClients(data);
+          if (typeof window !== "undefined") {
+            const params = new URLSearchParams(window.location.search);
+            const clientParam = params.get("client");
+            if (clientParam && data.some((c) => c.id === clientParam)) {
+              setSelectedClientId(clientParam);
+            }
+          }
+        }
       })
       .catch((e: Error) => {
         if (active) {
@@ -361,6 +411,14 @@ export default function Home() {
       ((m.clientId === null && isAdmin(m.role)) ||
         (m.clientId === selectedClientId &&
           (m.role === "APPROVER" || m.role === "OWNER" || m.role === "ADMIN"))),
+  );
+
+  const canManageSocial = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && (isAdmin(m.role) || m.role === "EDITOR")) ||
+        (m.clientId === selectedClientId &&
+          (m.role === "OWNER" || m.role === "ADMIN" || m.role === "EDITOR"))),
   );
 
   return (
@@ -701,6 +759,15 @@ export default function Home() {
                 </section>
               )
             )}
+            <SocialAccountsManager
+              key={`social-${org}/${selectedClientId}`}
+              org={org}
+              clientId={selectedClientId}
+              canWrite={canManageSocial}
+              initialDiscoveryId={discoveryIdParam}
+              initialMetaError={metaErrorParam}
+              onClearMetaParams={clearMetaParams}
+            />
             <MediaLibrary
               key={`${org}/${selectedClientId}`}
               org={org}

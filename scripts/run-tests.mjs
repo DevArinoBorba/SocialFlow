@@ -28,7 +28,11 @@ const args =
         ...process.argv.slice(3),
       ]
     : mode === "e2e"
-      ? ["node_modules/@playwright/test/cli.js", "test"]
+      ? [
+          "node_modules/@playwright/test/cli.js",
+          "test",
+          ...process.argv.slice(3),
+        ]
       : mode === "migrate"
         ? ["node_modules/prisma/build/index.js", "migrate", "deploy"]
         : mode === "seed"

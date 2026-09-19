@@ -329,7 +329,58 @@ export function registerSocialAccounts(
 
   // --- 2. META CALLBACK ---
   const callbackHandler = handler(async (req, res) => {
+    const isBrowserNavigation =
+      req.headers["sec-fetch-dest"] === "document" ||
+      req.headers["sec-fetch-mode"] === "navigate" ||
+      (typeof req.headers.accept === "string" &&
+        req.headers.accept.includes("text/html") &&
+        !req.headers.accept.startsWith("application/json"));
+
+    // Consent cancellation or error from Meta
+    if (req.query.error) {
+      const state =
+        typeof req.query.state === "string" ? req.query.state : undefined;
+      let targetOrg = "";
+      let targetClient = "";
+
+      if (state) {
+        const stateKey = `meta:oauth:state:${state}`;
+        const stateRaw = await redis.eval(
+          "local v = redis.call('get', KEYS[1]); if v then redis.call('del', KEYS[1]) end; return v",
+          1,
+          stateKey,
+        );
+        if (stateRaw && typeof stateRaw === "string") {
+          try {
+            const parsed = JSON.parse(stateRaw);
+            targetOrg = parsed.organizationId || "";
+            targetClient = parsed.clientId || "";
+          } catch {
+            // Ignore parse failure
+          }
+        }
+      }
+
+      if (isBrowserNavigation) {
+        const redirectTarget =
+          targetOrg && targetClient
+            ? `/?org=${encodeURIComponent(targetOrg)}&client=${encodeURIComponent(targetClient)}&meta_error=consent_cancelled`
+            : `/?meta_error=consent_cancelled`;
+        res.redirect(302, redirectTarget);
+        return;
+      }
+
+      throw new SocialAccountError(
+        400,
+        "Consentimento cancelado pelo usuário na Meta.",
+      );
+    }
+
     if (!appId || !appSecret) {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=not_configured");
+        return;
+      }
       throw new SocialAccountError(
         503,
         "Integração com a Meta não está configurada.",
@@ -338,6 +389,10 @@ export function registerSocialAccounts(
 
     const queryParsed = metaCallbackQuery.safeParse(req.query);
     if (!queryParsed.success) {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=invalid_callback");
+        return;
+      }
       throw new SocialAccountError(
         400,
         "Parâmetros de callback inválidos ou incompletos.",
@@ -355,6 +410,10 @@ export function registerSocialAccounts(
     );
 
     if (!stateRaw || typeof stateRaw !== "string") {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=state_expired");
+        return;
+      }
       throw new SocialAccountError(
         400,
         "State inválido, expirado ou já utilizado.",
@@ -372,6 +431,10 @@ export function registerSocialAccounts(
     try {
       storedState = JSON.parse(stateRaw);
     } catch {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=state_corrupted");
+        return;
+      }
       throw new SocialAccountError(400, "Dados de state corrompidos.");
     }
 
@@ -384,6 +447,10 @@ export function registerSocialAccounts(
     } = storedState;
 
     if (!organizationId || !clientId || !stateUserId || !codeVerifier) {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=state_corrupted");
+        return;
+      }
       throw new SocialAccountError(400, "Dados de state corrompidos.");
     }
 
@@ -393,6 +460,10 @@ export function registerSocialAccounts(
       .digest("hex");
 
     if (!sessionHash || sessionHash !== currentSessionHash) {
+      if (isBrowserNavigation) {
+        res.redirect(302, "/?meta_error=forbidden");
+        return;
+      }
       throw new SocialAccountError(
         403,
         "Tentativa de manipulação de escopo entre tenants, usuários ou sessões detectada.",
@@ -400,221 +471,355 @@ export function registerSocialAccounts(
     }
 
     // Revalidate permissions strictly using stored tenant scope and user
-    await accessScope(
+    try {
+      await accessScope(
+        req,
+        organizationId,
+        clientId,
+        ["OWNER", "ADMIN", "EDITOR"],
+        async (tx, authenticatedUserId) => {
+          if (stateUserId !== authenticatedUserId) {
+            throw new SocialAccountError(
+              403,
+              "Tentativa de manipulação de escopo entre tenants, usuários ou sessões detectada.",
+            );
+          }
+
+          const callbackUrl = `${config.APP_URL}/api/integrations/meta/callback`;
+
+          // 1. Real HTTP call to exchange code for user access token with PKCE code_verifier via POST
+          const tokenEndpoint = `${graphBaseUrl}/v21.0/oauth/access_token`;
+          const tokenParams = new URLSearchParams({
+            client_id: appId,
+            client_secret: appSecret,
+            redirect_uri: callbackUrl,
+            code,
+            code_verifier: codeVerifier,
+          });
+
+          let tokenResponse: globalThis.Response;
+          try {
+            tokenResponse = await fetch(tokenEndpoint, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/x-www-form-urlencoded",
+                Accept: "application/json",
+              },
+              body: tokenParams.toString(),
+            });
+          } catch {
+            throw new SocialAccountError(
+              503,
+              "Falha de conexão com a Graph API ao trocar token.",
+            );
+          }
+
+          const tokenData = (await tokenResponse.json()) as Record<
+            string,
+            unknown
+          >;
+          if (!tokenResponse.ok) {
+            const errorObj = tokenData.error as
+              Record<string, unknown> | undefined;
+            const msg =
+              typeof errorObj?.message === "string"
+                ? errorObj.message
+                : "Falha na autenticação OAuth com a Meta.";
+            throw new SocialAccountError(400, msg);
+          }
+
+          const userAccessToken = tokenData.access_token;
+          if (typeof userAccessToken !== "string" || !userAccessToken) {
+            throw new SocialAccountError(
+              400,
+              "Token de acesso da Meta não recebido.",
+            );
+          }
+
+          // 2. Real HTTP call to query managed Facebook Pages and linked Instagram accounts
+          const accountsEndpoint = `${graphBaseUrl}/v21.0/me/accounts`;
+          const accountsParams = new URLSearchParams({
+            fields:
+              "id,name,access_token,category,instagram_business_account{id,username,name,profile_picture_url}",
+          });
+
+          let accountsResponse: globalThis.Response;
+          try {
+            accountsResponse = await fetch(
+              `${accountsEndpoint}?${accountsParams.toString()}`,
+              {
+                method: "GET",
+                headers: {
+                  Accept: "application/json",
+                  Authorization: `Bearer ${userAccessToken}`,
+                },
+              },
+            );
+          } catch {
+            throw new SocialAccountError(
+              503,
+              "Falha de conexão ao consultar contas na Graph API.",
+            );
+          }
+
+          const accountsData = (await accountsResponse.json()) as Record<
+            string,
+            unknown
+          >;
+          if (!accountsResponse.ok) {
+            const errorObj = accountsData.error as
+              Record<string, unknown> | undefined;
+            const msg =
+              typeof errorObj?.message === "string"
+                ? errorObj.message
+                : "Falha ao listar páginas da Meta.";
+            throw new SocialAccountError(400, msg);
+          }
+
+          const pages = Array.isArray(accountsData.data)
+            ? (accountsData.data as Record<string, unknown>[])
+            : [];
+
+          const credentialCrypto = createCredentialCrypto(masterKey, 1);
+          const discoveryId = randomUUID();
+          const expiresAt = new Date(Date.now() + 600 * 1000).toISOString();
+
+          interface StoredDiscoveryAsset {
+            platformAccountId: string;
+            platform: "FACEBOOK_PAGE" | "INSTAGRAM_BUSINESS";
+            name: string;
+            username: string | null;
+            avatarUrl: string | null;
+            linkedFacebookPageId: string | null;
+            encryptedAccessToken: string;
+            iv: string;
+            authTag: string;
+            keyVersion: number;
+          }
+
+          const storedAssets: StoredDiscoveryAsset[] = [];
+
+          for (const page of pages) {
+            const pageId = String(page.id);
+            const pageName = String(page.name);
+            const pageAccessToken = String(
+              page.access_token || userAccessToken,
+            );
+
+            // Encrypt page token with AES-256-GCM and AAD bound to tenant & platformAccountId
+            const pageContext: CredentialContext = {
+              organizationId,
+              clientId,
+              platformAccountId: pageId,
+              keyVersion: 1,
+            };
+            const pageEncrypted = credentialCrypto.encrypt(
+              pageAccessToken,
+              pageContext,
+            );
+
+            storedAssets.push({
+              platformAccountId: pageId,
+              platform: "FACEBOOK_PAGE",
+              name: pageName,
+              username: null,
+              avatarUrl: null,
+              linkedFacebookPageId: null,
+              encryptedAccessToken: pageEncrypted.encryptedAccessToken,
+              iv: pageEncrypted.iv,
+              authTag: pageEncrypted.authTag,
+              keyVersion: pageEncrypted.keyVersion,
+            });
+
+            // Linked Instagram Business Account if present
+            const ig = page.instagram_business_account as
+              Record<string, unknown> | undefined;
+            if (ig && typeof ig.id === "string") {
+              const igId = ig.id;
+              const igName = String(ig.name || ig.username || pageName);
+              const igUsername =
+                typeof ig.username === "string" ? ig.username : null;
+              const igAvatar =
+                typeof ig.profile_picture_url === "string"
+                  ? ig.profile_picture_url
+                  : null;
+
+              const igContext: CredentialContext = {
+                organizationId,
+                clientId,
+                platformAccountId: igId,
+                keyVersion: 1,
+              };
+              const igEncrypted = credentialCrypto.encrypt(
+                pageAccessToken,
+                igContext,
+              );
+
+              storedAssets.push({
+                platformAccountId: igId,
+                platform: "INSTAGRAM_BUSINESS",
+                name: igName,
+                username: igUsername,
+                avatarUrl: igAvatar,
+                linkedFacebookPageId: pageId,
+                encryptedAccessToken: igEncrypted.encryptedAccessToken,
+                iv: igEncrypted.iv,
+                authTag: igEncrypted.authTag,
+                keyVersion: igEncrypted.keyVersion,
+              });
+            }
+          }
+
+          // Save discovery session to Redis with TTL 600s (10 min)
+          const discoveryKey = `meta:oauth:discovery:${discoveryId}`;
+          const discoveryPayload = JSON.stringify({
+            discoveryId,
+            organizationId,
+            clientId,
+            userId: authenticatedUserId,
+            sessionHash: currentSessionHash,
+            createdAt: Date.now(),
+            expiresAt,
+            assets: storedAssets,
+          });
+          await redis.set(discoveryKey, discoveryPayload, "EX", 600);
+
+          // Return sanitized discovery response (never tokens or ciphertexts)
+          const responsePayload = metaDiscoveryResponse.parse({
+            discoveryId,
+            expiresAt,
+            assets: storedAssets.map((asset) => ({
+              platformAccountId: asset.platformAccountId,
+              platform: asset.platform,
+              name: asset.name,
+              username: asset.username,
+              avatarUrl: asset.avatarUrl,
+              linkedFacebookPageId: asset.linkedFacebookPageId,
+            })),
+          });
+
+          if (isBrowserNavigation) {
+            const redirectTarget = `/?org=${encodeURIComponent(organizationId)}&client=${encodeURIComponent(clientId)}&discoveryId=${encodeURIComponent(discoveryId)}`;
+            res.redirect(302, redirectTarget);
+            return;
+          }
+
+          res.status(200).json(responsePayload);
+        },
+      );
+    } catch (err) {
+      if (isBrowserNavigation) {
+        const code =
+          err instanceof SocialAccountError && err.status === 403
+            ? "forbidden"
+            : "provider_error";
+        res.redirect(
+          302,
+          `/?org=${encodeURIComponent(organizationId)}&client=${encodeURIComponent(clientId)}&meta_error=${code}`,
+        );
+        return;
+      }
+      throw err;
+    }
+  });
+
+  server.get("/api/integrations/meta/callback", callbackHandler);
+  server.get(
+    "/api/organizations/:org/clients/:clientId/integrations/meta/callback",
+    callbackHandler,
+  );
+  server.get(
+    "/api/organizations/:org/clients/:client/integrations/meta/callback",
+    callbackHandler,
+  );
+
+  // --- 2.1. META DISCOVERY QUERY ---
+  const discoveryHandler = handler(async (req, res) => {
+    const discoveryId = param(req, "discoveryId");
+    if (!discoveryId) {
+      throw new SocialAccountError(400, "discoveryId é obrigatório.");
+    }
+
+    await access(
       req,
-      organizationId,
-      clientId,
       ["OWNER", "ADMIN", "EDITOR"],
       async (tx, authenticatedUserId) => {
-        if (stateUserId !== authenticatedUserId) {
+        const organizationId = param(req, "org");
+        const clientId = param(req, "clientId");
+
+        const discoveryKey = `meta:oauth:discovery:${discoveryId}`;
+        const discoveryRaw = await redis.get(discoveryKey);
+
+        if (!discoveryRaw) {
+          throw new SocialAccountError(
+            404,
+            "Sessão de descoberta expirada ou não encontrada. Inicie uma nova conexão.",
+          );
+        }
+
+        let storedDiscovery: {
+          discoveryId: string;
+          organizationId: string;
+          clientId: string;
+          userId: string;
+          sessionHash?: string;
+          createdAt?: number;
+          expiresAt: string;
+          assets: Array<{
+            platformAccountId: string;
+            platform: "FACEBOOK_PAGE" | "INSTAGRAM_BUSINESS";
+            name: string;
+            username: string | null;
+            avatarUrl: string | null;
+            linkedFacebookPageId: string | null;
+            encryptedAccessToken: string;
+            iv: string;
+            authTag: string;
+            keyVersion: number;
+          }>;
+        };
+
+        try {
+          storedDiscovery = JSON.parse(discoveryRaw);
+        } catch {
+          throw new SocialAccountError(
+            400,
+            "Dados de sessão de descoberta corrompidos.",
+          );
+        }
+
+        // Validate expiration
+        if (new Date(storedDiscovery.expiresAt).getTime() <= Date.now()) {
+          await redis.del(discoveryKey);
+          throw new SocialAccountError(
+            404,
+            "Sessão de descoberta expirada. Inicie uma nova conexão.",
+          );
+        }
+
+        // Revalidate tenant, user, and session isolation
+        const currentSessionHash = createHash("sha256")
+          .update(req.headers.cookie ?? "")
+          .digest("hex");
+
+        if (
+          storedDiscovery.organizationId !== organizationId ||
+          storedDiscovery.clientId !== clientId ||
+          storedDiscovery.userId !== authenticatedUserId ||
+          (storedDiscovery.sessionHash &&
+            storedDiscovery.sessionHash !== currentSessionHash)
+        ) {
           throw new SocialAccountError(
             403,
             "Tentativa de manipulação de escopo entre tenants, usuários ou sessões detectada.",
           );
         }
 
-        const callbackUrl = `${config.APP_URL}/api/integrations/meta/callback`;
-
-        // 1. Real HTTP call to exchange code for user access token with PKCE code_verifier via POST
-        const tokenEndpoint = `${graphBaseUrl}/v21.0/oauth/access_token`;
-        const tokenParams = new URLSearchParams({
-          client_id: appId,
-          client_secret: appSecret,
-          redirect_uri: callbackUrl,
-          code,
-          code_verifier: codeVerifier,
-        });
-
-        let tokenResponse: globalThis.Response;
-        try {
-          tokenResponse = await fetch(tokenEndpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/x-www-form-urlencoded",
-              Accept: "application/json",
-            },
-            body: tokenParams.toString(),
-          });
-        } catch {
-          throw new SocialAccountError(
-            503,
-            "Falha de conexão com a Graph API ao trocar token.",
-          );
-        }
-
-        const tokenData = (await tokenResponse.json()) as Record<
-          string,
-          unknown
-        >;
-        if (!tokenResponse.ok) {
-          const errorObj = tokenData.error as
-            Record<string, unknown> | undefined;
-          const msg =
-            typeof errorObj?.message === "string"
-              ? errorObj.message
-              : "Falha na autenticação OAuth com a Meta.";
-          throw new SocialAccountError(400, msg);
-        }
-
-        const userAccessToken = tokenData.access_token;
-        if (typeof userAccessToken !== "string" || !userAccessToken) {
-          throw new SocialAccountError(
-            400,
-            "Token de acesso da Meta não recebido.",
-          );
-        }
-
-        // 2. Real HTTP call to query managed Facebook Pages and linked Instagram accounts
-        const accountsEndpoint = `${graphBaseUrl}/v21.0/me/accounts`;
-        const accountsParams = new URLSearchParams({
-          fields:
-            "id,name,access_token,category,instagram_business_account{id,username,name,profile_picture_url}",
-        });
-
-        let accountsResponse: globalThis.Response;
-        try {
-          accountsResponse = await fetch(
-            `${accountsEndpoint}?${accountsParams.toString()}`,
-            {
-              method: "GET",
-              headers: {
-                Accept: "application/json",
-                Authorization: `Bearer ${userAccessToken}`,
-              },
-            },
-          );
-        } catch {
-          throw new SocialAccountError(
-            503,
-            "Falha de conexão ao consultar contas na Graph API.",
-          );
-        }
-
-        const accountsData = (await accountsResponse.json()) as Record<
-          string,
-          unknown
-        >;
-        if (!accountsResponse.ok) {
-          const errorObj = accountsData.error as
-            Record<string, unknown> | undefined;
-          const msg =
-            typeof errorObj?.message === "string"
-              ? errorObj.message
-              : "Falha ao listar páginas da Meta.";
-          throw new SocialAccountError(400, msg);
-        }
-
-        const pages = Array.isArray(accountsData.data)
-          ? (accountsData.data as Record<string, unknown>[])
-          : [];
-
-        const credentialCrypto = createCredentialCrypto(masterKey, 1);
-        const discoveryId = randomUUID();
-        const expiresAt = new Date(Date.now() + 600 * 1000).toISOString();
-
-        interface StoredDiscoveryAsset {
-          platformAccountId: string;
-          platform: "FACEBOOK_PAGE" | "INSTAGRAM_BUSINESS";
-          name: string;
-          username: string | null;
-          avatarUrl: string | null;
-          linkedFacebookPageId: string | null;
-          encryptedAccessToken: string;
-          iv: string;
-          authTag: string;
-          keyVersion: number;
-        }
-
-        const storedAssets: StoredDiscoveryAsset[] = [];
-
-        for (const page of pages) {
-          const pageId = String(page.id);
-          const pageName = String(page.name);
-          const pageAccessToken = String(page.access_token || userAccessToken);
-
-          // Encrypt page token with AES-256-GCM and AAD bound to tenant & platformAccountId
-          const pageContext: CredentialContext = {
-            organizationId,
-            clientId,
-            platformAccountId: pageId,
-            keyVersion: 1,
-          };
-          const pageEncrypted = credentialCrypto.encrypt(
-            pageAccessToken,
-            pageContext,
-          );
-
-          storedAssets.push({
-            platformAccountId: pageId,
-            platform: "FACEBOOK_PAGE",
-            name: pageName,
-            username: null,
-            avatarUrl: null,
-            linkedFacebookPageId: null,
-            encryptedAccessToken: pageEncrypted.encryptedAccessToken,
-            iv: pageEncrypted.iv,
-            authTag: pageEncrypted.authTag,
-            keyVersion: pageEncrypted.keyVersion,
-          });
-
-          // Linked Instagram Business Account if present
-          const ig = page.instagram_business_account as
-            Record<string, unknown> | undefined;
-          if (ig && typeof ig.id === "string") {
-            const igId = ig.id;
-            const igName = String(ig.name || ig.username || pageName);
-            const igUsername =
-              typeof ig.username === "string" ? ig.username : null;
-            const igAvatar =
-              typeof ig.profile_picture_url === "string"
-                ? ig.profile_picture_url
-                : null;
-
-            const igContext: CredentialContext = {
-              organizationId,
-              clientId,
-              platformAccountId: igId,
-              keyVersion: 1,
-            };
-            const igEncrypted = credentialCrypto.encrypt(
-              pageAccessToken,
-              igContext,
-            );
-
-            storedAssets.push({
-              platformAccountId: igId,
-              platform: "INSTAGRAM_BUSINESS",
-              name: igName,
-              username: igUsername,
-              avatarUrl: igAvatar,
-              linkedFacebookPageId: pageId,
-              encryptedAccessToken: igEncrypted.encryptedAccessToken,
-              iv: igEncrypted.iv,
-              authTag: igEncrypted.authTag,
-              keyVersion: igEncrypted.keyVersion,
-            });
-          }
-        }
-
-        // Save discovery session to Redis with TTL 600s (10 min)
-        const discoveryKey = `meta:oauth:discovery:${discoveryId}`;
-        const discoveryPayload = JSON.stringify({
-          discoveryId,
-          organizationId,
-          clientId,
-          userId: authenticatedUserId,
-          sessionHash: currentSessionHash,
-          createdAt: Date.now(),
-          expiresAt,
-          assets: storedAssets,
-        });
-        await redis.set(discoveryKey, discoveryPayload, "EX", 600);
-
-        // Return sanitized discovery response (never tokens or ciphertexts)
+        // Return sanitized DTO only (NEVER expose secrets, ciphertexts, or tokens)
         const responsePayload = metaDiscoveryResponse.parse({
-          discoveryId,
-          expiresAt,
-          assets: storedAssets.map((asset) => ({
+          discoveryId: storedDiscovery.discoveryId,
+          expiresAt: storedDiscovery.expiresAt,
+          assets: storedDiscovery.assets.map((asset) => ({
             platformAccountId: asset.platformAccountId,
             platform: asset.platform,
             name: asset.name,
@@ -629,14 +834,13 @@ export function registerSocialAccounts(
     );
   });
 
-  server.get("/api/integrations/meta/callback", callbackHandler);
   server.get(
-    "/api/organizations/:org/clients/:clientId/integrations/meta/callback",
-    callbackHandler,
+    "/api/organizations/:org/clients/:clientId/integrations/meta/discovery/:discoveryId",
+    discoveryHandler,
   );
   server.get(
-    "/api/organizations/:org/clients/:client/integrations/meta/callback",
-    callbackHandler,
+    "/api/organizations/:org/clients/:client/integrations/meta/discovery/:discoveryId",
+    discoveryHandler,
   );
 
   // Helper to validate and resolve an existing consumption with strict user and scope matching

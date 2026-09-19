@@ -29,6 +29,7 @@ async function proxy(request: NextRequest) {
   const url = new URL(incoming.pathname + incoming.search, upstream);
   const headers = new Headers();
   for (const key of [
+    "accept",
     "content-type",
     "cookie",
     "origin",
@@ -86,6 +87,9 @@ async function proxy(request: NextRequest) {
       "cache-control": result.headers.get("cache-control") ?? "no-store",
       "x-content-type-options": "nosniff",
     });
+    if (result.headers.has("location")) {
+      outgoing.set("location", result.headers.get("location")!);
+    }
     const upstreamCsp = result.headers.get("content-security-policy");
     outgoing.set("content-security-policy", upstreamCsp ?? defaultCsp);
     for (const cookie of result.headers.getSetCookie())

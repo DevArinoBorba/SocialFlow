@@ -328,6 +328,8 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     data?: unknown,
     contentType = "application/json",
     requestOrigin = origin,
+    extraHeaders?: Record<string, string>,
+    redirectMode: RequestRedirect = "follow",
   ) {
     let body: BodyInit | undefined;
     if (data !== undefined) {
@@ -346,8 +348,10 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
         cookie,
         origin: requestOrigin,
         ...(contentType ? { "content-type": contentType } : {}),
+        ...extraHeaders,
       },
       body,
+      redirect: redirectMode,
     });
   }
 
@@ -831,6 +835,161 @@ describe("Subincremento 3.2: Meta OAuth, PKCE, Contas Sociais e Desconexão Segu
     expect(callbackRes.status).toBe(200);
     return { authRes, callbackRes, code, state };
   }
+
+  it("endpoint de descoberta retorna apenas DTOs sanitizados e valida escopo e expiração", async () => {
+    const cookie = await login("admin-a");
+    const { callbackRes } = await performOAuthDiscovery(cookie, {
+      userAccessToken: "token_for_discovery_query",
+      pages: [
+        {
+          id: "page_disc_query_1",
+          name: "Page Discovery Test",
+          access_token: "mock_page_token_query",
+          instagramBusinessAccount: {
+            id: "ig_disc_query_1",
+            username: "ig_disc_query",
+            name: "IG Discovery Test",
+          },
+        },
+      ],
+    });
+
+    const disc = (await callbackRes.json()) as { discoveryId: string };
+    expect(disc.discoveryId).toBeDefined();
+
+    // 1. Consulta com sucesso pelo admin autenticado
+    const queryRes = await request(
+      `/api/organizations/org-a/clients/client-a/integrations/meta/discovery/${disc.discoveryId}`,
+      cookie,
+      "GET",
+    );
+    expect(queryRes.status).toBe(200);
+    const queried = (await queryRes.json()) as {
+      discoveryId: string;
+      expiresAt: string;
+      assets: Array<{
+        platform: string;
+        platformAccountId: string;
+        name: string;
+        username?: string | null;
+      }>;
+    };
+    expect(queried.discoveryId).toBe(disc.discoveryId);
+    expect(queried.assets).toHaveLength(2);
+    // Garante que nenhum token, IV ou authTag é exposto no DTO sanitizado
+    expect(queried).not.toHaveProperty("encryptedAccessToken");
+    expect(queried).not.toHaveProperty("assets.0.encryptedAccessToken");
+
+    // 2. Rejeita discoveryId inexistente
+    const notFoundRes = await request(
+      `/api/organizations/org-a/clients/client-a/integrations/meta/discovery/${randomUUID()}`,
+      cookie,
+      "GET",
+    );
+    expect(notFoundRes.status).toBe(404);
+
+    // 3. Rejeita consulta por outro tenant/cliente inexistente na organização
+    const otherClientRes = await request(
+      `/api/organizations/org-a/clients/client-b/integrations/meta/discovery/${disc.discoveryId}`,
+      cookie,
+      "GET",
+    );
+    expect([403, 404]).toContain(otherClientRes.status);
+
+    // 4. Rejeita consulta por outro usuário
+    const otherUserCookie = await login("editor-a");
+    const otherUserRes = await request(
+      `/api/organizations/org-a/clients/client-a/integrations/meta/discovery/${disc.discoveryId}`,
+      otherUserCookie,
+      "GET",
+    );
+    expect(otherUserRes.status).toBe(403);
+
+    // 5. Rejeita se CLIENT_VIEWER tentar consultar
+    const viewerCookie = await login("viewer-a");
+    const viewerRes = await request(
+      `/api/organizations/org-a/clients/client-a/integrations/meta/discovery/${disc.discoveryId}`,
+      viewerCookie,
+      "GET",
+    );
+    expect(viewerRes.status).toBe(403);
+  });
+
+  it("navegação de navegador no callback realiza redirecionamento 302 sem expor tokens na URL", async () => {
+    const cookie = await login("admin-a");
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    const { state } = (await authRes.json()) as { state: string };
+
+    const stateRaw = await redis.get(`meta:oauth:state:${state}`);
+    const { codeChallenge } = JSON.parse(stateRaw!);
+
+    const code = `code_browser_${randomUUID()}`;
+    metaMock.registerCode(code, {
+      codeChallenge,
+      pages: [{ id: "page_browser_1", name: "Browser Nav Page" }],
+    });
+
+    // Simula navegação top-level do navegador vindo da Meta (Accept: text/html, redirect manual)
+    const callbackRes = await request(
+      `/api/integrations/meta/callback?code=${code}&state=${state}`,
+      cookie,
+      "GET",
+      undefined,
+      "application/json",
+      origin,
+      {
+        accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      "manual",
+    );
+
+    expect(callbackRes.status).toBe(302);
+    const location = callbackRes.headers.get("location");
+    expect(location).toBeDefined();
+    expect(location).toContain("/?org=org-a&client=client-a&discoveryId=");
+    // Garante que tokens, códigos ou segredos NÃO estão na URL de redirecionamento
+    expect(location).not.toContain("code=");
+    expect(location).not.toContain("access_token");
+    expect(location).not.toContain("state=");
+  });
+
+  it("cancelamento de consentimento na Meta consome state e redireciona com mensagem amigável", async () => {
+    const cookie = await login("admin-a");
+    const authRes = await request(
+      "/api/organizations/org-a/clients/client-a/integrations/meta/authorize",
+      cookie,
+      "GET",
+    );
+    const { state } = (await authRes.json()) as { state: string };
+
+    // Usuário clica em cancelar no fluxo de consentimento da Meta
+    const cancelRes = await request(
+      `/api/integrations/meta/callback?error=access_denied&error_code=200&error_description=Permissions+error&error_reason=user_denied&state=${state}`,
+      cookie,
+      "GET",
+      undefined,
+      "application/json",
+      origin,
+      { accept: "text/html,application/xhtml+xml,*/*" },
+      "manual",
+    );
+
+    expect(cancelRes.status).toBe(302);
+    const location = cancelRes.headers.get("location");
+    expect(location).toBeDefined();
+    expect(location).toContain("meta_error=consent_cancelled");
+    expect(location).toContain("org=org-a");
+    expect(location).toContain("client=client-a");
+
+    // State deve ter sido consumido e removido do Redis
+    const remaining = await redis.get(`meta:oauth:state:${state}`);
+    expect(remaining).toBeNull();
+  });
 
   it("descoberta com páginas de clientes diferentes não vincula nenhuma automaticamente", async () => {
     const cookie = await login("admin-a");

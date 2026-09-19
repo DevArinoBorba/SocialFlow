@@ -34,7 +34,10 @@ export interface MetaMockServer {
   invalidateCode: (code: string) => void;
 }
 
-export function startMetaMockServer(): Promise<MetaMockServer> {
+export function startMetaMockServer(
+  port = 0,
+  host = "127.0.0.1",
+): Promise<MetaMockServer> {
   const registeredCodes = new Map<string, RegisteredCodeOptions>();
   const tokenPages = new Map<string, unknown[]>();
 
@@ -185,10 +188,10 @@ export function startMetaMockServer(): Promise<MetaMockServer> {
   });
 
   return new Promise((resolve) => {
-    server.listen(0, "127.0.0.1", () => {
+    server.listen(port, host, () => {
       const addr = server.address() as AddressInfo;
-      const port = addr.port;
-      const url = `http://127.0.0.1:${port}`;
+      const actualPort = addr.port;
+      const url = `http://${host === "0.0.0.0" ? "127.0.0.1" : host}:${actualPort}`;
 
       resolve({
         url,

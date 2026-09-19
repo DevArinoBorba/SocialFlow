@@ -10,6 +10,12 @@ services:
       MEDIA_S3_BUCKET: socialflow-media-test
       MEDIA_S3_ACCESS_KEY_ID: socialflow-test
       MEDIA_S3_SECRET_ACCESS_KEY: isolated-media-test-secret
+      META_APP_ID: ${META_APP_ID:-meta-test-app-id}
+      META_APP_SECRET: ${META_APP_SECRET:-meta-test-app-secret}
+      META_GRAPH_URL: ${META_GRAPH_URL:-http://host.docker.internal:54321}
+      CREDENTIAL_MASTER_KEY: ${CREDENTIAL_MASTER_KEY:-0123456789abcdef0123456789abcdef}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       media-storage: { condition: service_healthy }
     ports: ["127.0.0.1:${TEST_API_PORT:-53001}:3001"]

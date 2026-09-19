@@ -680,7 +680,274 @@ button.secondary:hover {
   min-height: 70px;
 }
 
+/* Social Accounts Manager */
+.social-accounts-section {
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 1px solid var(--line);
+}
+.social-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.btn-connect-meta {
+  background: #1877f2;
+  border-color: #1877f2;
+  color: white;
+  white-space: nowrap;
+}
+.btn-connect-meta:hover {
+  background: #1464cc;
+}
+.social-accounts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.social-account-card {
+  background: var(--white);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+}
+.account-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.platform-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.badge-facebook_page {
+  background: #e7f0fd;
+  color: #1877f2;
+}
+.badge-instagram_business {
+  background: #fce9f0;
+  color: #c13584;
+}
+.status-pill {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 999px;
+}
+.status-active {
+  background: #e1f4ea;
+  color: #1b663b;
+}
+.status-expired {
+  background: #fdf3d8;
+  color: #8c6200;
+}
+.account-name {
+  margin: 0;
+  font-size: 1.15rem;
+  color: var(--ink);
+}
+.account-username {
+  margin: 4px 0 0;
+  font-size: 0.85rem;
+}
+.account-card-actions {
+  display: flex;
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+/* Discovery Panel */
+.discovery-panel {
+  background: var(--white);
+  border: 2px solid var(--accent);
+  border-radius: var(--radius);
+  padding: 24px;
+  margin-bottom: 28px;
+}
+.discovery-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.discovery-header h3 {
+  margin: 0 0 6px;
+  font-size: 1.25rem;
+}
+.discovery-select-all {
+  white-space: nowrap;
+}
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  cursor: pointer;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+.checkbox-label input[type="checkbox"],
+.asset-checkbox-wrapper input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+  min-height: 20px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.discovery-assets-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  margin: 16px 0 24px;
+}
+.discovery-asset-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  transition:
+    border-color 0.15s,
+    background-color 0.15s;
+}
+.discovery-asset-card.selected {
+  border-color: var(--accent);
+  background: #f0f6f3;
+}
+.asset-checkbox-wrapper {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 0;
+  cursor: pointer;
+}
+.asset-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+}
+.asset-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.asset-name {
+  font-size: 1rem;
+  color: var(--ink);
+}
+.asset-username {
+  font-size: 0.85rem;
+}
+.discovery-actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+.btn-confirm-connect {
+  background: var(--accent);
+  color: white;
+}
+
+/* Error Box with Dismiss */
+.error-box {
+  background: #fde8e7;
+  border-left: 4px solid var(--error);
+  padding: 12px 16px;
+  border-radius: var(--radius);
+  color: var(--error);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+.error-box p {
+  margin: 0;
+  font-weight: 500;
+}
+.error-dismiss {
+  color: var(--error);
+  padding: 4px 8px;
+  font-size: 0.85rem;
+}
+
+/* Accessible Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 16px;
+}
+.modal-box {
+  background: var(--white);
+  border-radius: var(--radius);
+  max-width: 480px;
+  width: 100%;
+  padding: 28px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+.modal-box h3 {
+  margin-top: 0;
+  font-size: 1.3rem;
+  color: var(--ink);
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 24px;
+}
+
 @media (max-width: 720px) {
+  .social-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .social-accounts-grid {
+    grid-template-columns: 1fr;
+  }
+  .discovery-header {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+  .discovery-assets-list {
+    grid-template-columns: 1fr;
+  }
+  .discovery-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .discovery-actions button {
+    width: 100%;
+  }
+  .modal-actions {
+    flex-direction: column;
+  }
+  .modal-actions button {
+    width: 100%;
+  }
   .content-header {
     flex-direction: column;
     align-items: flex-start;
