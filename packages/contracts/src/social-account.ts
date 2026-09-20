@@ -88,3 +88,56 @@ export const connectSocialAccountsResponse = z.strictObject({
 export type ConnectSocialAccountsResponse = z.infer<
   typeof connectSocialAccountsResponse
 >;
+
+export const publicationAttemptStatuses = [
+  "PENDING",
+  "CONTAINER_CREATED",
+  "PUBLISHED",
+  "FAILED",
+] as const;
+export type PublicationAttemptStatus =
+  (typeof publicationAttemptStatuses)[number];
+
+export const publicationAttemptDto = z.strictObject({
+  id: z.string().uuid(),
+  organizationId: z.string(),
+  clientId: z.string(),
+  postId: z.string().uuid(),
+  socialAccountId: z.string().uuid(),
+  platform: z.enum(socialPlatforms),
+  status: z.enum(publicationAttemptStatuses),
+  creationContainerId: z.string().nullable().optional(),
+  remoteMediaId: z.string().nullable().optional(),
+  remotePermalink: z.string().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  errorMessage: z.string().nullable().optional(),
+  attemptNumber: z.number().int().min(1),
+  executedAt: z.union([z.string(), z.date()]),
+  createdAt: z.union([z.string(), z.date()]),
+  updatedAt: z.union([z.string(), z.date()]),
+});
+export type PublicationAttemptDto = z.infer<typeof publicationAttemptDto>;
+
+export const publishPostInput = z.strictObject({
+  socialAccountIds: z
+    .array(z.string().uuid())
+    .min(1, "Selecione ao menos uma conta social para publicação."),
+  mediaAssetId: z
+    .string()
+    .uuid()
+    .optional()
+    .nullable()
+    .transform((val) => (val === "" || val === undefined ? null : val)),
+  idempotencyKey: z
+    .string()
+    .min(8, "Chave de idempotência deve ter no mínimo 8 caracteres.")
+    .max(128),
+});
+export type PublishPostInput = z.infer<typeof publishPostInput>;
+
+export const publishPostResponse = z.strictObject({
+  postId: z.string().uuid(),
+  success: z.boolean(),
+  attempts: z.array(publicationAttemptDto),
+});
+export type PublishPostResponse = z.infer<typeof publishPostResponse>;

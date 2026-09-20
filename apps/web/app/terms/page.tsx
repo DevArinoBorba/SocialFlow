@@ -2,8 +2,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Termos de Uso | SocialFlow",
-  description:
-    "Termos de Serviço e Condições de Uso da plataforma SocialFlow.",
+  description: "Termos de Serviço e Condições de Uso da plataforma SocialFlow.",
 };
 
 export default function TermsPage() {
@@ -80,8 +79,8 @@ export default function TermsPage() {
             <h2>3. Cadastro, Acesso e Segurança da Conta</h2>
             <p>
               O acesso ao SocialFlow é concedido por meio de credenciais
-              individuais criadas pelo administrador da organização. O usuário
-              é inteiramente responsável por:
+              individuais criadas pelo administrador da organização. O usuário é
+              inteiramente responsável por:
             </p>
             <ul>
               <li>
@@ -117,9 +116,8 @@ export default function TermsPage() {
                 <strong>Conformidade com os Termos da Meta:</strong> o usuário
                 declara possuir legitimidade e permissões de administrador para
                 as Páginas e Contas Profissionais vinculadas, comprometendo-se a
-                respeitar integralmente os{" "}
-                <em>Termos da Plataforma Meta</em> e as{" "}
-                <em>Diretrizes da Comunidade do Facebook e Instagram</em>.
+                respeitar integralmente os <em>Termos da Plataforma Meta</em> e
+                as <em>Diretrizes da Comunidade do Facebook e Instagram</em>.
               </li>
               <li>
                 <strong>Desconexão a Qualquer Momento:</strong> o usuário pode
@@ -138,10 +136,10 @@ export default function TermsPage() {
               ou publicado por meio do SocialFlow.
             </p>
             <p>
-              O usuário assegura que os materiais publicados não violam
-              direitos autorais, marcas registradas, direitos de imagem ou
-              privacidade de terceiros, e não veiculam conteúdo ilegal,
-              ofensivo, difamatório, discriminatório ou fraudulento.
+              O usuário assegura que os materiais publicados não violam direitos
+              autorais, marcas registradas, direitos de imagem ou privacidade de
+              terceiros, e não veiculam conteúdo ilegal, ofensivo, difamatório,
+              discriminatório ou fraudulento.
             </p>
           </section>
 
@@ -159,8 +157,8 @@ export default function TermsPage() {
                 controle de acesso ou isolamento multitenant (RLS);
               </li>
               <li>
-                Realizar engenharia reversa, descompilação ou ataques de
-                negação de serviço (DoS) contra a infraestrutura do sistema;
+                Realizar engenharia reversa, descompilação ou ataques de negação
+                de serviço (DoS) contra a infraestrutura do sistema;
               </li>
               <li>
                 Utilizar a plataforma para veicular malware, phishing ou
@@ -184,13 +182,14 @@ export default function TermsPage() {
           <section className="doc-section">
             <h2>8. Cancelamento e Encerramento de Contas</h2>
             <p>
-              O SocialFlow reserva-se o direito de suspender ou encerrar o acesso
-              de usuários ou organizações em caso de violação comprovada destes
-              Termos de Uso, inadimplência contratual ou determinação legal.
+              O SocialFlow reserva-se o direito de suspender ou encerrar o
+              acesso de usuários ou organizações em caso de violação comprovada
+              destes Termos de Uso, inadimplência contratual ou determinação
+              legal.
             </p>
             <p>
-              O usuário pode a qualquer momento desativar sua conta e solicitar a
-              exclusão completa de seus dados através do e-mail{" "}
+              O usuário pode a qualquer momento desativar sua conta e solicitar
+              a exclusão completa de seus dados através do e-mail{" "}
               <a href="mailto:arinoborba@gmail.com" className="contact-link">
                 arinoborba@gmail.com
               </a>
@@ -205,8 +204,8 @@ export default function TermsPage() {
               SocialFlow não será responsável por danos indiretos, lucros
               cessantes, perda de receitas ou danos morais decorrentes do uso ou
               da impossibilidade de uso da plataforma, inclusive por eventuais
-              bloqueios, desativações de contas ou sanções aplicadas
-              diretamente pelas redes sociais parceiras (Meta).
+              bloqueios, desativações de contas ou sanções aplicadas diretamente
+              pelas redes sociais parceiras (Meta).
             </p>
           </section>
 

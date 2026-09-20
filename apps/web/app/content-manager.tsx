@@ -6,6 +6,8 @@ import type {
   ImportError,
   Post,
   PostStatus,
+  SocialAccountDto,
+  PublishPostResponse,
 } from "@socialflow/contracts";
 
 type Props = {
@@ -74,6 +76,26 @@ export function ContentManager({
   const [rejectingPostId, setRejectingPostId] = useState<string | null>(null);
   const [rejectionReason, setRejectionReason] = useState("");
 
+  // Estado do Modal de Publicação Manual na Meta
+  const [publishingPost, setPublishingPost] = useState<Post | null>(null);
+  const [activeAccounts, setActiveAccounts] = useState<SocialAccountDto[]>([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [mediaAssets, setMediaAssets] = useState<
+    Array<{
+      id: string;
+      name: string;
+      mimeType: string | null;
+      width: number | null;
+      height: number | null;
+    }>
+  >([]);
+  const [selectedMediaId, setSelectedMediaId] = useState<string>("");
+  const [publishingBusy, setPublishingBusy] = useState(false);
+  const [publishResult, setPublishResult] =
+    useState<PublishPostResponse | null>(null);
+  const [publishModalError, setPublishModalError] = useState("");
+  const [hasConfirmedWarning, setHasConfirmedWarning] = useState(false);
+
   const refresh = useCallback(() => setRevision((v) => v + 1), []);
 
   // Carregar posts
@@ -118,6 +140,113 @@ export function ContentManager({
       live = false;
     };
   }, [batchBase, showBatches, revision]);
+
+  const handleOpenPublishModal = async (post: Post) => {
+    setPublishingPost(post);
+    setPublishResult(null);
+    setPublishModalError("");
+    setHasConfirmedWarning(false);
+    setPublishingBusy(true);
+
+    try {
+      const [accounts, mediaResponse] = await Promise.all([
+        request<SocialAccountDto[]>(
+          `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/social-accounts`,
+        ),
+        request<{
+          items: Array<{
+            id: string;
+            name: string;
+            mimeType: string | null;
+            width: number | null;
+            height: number | null;
+          }>;
+        }>(
+          `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/media`,
+        ),
+      ]);
+
+      const active = accounts.filter((a) => a.status === "ACTIVE");
+      setActiveAccounts(active);
+      setSelectedAccountIds(active.map((a) => a.id));
+      const assets = Array.isArray(mediaResponse?.items)
+        ? mediaResponse.items
+        : [];
+      setMediaAssets(assets);
+      if (assets.length > 0 && assets[0]) {
+        setSelectedMediaId(assets[0].id);
+      } else {
+        setSelectedMediaId("");
+      }
+    } catch (err) {
+      setPublishModalError((err as Error).message);
+    } finally {
+      setPublishingBusy(false);
+    }
+  };
+
+  const handleClosePublishModal = () => {
+    if (publishingBusy) return;
+    setPublishingPost(null);
+    setPublishResult(null);
+    setPublishModalError("");
+  };
+
+  const handleToggleAccount = (id: string) => {
+    setSelectedAccountIds((prev) =>
+      prev.includes(id) ? prev.filter((accId) => accId !== id) : [...prev, id],
+    );
+  };
+
+  const handleConfirmPublish = async () => {
+    if (!publishingPost) return;
+    if (selectedAccountIds.length === 0) {
+      setPublishModalError(
+        "Selecione ao menos uma conta social para publicação.",
+      );
+      return;
+    }
+    const hasInstagram = activeAccounts.some(
+      (a) =>
+        selectedAccountIds.includes(a.id) &&
+        a.platform === "INSTAGRAM_BUSINESS",
+    );
+    if (hasInstagram && !selectedMediaId) {
+      setPublishModalError(
+        "Publicações no Instagram exigem a seleção de uma imagem.",
+      );
+      return;
+    }
+
+    setPublishingBusy(true);
+    setPublishModalError("");
+
+    try {
+      const idempotencyKey =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `pub_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+      const result = await request<PublishPostResponse>(
+        `${postBase}/${encodeURIComponent(publishingPost.id)}/publish`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            socialAccountIds: selectedAccountIds,
+            mediaAssetId: selectedMediaId || undefined,
+            idempotencyKey,
+          }),
+        },
+      );
+      setPublishResult(result);
+      refresh();
+    } catch (err) {
+      setPublishModalError((err as Error).message);
+    } finally {
+      setPublishingBusy(false);
+    }
+  };
 
   // Criar post avulso
   async function handleCreatePost(event: FormEvent<HTMLFormElement>) {
@@ -799,6 +928,18 @@ export function ContentManager({
                       ) : null}
                     </>
                   )}
+
+                  {/* Aprovado -> Publicar Agora */}
+                  {post.status === "APPROVED" && (canApprove || canWrite) && (
+                    <button
+                      type="button"
+                      className="publish-btn"
+                      disabled={busy}
+                      onClick={() => handleOpenPublishModal(post)}
+                    >
+                      Publicar agora…
+                    </button>
+                  )}
                 </div>
 
                 {/* Diálogo inline para informar justificativa de rejeição */}
@@ -856,6 +997,308 @@ export function ContentManager({
               : "Nenhuma publicação cadastrada neste filtro para este cliente."}
           </p>
         </section>
+      )}
+
+      {/* Modal de Publicação Manual Controlada na Meta */}
+      {publishingPost && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="publish-modal-title"
+        >
+          <div className="publish-modal">
+            <h3 id="publish-modal-title">Publicação Manual na Meta</h3>
+
+            <p className="muted">
+              Publicando post:{" "}
+              <strong>{publishingPost.title || "Sem título"}</strong>
+            </p>
+
+            <blockquote className="post-preview-caption">
+              {publishingPost.caption}
+              {publishingPost.hashtags && (
+                <div className="post-preview-hashtags">
+                  {publishingPost.hashtags}
+                </div>
+              )}
+            </blockquote>
+
+            {publishModalError && (
+              <p role="alert" className="error">
+                {publishModalError}
+              </p>
+            )}
+
+            {!publishResult ? (
+              <>
+                <div className="publish-modal-alert">
+                  <strong>Atenção:</strong> Esta ação publicará o conteúdo
+                  imediatamente nas redes da Meta selecionadas. Esta operação é
+                  irreversível externamente.
+                </div>
+
+                {/* Seleção de Contas Sociais Ativas */}
+                <div className="publish-accounts-group">
+                  <label>Selecione as contas de destino:</label>
+                  {activeAccounts.length === 0 ? (
+                    <p className="muted">
+                      Nenhuma conta social ativa encontrada para este cliente.
+                      Conecte uma Página do Facebook ou Instagram antes de
+                      publicar.
+                    </p>
+                  ) : (
+                    activeAccounts.map((acc) => {
+                      const isChecked = selectedAccountIds.includes(acc.id);
+                      return (
+                        <label
+                          key={acc.id}
+                          className="account-check-card"
+                          htmlFor={`acc-check-${acc.id}`}
+                        >
+                          <input
+                            id={`acc-check-${acc.id}`}
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={publishingBusy}
+                            onChange={() => handleToggleAccount(acc.id)}
+                          />
+                          <div>
+                            <strong>{acc.name}</strong>{" "}
+                            {acc.username && (
+                              <span className="muted">(@{acc.username})</span>
+                            )}
+                          </div>
+                          <span
+                            className={`account-badge ${
+                              acc.platform === "FACEBOOK_PAGE"
+                                ? "facebook"
+                                : "instagram"
+                            }`}
+                          >
+                            {acc.platform === "FACEBOOK_PAGE"
+                              ? "Facebook"
+                              : "Instagram"}
+                          </span>
+                        </label>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* Seleção de Mídia (se houver ou se obrigatório) */}
+                <div className="publish-media-picker">
+                  <label htmlFor="media-picker-select">
+                    Imagem da publicação:{" "}
+                    {activeAccounts.some(
+                      (a) =>
+                        selectedAccountIds.includes(a.id) &&
+                        a.platform === "INSTAGRAM_BUSINESS",
+                    ) && (
+                      <span className="error-text">
+                        *(Obrigatória para Instagram)
+                      </span>
+                    )}
+                  </label>
+
+                  {mediaAssets.length === 0 ? (
+                    <p className="small muted">
+                      Nenhuma imagem na biblioteca deste cliente. Faça o upload
+                      de uma imagem na aba Biblioteca de Mídia para publicar no
+                      Instagram.
+                    </p>
+                  ) : (
+                    <>
+                      <select
+                        id="media-picker-select"
+                        value={selectedMediaId}
+                        disabled={publishingBusy}
+                        onChange={(e) => setSelectedMediaId(e.target.value)}
+                      >
+                        <option value="">
+                          Sem imagem (apenas texto no Facebook)
+                        </option>
+                        {mediaAssets.map((asset) => (
+                          <option key={asset.id} value={asset.id}>
+                            {asset.name} ({asset.width}x{asset.height})
+                          </option>
+                        ))}
+                      </select>
+
+                      <div className="media-thumbnail-grid">
+                        {mediaAssets.slice(0, 6).map((asset) => (
+                          <div
+                            key={asset.id}
+                            className={`media-thumbnail-item ${
+                              selectedMediaId === asset.id ? "selected" : ""
+                            }`}
+                            onClick={() =>
+                              !publishingBusy && setSelectedMediaId(asset.id)
+                            }
+                          >
+                            <img
+                              src={`/api/organizations/${encodeURIComponent(
+                                org,
+                              )}/clients/${encodeURIComponent(
+                                clientId,
+                              )}/media/${encodeURIComponent(asset.id)}/content`}
+                              alt={asset.name}
+                              className="media-thumbnail-img"
+                            />
+                            <small
+                              className="muted"
+                              style={{
+                                display: "block",
+                                fontSize: "0.75rem",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap",
+                              }}
+                            >
+                              {asset.name}
+                            </small>
+                          </div>
+                        ))}
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div style={{ marginTop: "16px" }}>
+                  <label
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "8px",
+                      cursor: "pointer",
+                      fontSize: "0.9rem",
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={hasConfirmedWarning}
+                      disabled={publishingBusy}
+                      onChange={(e) => setHasConfirmedWarning(e.target.checked)}
+                      style={{ width: "18px", height: "18px" }}
+                    />
+                    Estou ciente e autorizo a publicação imediata na Meta.
+                  </label>
+                </div>
+
+                <div className="publish-modal-actions">
+                  <button
+                    type="button"
+                    className="quiet"
+                    disabled={publishingBusy}
+                    onClick={handleClosePublishModal}
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    className="publish-btn"
+                    disabled={
+                      publishingBusy ||
+                      !hasConfirmedWarning ||
+                      selectedAccountIds.length === 0
+                    }
+                    onClick={handleConfirmPublish}
+                  >
+                    {publishingBusy
+                      ? "Publicando na Meta…"
+                      : "Confirmar e Publicar"}
+                  </button>
+                </div>
+              </>
+            ) : (
+              /* Relatório e Resultado pós-publicação */
+              <div className="publish-results-box">
+                <h4>Resultado da Publicação</h4>
+                {publishResult.success ? (
+                  <p className="notice">
+                    Publicação realizada com sucesso em todas as contas
+                    selecionadas!
+                  </p>
+                ) : (
+                  <p className="error">
+                    Houve falhas em uma ou mais contas durante a publicação.
+                    Verifique os detalhes abaixo:
+                  </p>
+                )}
+
+                <div style={{ marginTop: "12px" }}>
+                  {publishResult.attempts.map((att) => {
+                    const acc = activeAccounts.find(
+                      (a) => a.id === att.socialAccountId,
+                    );
+                    const isOk = att.status === "PUBLISHED";
+                    return (
+                      <div
+                        key={att.id}
+                        className={`publish-attempt-item ${
+                          isOk ? "success" : "failed"
+                        }`}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <strong>{acc?.name || att.platform}</strong>
+                          <span
+                            className={`badge ${
+                              isOk ? "badge-completed" : "badge-failed"
+                            }`}
+                          >
+                            {att.status}
+                          </span>
+                        </div>
+                        {isOk && att.remotePermalink && (
+                          <p style={{ margin: "6px 0 0", fontSize: "0.85rem" }}>
+                            <a
+                              href={att.remotePermalink}
+                              target="_blank"
+                              rel="noreferrer noopener"
+                              style={{
+                                color: "var(--accent)",
+                                fontWeight: 600,
+                              }}
+                            >
+                              Ver post publicado na Meta ↗
+                            </a>
+                          </p>
+                        )}
+                        {!isOk && att.errorMessage && (
+                          <p
+                            style={{
+                              margin: "6px 0 0",
+                              fontSize: "0.85rem",
+                              color: "var(--error)",
+                            }}
+                          >
+                            Motivo: {att.errorMessage}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="publish-modal-actions">
+                  <button
+                    type="button"
+                    className="publish-btn"
+                    onClick={handleClosePublishModal}
+                  >
+                    Fechar
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       )}
     </section>
   );

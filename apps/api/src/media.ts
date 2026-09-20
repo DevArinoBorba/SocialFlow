@@ -7,6 +7,7 @@ import {
   mediaStorage,
   validateImage,
 } from "./media-storage.js";
+import { verifySignedMediaToken } from "./media-token.js";
 
 export type Scope = <T>(
   req: Request,
@@ -51,6 +52,7 @@ export type MediaStorage = NonNullable<ReturnType<typeof mediaStorage>>;
 
 export interface MediaDependencies {
   storage?: MediaStorage | null;
+  sessionSecret?: string;
 }
 
 export function sanitizeClientCorrelationId(raw: unknown): string | null {
@@ -167,6 +169,36 @@ export function registerMedia(
       }
     };
   }
+
+  server.get(
+    "/api/public/media/:signedToken",
+    handler(async (req, res) => {
+      const secret = deps?.sessionSecret || process.env.SESSION_SECRET || "";
+      if (!secret) {
+        throw new MediaError(503, "Assinatura de mídia indisponível.");
+      }
+      const token = String(req.params.signedToken);
+      const verified = verifySignedMediaToken(secret, token);
+      if (!verified) {
+        throw new MediaError(403, "Token de mídia inválido ou expirado.");
+      }
+      if (!storage) {
+        throw new MediaError(503, "Armazenamento indisponível.");
+      }
+      const bytes = await storage.get(verified.storageKey);
+      if (
+        bytes.length !== verified.byteSize ||
+        createHash("sha256").update(bytes).digest("hex") !== verified.sha256
+      ) {
+        throw new Error("Integridade da imagem divergente.");
+      }
+      res.setHeader("Content-Type", verified.mimeType);
+      res.setHeader("Cache-Control", "public, max-age=900, immutable");
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+      res.send(bytes);
+    }),
+  );
+
   server.get(
     root,
     handler(async (req, res) => {

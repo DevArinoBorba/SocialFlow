@@ -221,6 +221,25 @@ test("approver logs in and approves a post, while viewer has read-only access", 
     .click();
   await expect(postCardApprover.locator("span.badge-approved")).toBeVisible();
 
+  // Valida presença do botão "Publicar agora…" para aprovador
+  const publishBtn = postCardApprover.getByRole("button", {
+    name: "Publicar agora…",
+  });
+  await expect(publishBtn).toBeVisible();
+
+  // Clica para abrir o modal de confirmação de publicação
+  await publishBtn.click();
+  const modal = page.locator("div.publish-modal");
+  await expect(modal).toBeVisible();
+  await expect(
+    modal.getByRole("heading", { name: "Publicação Manual na Meta" }),
+  ).toBeVisible();
+  await expect(modal.getByText("Atenção:")).toBeVisible();
+
+  // Fecha o modal pelo botão cancelar
+  await modal.getByRole("button", { name: "Cancelar" }).click();
+  await expect(modal).toHaveCount(0);
+
   // Logout
   await page.getByRole("button", { name: "Sair" }).click();
 
@@ -248,6 +267,9 @@ test("approver logs in and approves a post, while viewer has read-only access", 
   ).toHaveCount(0);
   await expect(
     contentViewer.getByRole("button", { name: "Enviar para revisão" }),
+  ).toHaveCount(0);
+  await expect(
+    contentViewer.getByRole("button", { name: "Publicar agora…" }),
   ).toHaveCount(0);
 
   // Post aprovado é legível

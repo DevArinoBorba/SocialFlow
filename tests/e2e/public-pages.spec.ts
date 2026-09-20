@@ -11,11 +11,16 @@ test.describe("Páginas Públicas Institucionais (/privacy e /terms)", () => {
     // 2. Título da página e cabeçalho
     await expect(page).toHaveTitle(/Política de Privacidade \| SocialFlow/);
     await expect(
-      page.getByRole("heading", { name: "Política de Privacidade", exact: true }),
+      page.getByRole("heading", {
+        name: "Política de Privacidade",
+        exact: true,
+      }),
     ).toBeVisible();
 
     // 3. Menções obrigatórias: SocialFlow e contato arinoborba@gmail.com
-    await expect(page.getByText("SocialFlow", { exact: false }).first()).toBeVisible();
+    await expect(
+      page.getByText("SocialFlow", { exact: false }).first(),
+    ).toBeVisible();
     const contactLinks = page.locator('a[href^="mailto:arinoborba@gmail.com"]');
     await expect(contactLinks.first()).toBeVisible();
     expect(await contactLinks.count()).toBeGreaterThanOrEqual(1);
@@ -25,7 +30,9 @@ test.describe("Páginas Públicas Institucionais (/privacy e /terms)", () => {
       page.getByRole("heading", { name: "3. Dados Coletados" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "5. Armazenamento Seguro e Criptografia" }),
+      page.getByRole("heading", {
+        name: "5. Armazenamento Seguro e Criptografia",
+      }),
     ).toBeVisible();
     await expect(page.getByText("AES-256-GCM")).toBeVisible();
 
@@ -47,13 +54,19 @@ test.describe("Páginas Públicas Institucionais (/privacy e /terms)", () => {
       page.getByRole("heading", { name: "7. Exclusão e Retenção de Dados" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Opção 1: Exclusão Direta pelo SocialFlow" }),
+      page.getByRole("heading", {
+        name: "Opção 1: Exclusão Direta pelo SocialFlow",
+      }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Opção 2: Revogação pelo Facebook / Meta" }),
+      page.getByRole("heading", {
+        name: "Opção 2: Revogação pelo Facebook / Meta",
+      }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "Opção 3: Solicitação Formal por E-mail" }),
+      page.getByRole("heading", {
+        name: "Opção 3: Solicitação Formal por E-mail",
+      }),
     ).toBeVisible();
 
     // 7. Responsividade e acessibilidade: sem transbordamento horizontal
@@ -87,7 +100,9 @@ test.describe("Páginas Públicas Institucionais (/privacy e /terms)", () => {
     ).toBeVisible();
 
     // 3. Menções obrigatórias: SocialFlow e contato arinoborba@gmail.com
-    await expect(page.getByText("SocialFlow", { exact: false }).first()).toBeVisible();
+    await expect(
+      page.getByText("SocialFlow", { exact: false }).first(),
+    ).toBeVisible();
     const contactLinks = page.locator('a[href^="mailto:arinoborba@gmail.com"]');
     await expect(contactLinks.first()).toBeVisible();
     expect(await contactLinks.count()).toBeGreaterThanOrEqual(1);
@@ -108,7 +123,9 @@ test.describe("Páginas Públicas Institucionais (/privacy e /terms)", () => {
       page.getByRole("heading", { name: "5. Responsabilidade pelo Conteúdo" }),
     ).toBeVisible();
     await expect(
-      page.getByRole("heading", { name: "6. Uso Aceitável e Condutas Proibidas" }),
+      page.getByRole("heading", {
+        name: "6. Uso Aceitável e Condutas Proibidas",
+      }),
     ).toBeVisible();
     await expect(
       page.getByRole("heading", { name: "9. Limitação de Responsabilidade" }),

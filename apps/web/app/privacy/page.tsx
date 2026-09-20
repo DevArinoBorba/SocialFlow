@@ -65,14 +65,14 @@ export default function PrivacyPage() {
             <h2>2. Finalidade e Escopo da Plataforma</h2>
             <p>
               O <strong>SocialFlow</strong> tem por objetivo organizar o
-              planejamento editorial, a revisão colaborativa, a aprovação interna
-              de postagens e a conexão segura com canais sociais autorizados das
-              marcas atendidas.
+              planejamento editorial, a revisão colaborativa, a aprovação
+              interna de postagens e a conexão segura com canais sociais
+              autorizados das marcas atendidas.
             </p>
             <p>
               O tratamento de dados é restrito à finalidade operacional de
-              gestão de fluxo de trabalho e conexão voluntária com contas sociais
-              autorizadas pelo cliente.
+              gestão de fluxo de trabalho e conexão voluntária com contas
+              sociais autorizadas pelo cliente.
             </p>
           </section>
 
@@ -101,9 +101,9 @@ export default function PrivacyPage() {
                 compor o calendário editorial.
               </li>
               <li>
-                <strong>Logs Técnicos e de Auditoria:</strong> registros de ações
-                críticas (como conexão ou desconexão de canais) para segurança,
-                rastreabilidade e prevenção a fraudes.
+                <strong>Logs Técnicos e de Auditoria:</strong> registros de
+                ações críticas (como conexão ou desconexão de canais) para
+                segurança, rastreabilidade e prevenção a fraudes.
               </li>
             </ul>
           </section>
@@ -124,9 +124,9 @@ export default function PrivacyPage() {
               <li>
                 <strong>Sem Seleção Automática:</strong> após a autorização na
                 Meta, o SocialFlow apresenta uma tela de seleção onde{" "}
-                <strong>nenhuma conta vem pré-marcada</strong>. O usuário escolhe
-                individual e conscientemente quais páginas ou perfis deseja
-                vincular ao cliente.
+                <strong>nenhuma conta vem pré-marcada</strong>. O usuário
+                escolhe individual e conscientemente quais páginas ou perfis
+                deseja vincular ao cliente.
               </li>
               <li>
                 <strong>Sem Acesso a Senhas:</strong> o SocialFlow utiliza o
@@ -139,8 +139,8 @@ export default function PrivacyPage() {
                 <strong>Permissões Solicitadas:</strong> solicitamos apenas as
                 permissões necessárias para listar páginas administradas e
                 viabilizar a gestão dos canais autorizados (ex.:{" "}
-                <code>pages_show_list</code>, <code>pages_read_engagement</code>,{" "}
-                <code>instagram_basic</code> e{" "}
+                <code>pages_show_list</code>, <code>pages_read_engagement</code>
+                , <code>instagram_basic</code> e{" "}
                 <code>instagram_content_publish</code>).
               </li>
             </ul>
@@ -165,13 +165,13 @@ export default function PrivacyPage() {
               <li>
                 <strong>Isolamento Multitenant (RLS):</strong> utilizamos
                 políticas estritas de Row Level Security (RLS) no PostgreSQL,
-                garantindo que uma organização ou cliente jamais acesse dados
-                ou credenciais de outro.
+                garantindo que uma organização ou cliente jamais acesse dados ou
+                credenciais de outro.
               </li>
               <li>
-                <strong>Comunicação Cifrada:</strong> todo o tráfego é
-                trafegado exclusivamente via protocolo HTTPS com certificados
-                TLS modernos.
+                <strong>Comunicação Cifrada:</strong> todo o tráfego é trafegado
+                exclusivamente via protocolo HTTPS com certificados TLS
+                modernos.
               </li>
             </ul>
           </section>
@@ -179,9 +179,10 @@ export default function PrivacyPage() {
           <section className="doc-section">
             <h2>6. Compartilhamento e Não Comercialização</h2>
             <p>
-              O SocialFlow <strong>não vende, não aluga e não compartilha</strong>{" "}
-              dados pessoais ou dados obtidos via Meta com corretores de dados,
-              redes de publicidade de terceiros ou quaisquer entidades externas.
+              O SocialFlow{" "}
+              <strong>não vende, não aluga e não compartilha</strong> dados
+              pessoais ou dados obtidos via Meta com corretores de dados, redes
+              de publicidade de terceiros ou quaisquer entidades externas.
             </p>
             <p>
               Os dados são transmitidos unicamente aos servidores da Meta (via
@@ -219,7 +220,8 @@ export default function PrivacyPage() {
                   painel da Meta em:
                   <br />
                   <em>
-                    Configurações &gt; Segurança e Login &gt; Aplicativos e Sites
+                    Configurações &gt; Segurança e Login &gt; Aplicativos e
+                    Sites
                   </em>
                   . Ao remover o aplicativo SocialFlow, a Meta invalida todos os
                   tokens emitidos.
@@ -241,10 +243,10 @@ export default function PrivacyPage() {
                   </a>
                 </p>
                 <p className="muted">
-                  Informe no assunto &ldquo;Solicitação de Exclusão de Dados&rdquo;
-                  e indique o endereço de e-mail cadastrado e as contas a serem
-                  removidas. O atendimento é efetuado diretamente pelo
-                  responsável após a confirmação de titularidade da conta.
+                  Informe no assunto &ldquo;Solicitação de Exclusão de
+                  Dados&rdquo; e indique o endereço de e-mail cadastrado e as
+                  contas a serem removidas. O atendimento é efetuado diretamente
+                  pelo responsável após a confirmação de titularidade da conta.
                 </p>
               </div>
             </div>

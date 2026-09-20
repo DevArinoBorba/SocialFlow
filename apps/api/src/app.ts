@@ -42,6 +42,10 @@ import {
   registerSocialAccounts,
   type SocialAccountDependencies,
 } from "./social-accounts.js";
+import {
+  registerPublication,
+  type PublicationDependencies,
+} from "./publication.js";
 
 class HttpError extends Error {
   constructor(
@@ -55,6 +59,7 @@ class HttpError extends Error {
 export interface CreateApplicationOptions {
   mediaDependencies?: MediaDependencies;
   socialAccountDependencies?: SocialAccountDependencies;
+  publicationDependencies?: PublicationDependencies;
 }
 
 export async function createApplication(
@@ -181,7 +186,10 @@ export async function createApplication(
         .json({ message: "Serviço indisponível. Tente novamente." });
     }
   }
-  const closeMedia = registerMedia(server, scoped, options?.mediaDependencies);
+  const closeMedia = registerMedia(server, scoped, {
+    ...options?.mediaDependencies,
+    sessionSecret: config.SESSION_SECRET,
+  });
   registerContent(server, scoped);
   registerSocialAccounts(
     server,
@@ -189,6 +197,13 @@ export async function createApplication(
     redis,
     config,
     options?.socialAccountDependencies,
+  );
+  registerPublication(
+    server,
+    scoped,
+    redis,
+    config,
+    options?.publicationDependencies,
   );
   @Controller()
   class FoundationController {

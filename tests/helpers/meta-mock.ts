@@ -176,6 +176,89 @@ export function startMetaMockServer(
         });
       }
 
+      // 3. Facebook: /{page-id}/photos
+      if (
+        pathname.match(/\/v21\.0\/[^/]+\/photos$/) ||
+        pathname.match(/\/[^/]+\/photos$/)
+      ) {
+        const token =
+          bodyParams.get("access_token") ||
+          parsedUrl.searchParams.get("access_token");
+        if (token === "invalid_or_expired_token") {
+          return json(400, {
+            error: {
+              message: "Error validating access token: Session has expired.",
+              type: "OAuthException",
+              code: 190,
+              error_subcode: 463,
+            },
+          });
+        }
+        return json(200, {
+          id: "photo_mock_12345",
+          post_id: "fb_post_mock_67890",
+        });
+      }
+
+      // 4. Facebook: /{page-id}/feed
+      if (
+        pathname.match(/\/v21\.0\/[^/]+\/feed$/) ||
+        pathname.match(/\/[^/]+\/feed$/)
+      ) {
+        return json(200, {
+          id: "fb_post_feed_mock_99999",
+        });
+      }
+
+      // 5. Instagram: /{ig-user-id}/media (Container Creation)
+      if (
+        pathname.match(/\/v21\.0\/[^/]+\/media$/) ||
+        pathname.match(/\/[^/]+\/media$/)
+      ) {
+        const token =
+          bodyParams.get("access_token") ||
+          parsedUrl.searchParams.get("access_token");
+        if (token === "invalid_or_expired_token") {
+          return json(400, {
+            error: {
+              message: "Error validating access token: User changed password.",
+              type: "OAuthException",
+              code: 190,
+              error_subcode: 460,
+            },
+          });
+        }
+        return json(200, {
+          id: "ig_container_mock_55555",
+        });
+      }
+
+      // 6. Instagram: /{container-id} (Container Status Check)
+      if (pathname.includes("ig_container_mock_55555")) {
+        return json(200, {
+          status_code: "FINISHED",
+          id: "ig_container_mock_55555",
+        });
+      }
+
+      // 7. Instagram: /{ig-user-id}/media_publish
+      if (
+        pathname.match(/\/v21\.0\/[^/]+\/media_publish$/) ||
+        pathname.match(/\/[^/]+\/media_publish$/)
+      ) {
+        return json(200, {
+          id: "ig_published_media_88888",
+        });
+      }
+
+      // 8. Instagram: /{media-id} (Permalink query)
+      if (pathname.includes("ig_published_media_88888")) {
+        return json(200, {
+          id: "ig_published_media_88888",
+          permalink: "https://www.instagram.com/p/MockPerm123/",
+        });
+      }
+
       // 404 for unknown endpoints
       return json(404, {
         error: {
