@@ -2,6 +2,8 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
 import {
   createDatabase,
   createCredentialCrypto,
+  asActor,
+  asSchedulerActor,
 } from "../../packages/db/src/index.js";
 import { readConfig } from "../../packages/config/src/index.js";
 import type { AddressInfo } from "node:net";
@@ -21,9 +23,10 @@ import {
 
 const db = createDatabase(process.env.DATABASE_URL!);
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
-const migrationClient = migration as unknown as Parameters<
+const runtimeWorkerClient = db as unknown as Parameters<
   typeof processScheduleJob
 >[1];
+const migrationClient = runtimeWorkerClient;
 
 const TEST_KEY_32 = Buffer.from("0123456789abcdef0123456789abcdef", "utf8");
 const cryptoHelper = createCredentialCrypto(TEST_KEY_32);
@@ -1701,7 +1704,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migrationClient,
+        runtimeWorkerClient,
         redis,
         appConfig,
         {
@@ -1775,7 +1778,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migrationClient,
+        runtimeWorkerClient,
         redis,
         appConfig,
         {
@@ -1838,7 +1841,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         },
       });
 
-      const res = await runStartupReconciliation(migrationClient, redis);
+      const res = await runStartupReconciliation(runtimeWorkerClient, redis);
       expect(res.recoveredJobs).toBeGreaterThanOrEqual(1);
 
       const updated = await migration.publicationSchedule.findUnique({
@@ -1869,7 +1872,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         },
       });
 
-      const res = await runStartupReconciliation(migrationClient, redis);
+      const res = await runStartupReconciliation(runtimeWorkerClient, redis);
       expect(res.flaggedOrphan).toBeGreaterThanOrEqual(1);
 
       const updated = await migration.publicationSchedule.findUnique({
@@ -1877,6 +1880,269 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
       });
       expect(updated?.status).toBe("REQUIRES_RECONCILIATION");
       expect(updated?.failureReason).toContain("reconciliação manual");
+    });
+  });
+
+  describe("8. Validações de RLS e Role Real socialflow_runtime", () => {
+    it("consulta direta a PublicationSchedule sem ator retorna zero registros sob RLS", async () => {
+      const { approvedPost, facebookAccount } = await setupAccountsAndPost();
+      await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2030-01-01T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(Date.now() + 3600000),
+          status: "SCHEDULED",
+          jobId: `sched:${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      // db é conectado com socialflow_runtime (sem superusuário e sem bypass de RLS)
+      const directSchedules = await db.publicationSchedule.findMany();
+      expect(directSchedules).toHaveLength(0);
+    });
+
+    it("função discover_reconcilable_schedules retorna apenas agendamentos elegíveis e somente colunas permitidas", async () => {
+      const { approvedPost, facebookAccount } = await setupAccountsAndPost();
+
+      // Cria agendamento elegível (SCHEDULED)
+      const sched1 = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2030-01-01T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(Date.now() + 3600000),
+          status: "SCHEDULED",
+          jobId: `sched:${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      // Cria agendamento não elegível (CANCELLED)
+      await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2030-01-01T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(Date.now() + 3600000),
+          status: "CANCELLED",
+          jobId: `sched:${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      const rows = await db.$queryRaw<Array<Record<string, unknown>>>`
+        SELECT * FROM discover_reconcilable_schedules()
+      `;
+      expect(rows.length).toBeGreaterThanOrEqual(1);
+      const found = rows.find((r) => r.scheduleId === sched1.id);
+      expect(found).toBeDefined();
+
+      // Verifica que as colunas retornadas são estritamente as 9 permitidas
+      const allowedKeys = new Set([
+        "scheduleId",
+        "organizationId",
+        "clientId",
+        "status",
+        "version",
+        "jobId",
+        "scheduledForUtc",
+        "leaseExpiresAt",
+        "updatedAt",
+      ]);
+      const foundKeys = Object.keys(found!);
+      for (const k of foundKeys) {
+        expect(allowedKeys.has(k)).toBe(true);
+      }
+      expect(foundKeys).not.toContain("postId");
+      expect(foundKeys).not.toContain("caption");
+      expect(foundKeys).not.toContain("storageKey");
+      expect(foundKeys).not.toContain("createdById");
+    });
+
+    it("scheduler lê credencial OAuth exclusivamente dentro do seu escopo de tenant", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Com asSchedulerActor configurado para org-a e client-a, lê a credencial
+      const cred = await asSchedulerActor(
+        db,
+        { organizationId: "org-a", clientId: "client-a" },
+        async (tx) => {
+          return tx.oAuthCredential.findUnique({
+            where: { socialAccountId: facebookAccount.id },
+          });
+        },
+      );
+      expect(cred).not.toBeNull();
+      expect(cred?.encryptedAccessToken).toBeDefined();
+
+      // Descriptografa token para validar integridade
+      const decrypted = cryptoHelper.decrypt(
+        {
+          encryptedAccessToken: cred!.encryptedAccessToken,
+          iv: cred!.iv,
+          authTag: cred!.authTag,
+          keyVersion: cred!.keyVersion,
+        },
+        {
+          organizationId: "org-a",
+          clientId: "client-a",
+          platformAccountId: facebookAccount.platformAccountId,
+        },
+      );
+      expect(decrypted).toBe("valid_meta_page_token");
+    });
+
+    it("scheduler é bloqueado ao tentar ler credencial de outro cliente ou organização (cross-tenant)", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Tenta ler a credencial de org-a/client-a a partir de um contexto de org-b/client-b
+      const crossCred = await asSchedulerActor(
+        db,
+        { organizationId: "org-b", clientId: "client-b" },
+        async (tx) => {
+          return tx.oAuthCredential.findUnique({
+            where: { socialAccountId: facebookAccount.id },
+          });
+        },
+      );
+      expect(crossCred).toBeNull();
+    });
+
+    it("scheduler não consegue ler credenciais sem definir o escopo de tenant", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Consulta direta a OAuthCredential via db sem escopo de tenant
+      const unauthenticatedCred = await db.oAuthCredential.findUnique({
+        where: { socialAccountId: facebookAccount.id },
+      });
+      expect(unauthenticatedCred).toBeNull();
+    });
+
+    it("scheduler não consegue atualizar ou excluir credenciais OAuth", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Tentativa de update pelo scheduler deve retornar contagem 0 ou ser bloqueada por RLS
+      await asSchedulerActor(
+        db,
+        { organizationId: "org-a", clientId: "client-a" },
+        async (tx) => {
+          const updateResult = await tx.oAuthCredential.updateMany({
+            where: { socialAccountId: facebookAccount.id },
+            data: { reconnectReason: "malicious_update_attempt" },
+          });
+          expect(updateResult.count).toBe(0);
+
+          // Tentativa de delete pelo scheduler deve retornar contagem 0
+          const deleteResult = await tx.oAuthCredential.deleteMany({
+            where: { socialAccountId: facebookAccount.id },
+          });
+          expect(deleteResult.count).toBe(0);
+        },
+      );
+    });
+
+    it("usuário humano com can_edit_client mantém permissão de leitura de credenciais", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      const cred = await asActor(db, "admin-a", async (tx) => {
+        return tx.oAuthCredential.findUnique({
+          where: { socialAccountId: facebookAccount.id },
+        });
+      });
+      expect(cred).not.toBeNull();
+      expect(cred?.encryptedAccessToken).toBeDefined();
+    });
+
+    it("usuário desativado não ganha acesso para ler credenciais", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Cria usuário desativado em org-a
+      const deactUserId = `deact-${randomUUID()}`;
+      await migration.user.create({
+        data: {
+          id: deactUserId,
+          email: `${deactUserId}@example.com`,
+          name: "Deactivated User",
+          active: false,
+        },
+      });
+
+      await expect(
+        asActor(db, deactUserId, async (tx) => {
+          return tx.oAuthCredential.findUnique({
+            where: { socialAccountId: facebookAccount.id },
+          });
+        }),
+      ).rejects.toThrow();
+    });
+
+    it("fluxo completo do worker executa com sucesso sob a role real socialflow_runtime", async () => {
+      const { facebookAccount, approvedPost } = await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:full_flow_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      // Executa worker usando runtimeWorkerClient (socialflow_runtime)
+      const result = await processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        {
+          publisher: mockPublisher,
+        },
+      );
+
+      expect(result.status).toBe("published");
+
+      // Verifica agendamento finalizado como PUBLISHED
+      const updated = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(updated?.status).toBe("PUBLISHED");
+
+      // Verifica tentativa criada como PUBLISHED
+      const attempt = await migration.publicationAttempt.findFirst({
+        where: { postId: approvedPost.id, socialAccountId: facebookAccount.id },
+      });
+      expect(attempt?.status).toBe("PUBLISHED");
+      expect(attempt?.remoteMediaId).toBeDefined();
     });
   });
 });

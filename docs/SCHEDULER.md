@@ -107,6 +107,36 @@ Para evitar que o agendamento falhe porque o usuário criador foi desativado, re
    - Políticas RLS no PostgreSQL autorizam leitura de contas sociais, clientes, organizações e posts condicionados estritamente à coincidência com `app.scheduler_org_id` e `app.scheduler_client_id`.
    - **Garantia de Isolamento**: O ator técnico não possui acesso de superusuário e não pode ler dados de outros clientes ou organizações.
 
+### Matriz de Permissões RLS por Tabela (Scheduler - Fase 4)
+
+| Tabela                  | SELECT | INSERT | UPDATE | DELETE | Escopo / Política RLS Aplicada                                                                                                                                            | Justificativa                                                                             |
+| :---------------------- | :----: | :----: | :----: | :----: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :---------------------------------------------------------------------------------------- |
+| **Organization**        |   ✅   |   ❌   |   ❌   |   ❌   | `organization_read`: `active AND (current_setting('app.user_id') = 'system:scheduler' AND current_setting('app.scheduler_org_id') = id)`                                  | Validação de organização ativa                                                            |
+| **Client**              |   ✅   |   ❌   |   ❌   |   ❌   | `client_read`: `can_read_client(org, client)`                                                                                                                             | Validação de cliente ativo e escopo de tenant                                             |
+| **Post**                |   ✅   |   ❌   |   ❌   |   ❌   | `post_read`: `can_read_client(org, client)`                                                                                                                               | Leitura de post `APPROVED`, caption e hashtags                                            |
+| **MediaAsset**          |   ✅   |   ❌   |   ❌   |   ❌   | `media_read`: `can_read_client(org, client)`                                                                                                                              | Leitura de storageKey, sha256 e mimeType para geração de ticket                           |
+| **SocialAccount**       |   ✅   |   ❌   |   ✅   |   ❌   | `social_account_read`: `can_read_client`<br>`social_account_update`: `can_interact_post`                                                                                  | Leitura da conta e atualização para `status = 'EXPIRED'` em falha de autenticação na Meta |
+| **OAuthCredential**     |   ✅   |   ❌   |   ❌   |   ❌   | `oauth_credential_read`: `system:scheduler` limitado estritamente a `sa."organizationId" = app.scheduler_org_id AND sa."clientId" = app.scheduler_client_id AND c.active` | Descriptografia do token de acesso em memória para publicação (SELECT-only)               |
+| **PublicationAttempt**  |   ✅   |   ✅   |   ✅   |   ❌   | `publication_attempt_read`: `can_read_client`<br>`publication_attempt_create`: `can_interact_post`<br>`publication_attempt_update`: `can_interact_post`                   | Reserva de execução, transição para PROCESSING, registro de container e resultado final   |
+| **PublicationSchedule** |   ✅   |   ✅   |   ✅   |   ❌   | `publication_schedule_read`: `can_read_client`<br>`publication_schedule_create`: `can_interact_post`<br>`publication_schedule_update`: `can_interact_post`                | Aquisição atômica por CAS, renovação de lease e transição para estado final               |
+| **AuditLog**            |   ✅   |   ✅   |   ❌   |   ❌   | `audit_read`: `system:scheduler` para schedules/attempts do tenant<br>`audit_create`: `actorUserId = current_actor() AND can_interact_post(...)`                          | Rastreabilidade e conformidade de todas as transições de estado                           |
+
+### Descoberta Segura para Reconciliação Inicial (`discover_reconcilable_schedules`)
+
+#### Por que a descoberta global limitada é necessária?
+
+Ao iniciar o worker (`runStartupReconciliation`), o processo precisa descobrir quais agendamentos estão pendentes sem job no BullMQ ou abandonados com lease expirada em `PROCESSING`.
+No entanto, sob RLS forçada (`FORCE ROW LEVEL SECURITY`), uma consulta direta `findMany()` executada pela role sem privilégios (`socialflow_runtime`) sem um contexto de tenant previamente estabelecido (`app.scheduler_org_id`/`app.scheduler_client_id`) retornaria zero linhas.
+Conceder bypass irrestrito de RLS ao worker ou usar superusuário violaria o isolamento multi-tenant e o princípio do menor privilégio.
+
+#### Como a função SECURITY DEFINER resolve com segurança:
+
+1. **Escopo Mínimo de Retorno**: Retorna estritamente 9 campos operacionais de metadados (`scheduleId`, `organizationId`, `clientId`, `status`, `version`, `jobId`, `scheduledForUtc`, `leaseExpiresAt`, `updatedAt`).
+2. **Zero Dados de Negócio**: Não retorna payload de post, conteúdo de texto, legendas, hashtags, chaves de mídia S3, contas sociais ou credenciais.
+3. **Imutabilidade de Entrada**: Não aceita parâmetros de filtro fornecidos pelo chamador, impedindo ampliação ou injeção de escopo.
+4. **Filtro de Estados de Reconciliação**: Filtra apenas `status IN ('SCHEDULED', 'ENQUEUED', 'PROCESSING')` pertencentes a clientes e organizações ativas.
+5. **Transição Imediata para `asSchedulerActor`**: Qualquer operação subsequente (leitura de post, geração de job BullMQ, alteração de status ou emissão de audit log) é realizada obrigatoriamente dentro de `asSchedulerActor(db, { organizationId, clientId })`, garantindo que toda mutação seja confinada ao tenant correspondente.
+
 ---
 
 ## 5. Gestão de Timezones

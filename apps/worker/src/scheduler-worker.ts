@@ -48,15 +48,32 @@ export async function runStartupReconciliation(
   const queue = createScheduleQueue(redis);
 
   try {
+    // Descoberta segura com função SECURITY DEFINER mínima (sem bypass geral de RLS e sem dados de negócio)
+    const candidateSchedules = await db.$queryRaw<
+      Array<{
+        scheduleId: string;
+        organizationId: string;
+        clientId: string;
+        status: "SCHEDULED" | "ENQUEUED" | "PROCESSING";
+        version: number;
+        jobId: string;
+        scheduledForUtc: Date;
+        leaseExpiresAt: Date | null;
+        updatedAt: Date;
+      }>
+    >`
+      SELECT "scheduleId", "organizationId", "clientId", status, version, "jobId", "scheduledForUtc", "leaseExpiresAt", "updatedAt"
+      FROM discover_reconcilable_schedules()
+    `;
+
     // 1. Agendamentos em SCHEDULED ou ENQUEUED
-    const pendingSchedules = await db.publicationSchedule.findMany({
-      where: {
-        status: { in: ["SCHEDULED", "ENQUEUED"] },
-      },
-    });
+    const pendingSchedules = candidateSchedules.filter((s) =>
+      ["SCHEDULED", "ENQUEUED"].includes(s.status),
+    );
 
     for (const schedule of pendingSchedules) {
-      const delayMs = now.getTime() - schedule.scheduledForUtc.getTime();
+      const scheduledUtc = new Date(schedule.scheduledForUtc);
+      const delayMs = now.getTime() - scheduledUtc.getTime();
 
       // Política de atraso: atraso > 15 minutos vai para revisão manual sem publicar
       if (delayMs > LATE_TOLERANCE_MS) {
@@ -69,7 +86,7 @@ export async function runStartupReconciliation(
           async (tx) => {
             const updated = await tx.publicationSchedule.updateMany({
               where: {
-                id: schedule.id,
+                id: schedule.scheduleId,
                 organizationId: schedule.organizationId,
                 clientId: schedule.clientId,
                 status: { in: ["SCHEDULED", "ENQUEUED"] },
@@ -86,7 +103,7 @@ export async function runStartupReconciliation(
                 data: {
                   organizationId: schedule.organizationId,
                   actorUserId: "system:scheduler",
-                  entityId: schedule.id,
+                  entityId: schedule.scheduleId,
                   action: "schedule.reconciliation_required",
                 },
               });
@@ -101,58 +118,64 @@ export async function runStartupReconciliation(
       try {
         const job = await queue.getJob(schedule.jobId);
         if (!job) {
-          // Recria job ausente no Redis
-          const remainingDelay = Math.max(
-            0,
-            schedule.scheduledForUtc.getTime() - Date.now(),
-          );
-          await queue.add(
-            "publish-scheduled-post",
+          // Dentro do escopo estrito do tenant, descobre o postId e reinjeta o job na fila
+          await asSchedulerActor(
+            db,
             {
-              scheduleId: schedule.id,
-              version: schedule.version,
               organizationId: schedule.organizationId,
               clientId: schedule.clientId,
-              postId: schedule.postId,
             },
-            {
-              jobId: schedule.jobId,
-              delay: remainingDelay,
-              removeOnComplete: 100,
-              removeOnFail: 500,
-            },
-          );
+            async (tx) => {
+              const fullSchedule = await tx.publicationSchedule.findUnique({
+                where: { id: schedule.scheduleId },
+                select: { postId: true, status: true },
+              });
+              if (!fullSchedule) return;
 
-          if (schedule.status !== "ENQUEUED") {
-            await asSchedulerActor(
-              db,
-              {
-                organizationId: schedule.organizationId,
-                clientId: schedule.clientId,
-              },
-              async (tx) => {
+              const remainingDelay = Math.max(
+                0,
+                scheduledUtc.getTime() - Date.now(),
+              );
+              await queue.add(
+                "publish-scheduled-post",
+                {
+                  scheduleId: schedule.scheduleId,
+                  version: schedule.version,
+                  organizationId: schedule.organizationId,
+                  clientId: schedule.clientId,
+                  postId: fullSchedule.postId,
+                },
+                {
+                  jobId: schedule.jobId,
+                  delay: remainingDelay,
+                  removeOnComplete: 100,
+                  removeOnFail: 500,
+                },
+              );
+
+              if (fullSchedule.status !== "ENQUEUED") {
                 await tx.publicationSchedule.updateMany({
-                  where: { id: schedule.id, status: "SCHEDULED" },
+                  where: { id: schedule.scheduleId, status: "SCHEDULED" },
                   data: { status: "ENQUEUED" },
                 });
                 await tx.auditLog.create({
                   data: {
                     organizationId: schedule.organizationId,
                     actorUserId: "system:scheduler",
-                    entityId: schedule.id,
+                    entityId: schedule.scheduleId,
                     action: "schedule.enqueued",
                   },
                 });
-              },
-            );
-          }
-          recoveredJobs++;
+              }
+              recoveredJobs++;
+            },
+          );
         }
       } catch (jobErr) {
         console.error(
           JSON.stringify({
             event: "reconciliation_job_check_error",
-            scheduleId: schedule.id,
+            scheduleId: schedule.scheduleId,
             error: jobErr instanceof Error ? jobErr.message : String(jobErr),
           }),
         );
@@ -160,40 +183,57 @@ export async function runStartupReconciliation(
     }
 
     // 2. Agendamentos presos em PROCESSING com lease expirada
-    const processingSchedules = await db.publicationSchedule.findMany({
-      where: { status: "PROCESSING" },
-      include: { publicationAttempts: true },
-    });
+    const processingSchedules = candidateSchedules.filter(
+      (s) => s.status === "PROCESSING",
+    );
 
     for (const schedule of processingSchedules) {
-      const activeAttempts = schedule.publicationAttempts.filter((a) =>
-        ["PROCESSING", "CONTAINER_CREATED"].includes(a.status),
-      );
+      await asSchedulerActor(
+        db,
+        {
+          organizationId: schedule.organizationId,
+          clientId: schedule.clientId,
+        },
+        async (tx) => {
+          const activeAttempts = await tx.publicationAttempt.findMany({
+            where: {
+              scheduleId: schedule.scheduleId,
+              organizationId: schedule.organizationId,
+              clientId: schedule.clientId,
+            },
+          });
 
-      const hasActiveAttemptLease = activeAttempts.some(
-        (a) => a.leaseExpiresAt && a.leaseExpiresAt > now,
-      );
+          const relevantAttempts = activeAttempts.filter((a) =>
+            ["PROCESSING", "CONTAINER_CREATED"].includes(a.status),
+          );
 
-      const hasActiveScheduleLease = Boolean(
-        schedule.leaseExpiresAt && schedule.leaseExpiresAt > now,
-      );
+          const hasActiveAttemptLease = relevantAttempts.some(
+            (a) => a.leaseExpiresAt && new Date(a.leaseExpiresAt) > now,
+          );
 
-      if (
-        !hasActiveAttemptLease &&
-        !hasActiveScheduleLease &&
-        (activeAttempts.length > 0 ||
-          now.getTime() - schedule.updatedAt.getTime() > 5 * 60 * 1000)
-      ) {
-        // Lease expirada ou processo abandonado sem tentativas ativas. Envia para reconciliação manual
-        await asSchedulerActor(
-          db,
-          {
-            organizationId: schedule.organizationId,
-            clientId: schedule.clientId,
-          },
-          async (tx) => {
+          const scheduleLease = schedule.leaseExpiresAt
+            ? new Date(schedule.leaseExpiresAt)
+            : null;
+          const hasActiveScheduleLease = Boolean(
+            scheduleLease && scheduleLease > now,
+          );
+
+          const updatedAtTime = new Date(schedule.updatedAt).getTime();
+          if (
+            !hasActiveAttemptLease &&
+            !hasActiveScheduleLease &&
+            (relevantAttempts.length > 0 ||
+              now.getTime() - updatedAtTime > 5 * 60 * 1000 ||
+              scheduleLease !== null)
+          ) {
+            // Lease expirada ou processo abandonado sem tentativas ativas. Envia para reconciliação manual
             const updated = await tx.publicationSchedule.updateMany({
-              where: { id: schedule.id, status: "PROCESSING" },
+              where: {
+                id: schedule.scheduleId,
+                organizationId: schedule.organizationId,
+                clientId: schedule.clientId,
+                status: "PROCESSING",
+              },
               data: {
                 status: "REQUIRES_RECONCILIATION",
                 failureReason:
@@ -206,15 +246,15 @@ export async function runStartupReconciliation(
                 data: {
                   organizationId: schedule.organizationId,
                   actorUserId: "system:scheduler",
-                  entityId: schedule.id,
+                  entityId: schedule.scheduleId,
                   action: "schedule.reconciliation_required",
                 },
               });
               flaggedOrphan++;
             }
-          },
-        );
-      }
+          }
+        },
+      );
     }
   } finally {
     await closeScheduleQueue(queue);

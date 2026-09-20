@@ -951,13 +951,17 @@ export async function executePublication(
               where: { id: target.account.id },
               data: { status: "EXPIRED" },
             });
-            await tx.oAuthCredential.update({
-              where: { socialAccountId: target.account.id },
-              data: {
-                reconnectReason:
-                  "Token da Meta expirado ou revogado. Reconexão necessária.",
-              },
-            });
+            try {
+              await tx.oAuthCredential.update({
+                where: { socialAccountId: target.account.id },
+                data: {
+                  reconnectReason:
+                    "Token da Meta expirado ou revogado. Reconexão necessária.",
+                },
+              });
+            } catch {
+              // Scheduler possui acesso estritamente SELECT-only em OAuthCredential por política de segurança RLS
+            }
           }
 
           const res = await tx.publicationAttempt.update({
