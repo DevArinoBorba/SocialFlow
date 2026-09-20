@@ -285,6 +285,10 @@ export function registerPublication(
           sha256: string | null;
         } | null;
         targets: TargetPrep[];
+        uncertainAccount?: {
+          id: string;
+          name: string | null;
+        } | null;
       };
 
       try {
@@ -386,7 +390,38 @@ export function registerPublication(
               orderBy: { attemptNumber: "desc" },
             });
 
-            const targets: TargetPrep[] = [];
+            // ETAPA 1.A: ANÁLISE E VALIDAÇÃO GLOBAL DE TODAS AS CONTAS SELECIONADAS
+            // Valida PUBLISHED, UNCERTAIN, lease ativa/expirada e credenciais ANTES de qualquer gravação.
+            type AccountPlan =
+              | {
+                  action: "RESUME_INSTAGRAM";
+                  account: (typeof accounts)[number];
+                  activeAttemptId: string;
+                  previousContainerId: string | null;
+                  attemptNumber: number;
+                  accessToken: string;
+                }
+              | {
+                  action: "CREATE_PROCESSING";
+                  account: (typeof accounts)[number];
+                  previousContainerId: string | null;
+                  attemptNumber: number;
+                  accessToken: string;
+                }
+              | {
+                  action: "RECORD_FAILED";
+                  account: (typeof accounts)[number];
+                  attemptNumber: number;
+                  errorCode: string;
+                  errorMessage: string;
+                };
+
+            const plans: AccountPlan[] = [];
+            let facebookExpiredAccount: {
+              id: string;
+              name: string | null;
+            } | null = null;
+            const facebookExpiredAttemptIds: string[] = [];
 
             for (const account of accounts) {
               const accountAttempts = existingAttempts.filter(
@@ -415,6 +450,8 @@ export function registerPublication(
               );
 
               let previousContainerId: string | null = null;
+              let isInstagramResumption = false;
+
               if (active) {
                 if (active.status === "UNCERTAIN") {
                   throw new PublicationError(
@@ -436,94 +473,43 @@ export function registerPublication(
 
                 // Lease expirado: processo anterior foi abandonado ou interrompido
                 if (account.platform === "INSTAGRAM_BUSINESS") {
+                  isInstagramResumption = true;
                   previousContainerId = active.creationContainerId;
-                  await tx.publicationAttempt.update({
-                    where: { id: active.id },
-                    data: {
-                      status: "FAILED",
-                      errorCode: "ABANDONED_LEASE_EXPIRED",
-                      errorMessage: previousContainerId
-                        ? "Execução anterior expirou. Tentativa retomada automaticamente aproveitando container existente."
-                        : "Execução anterior expirou antes da criação do container. Tentativa retomada.",
-                      leaseExpiresAt: null,
-                    },
-                  });
-                  await audit(tx, req, userId, active.id, "post.lease_expired");
                 } else {
                   // Facebook: sem ID remoto de confirmação, não é seguro republicar automaticamente.
-                  // Transiciona para UNCERTAIN e exige resolução manual do administrador.
-                  await tx.publicationAttempt.update({
-                    where: { id: active.id },
-                    data: {
-                      status: "UNCERTAIN",
-                      errorCode: "LEASE_EXPIRED_UNCERTAIN",
-                      errorMessage:
-                        "Execução anterior no Facebook expirou antes da confirmação. Reconciliação manual necessária pelo administrador.",
-                      leaseExpiresAt: null,
-                    },
-                  });
-                  await audit(
-                    tx,
-                    req,
-                    userId,
-                    active.id,
-                    "post.publish_uncertain",
-                  );
-
-                  return {
-                    uncertainAccount: {
+                  // Coleta para transicionar para UNCERTAIN e abortar a reserva do lote.
+                  facebookExpiredAttemptIds.push(active.id);
+                  if (!facebookExpiredAccount) {
+                    facebookExpiredAccount = {
                       id: account.id,
                       name: account.name,
-                    },
-                    post: null as never,
-                    mediaAsset: null as never,
-                    targets: [] as never,
-                  };
+                    };
+                  }
                 }
               }
 
-              // 3. Retomada permitida após FAILED (ou primeira tentativa)
               const lastAttempt = accountAttempts[0];
               const attemptNumber = (lastAttempt?.attemptNumber ?? 0) + 1;
               if (!previousContainerId) {
                 previousContainerId = lastAttempt?.creationContainerId ?? null;
               }
 
+              // Se já detectamos bloqueio no Facebook, não precisamos descriptografar credenciais
+              if (facebookExpiredAccount) {
+                continue;
+              }
+
               // Valida status da conta e credencial
               if (account.status !== "ACTIVE" || !account.credential) {
-                const failedAttempt = await tx.publicationAttempt.create({
-                  data: {
-                    organizationId,
-                    clientId,
-                    postId,
-                    socialAccountId: account.id,
-                    status: "FAILED",
-                    attemptNumber,
-                    executedAt: new Date(),
-                    errorCode: "ACCOUNT_INACTIVE",
-                    errorMessage:
-                      account.status === "ACTIVE"
-                        ? "Credencial OAuth ausente. Reconecte a conta."
-                        : `Conta social em estado ${account.status}. Reconexão necessária.`,
-                  },
-                });
-                await audit(
-                  tx,
-                  req,
-                  userId,
-                  failedAttempt.id,
-                  "post.publish_failed",
-                );
-                targets.push({
-                  account: {
-                    id: account.id,
-                    name: account.name,
-                    platform: account.platform,
-                    platformAccountId: account.platformAccountId,
-                    status: account.status,
-                  },
-                  attempt: failedAttempt,
-                  skippedDueToError: true,
+                plans.push({
+                  action: "RECORD_FAILED",
+                  account,
+                  attemptNumber,
+                  errorCode: "ACCOUNT_INACTIVE",
+                  errorMessage:
+                    account.status === "ACTIVE"
+                      ? "Credencial OAuth ausente. Reconecte a conta."
+                      : `Conta social em estado ${account.status}. Reconexão necessária.`,
                 });
                 continue;
               }
@@ -548,18 +534,86 @@ export function registerPublication(
                   credContext,
                 );
               } catch {
+                plans.push({
+                  action: "RECORD_FAILED",
+                  account,
+                  attemptNumber,
+                  errorCode: "CRYPTO_DECRYPT_FAILED",
+                  errorMessage:
+                    "Falha ao descriptografar token da conta social.",
+                });
+                continue;
+              }
+
+              if (isInstagramResumption && active) {
+                plans.push({
+                  action: "RESUME_INSTAGRAM",
+                  account,
+                  activeAttemptId: active.id,
+                  previousContainerId,
+                  attemptNumber,
+                  accessToken,
+                });
+              } else {
+                plans.push({
+                  action: "CREATE_PROCESSING",
+                  account,
+                  previousContainerId,
+                  attemptNumber,
+                  accessToken,
+                });
+              }
+            }
+
+            // SE QUALQUER CONTA FACEBOOK TIVER LEASE EXPIRADA:
+            // Transiciona essas tentativas para UNCERTAIN e aborta o lote.
+            // NENHUMA tentativa PROCESSING é criada para as demais contas.
+            if (facebookExpiredAccount) {
+              for (const attemptId of facebookExpiredAttemptIds) {
+                await tx.publicationAttempt.update({
+                  where: { id: attemptId },
+                  data: {
+                    status: "UNCERTAIN",
+                    errorCode: "LEASE_EXPIRED_UNCERTAIN",
+                    errorMessage:
+                      "Execução anterior no Facebook expirou antes da confirmação. Reconciliação manual necessária pelo administrador.",
+                    leaseExpiresAt: null,
+                  },
+                });
+                await audit(
+                  tx,
+                  req,
+                  userId,
+                  attemptId,
+                  "post.publish_uncertain",
+                );
+              }
+
+              return {
+                uncertainAccount: facebookExpiredAccount,
+                post: null as never,
+                mediaAsset: null as never,
+                targets: [] as never,
+              };
+            }
+
+            // ETAPA 1.B: SOMENTE APÓS A ANÁLISE GLOBAL CONFIRMAR QUE O LOTE PODE PROSSEGUIR:
+            // Atualiza tentativas abandonadas, cria reservas PROCESSING e grava auditorias.
+            const targets: TargetPrep[] = [];
+
+            for (const plan of plans) {
+              if (plan.action === "RECORD_FAILED") {
                 const failedAttempt = await tx.publicationAttempt.create({
                   data: {
                     organizationId,
                     clientId,
                     postId,
-                    socialAccountId: account.id,
+                    socialAccountId: plan.account.id,
                     status: "FAILED",
-                    attemptNumber,
+                    attemptNumber: plan.attemptNumber,
                     executedAt: new Date(),
-                    errorCode: "CRYPTO_DECRYPT_FAILED",
-                    errorMessage:
-                      "Falha ao descriptografar token da conta social.",
+                    errorCode: plan.errorCode,
+                    errorMessage: plan.errorMessage,
                   },
                 });
                 await audit(
@@ -571,48 +625,91 @@ export function registerPublication(
                 );
                 targets.push({
                   account: {
-                    id: account.id,
-                    name: account.name,
-                    platform: account.platform,
-                    platformAccountId: account.platformAccountId,
-                    status: account.status,
+                    id: plan.account.id,
+                    name: plan.account.name,
+                    platform: plan.account.platform,
+                    platformAccountId: plan.account.platformAccountId,
+                    status: plan.account.status,
                   },
                   attempt: failedAttempt,
                   skippedDueToError: true,
                 });
-                continue;
+              } else if (plan.action === "RESUME_INSTAGRAM") {
+                await tx.publicationAttempt.update({
+                  where: { id: plan.activeAttemptId },
+                  data: {
+                    status: "FAILED",
+                    errorCode: "ABANDONED_LEASE_EXPIRED",
+                    errorMessage: plan.previousContainerId
+                      ? "Execução anterior expirou. Tentativa retomada automaticamente aproveitando container existente."
+                      : "Execução anterior expirou antes da criação do container. Tentativa retomada.",
+                    leaseExpiresAt: null,
+                  },
+                });
+                await audit(
+                  tx,
+                  req,
+                  userId,
+                  plan.activeAttemptId,
+                  "post.lease_expired",
+                );
+
+                const reservedAttempt = await tx.publicationAttempt.create({
+                  data: {
+                    organizationId,
+                    clientId,
+                    postId,
+                    socialAccountId: plan.account.id,
+                    status: "PROCESSING",
+                    attemptNumber: plan.attemptNumber,
+                    creationContainerId: plan.previousContainerId,
+                    leaseExpiresAt: new Date(Date.now() + LEASE_DURATION_MS),
+                    executedAt: new Date(),
+                  },
+                });
+
+                targets.push({
+                  account: {
+                    id: plan.account.id,
+                    name: plan.account.name,
+                    platform: plan.account.platform,
+                    platformAccountId: plan.account.platformAccountId,
+                    status: plan.account.status,
+                  },
+                  attempt: reservedAttempt,
+                  accessToken: plan.accessToken,
+                  previousContainerId: plan.previousContainerId,
+                  skippedDueToError: false,
+                });
+              } else if (plan.action === "CREATE_PROCESSING") {
+                const reservedAttempt = await tx.publicationAttempt.create({
+                  data: {
+                    organizationId,
+                    clientId,
+                    postId,
+                    socialAccountId: plan.account.id,
+                    status: "PROCESSING",
+                    attemptNumber: plan.attemptNumber,
+                    creationContainerId: plan.previousContainerId,
+                    leaseExpiresAt: new Date(Date.now() + LEASE_DURATION_MS),
+                    executedAt: new Date(),
+                  },
+                });
+
+                targets.push({
+                  account: {
+                    id: plan.account.id,
+                    name: plan.account.name,
+                    platform: plan.account.platform,
+                    platformAccountId: plan.account.platformAccountId,
+                    status: plan.account.status,
+                  },
+                  attempt: reservedAttempt,
+                  accessToken: plan.accessToken,
+                  previousContainerId: plan.previousContainerId,
+                  skippedDueToError: false,
+                });
               }
-
-              // Reserva a tentativa no PostgreSQL no estado PROCESSING
-              // A restrição única parcial (PublicationAttempt_single_active_idx)
-              // impede execução concorrente mesmo entre instâncias distintas da API.
-              const reservedAttempt = await tx.publicationAttempt.create({
-                data: {
-                  organizationId,
-                  clientId,
-                  postId,
-                  socialAccountId: account.id,
-                  status: "PROCESSING",
-                  attemptNumber,
-                  creationContainerId: previousContainerId,
-                  leaseExpiresAt: new Date(Date.now() + LEASE_DURATION_MS),
-                  executedAt: new Date(),
-                },
-              });
-
-              targets.push({
-                account: {
-                  id: account.id,
-                  name: account.name,
-                  platform: account.platform,
-                  platformAccountId: account.platformAccountId,
-                  status: account.status,
-                },
-                attempt: reservedAttempt,
-                accessToken,
-                previousContainerId,
-                skippedDueToError: false,
-              });
             }
 
             return {

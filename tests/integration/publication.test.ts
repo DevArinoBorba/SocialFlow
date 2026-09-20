@@ -1,4 +1,13 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
@@ -39,6 +48,7 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
   let redis: Redis;
   let appRuntime: Awaited<ReturnType<typeof createApplication>>;
   let apiBase: string;
+  let mockPublisher: MetaPublisherAdapter;
   const origin = process.env.APP_URL!;
   const password = process.env.DEV_SEED_PASSWORD!;
 
@@ -105,7 +115,7 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
       CREDENTIAL_MASTER_KEY: TEST_KEY_32.toString("hex"),
     });
 
-    const mockPublisher = new MetaPublisherAdapter({
+    mockPublisher = new MetaPublisherAdapter({
       graphBaseUrl: metaMock.url,
       pollDelayMs: 10,
       pollMaxAttempts: 5,
@@ -148,6 +158,10 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
     await migration.rateLimit.deleteMany();
     onBeforePublishHook = undefined;
     mockStorageMap.clear();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it("bloqueia publicação de post com status diferente de APPROVED (DRAFT, IN_REVIEW, REJECTED) com 422", async () => {
@@ -1544,5 +1558,347 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
     expect(post2Blocked.status).toBe(409);
     const post2BlockedBody = await post2Blocked.json();
     expect(post2BlockedBody.message).toContain("já publicado com sucesso");
+  });
+
+  describe("Consistência de preparação em duas fases com ordenação variável de contas", () => {
+    async function createTestFbAccount(prefix: string) {
+      const account = await migration.socialAccount.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          platform: "FACEBOOK_PAGE",
+          platformAccountId: `${prefix}_${randomUUID().slice(0, 8)}`,
+          name: `Página FB ${prefix}`,
+          status: "ACTIVE",
+        },
+      });
+      const enc = cryptoHelper.encrypt("valid_token", {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platformAccountId: account.platformAccountId,
+        keyVersion: 1,
+      });
+      await migration.oAuthCredential.create({
+        data: {
+          socialAccountId: account.id,
+          encryptedAccessToken: enc.encryptedAccessToken,
+          iv: enc.iv,
+          authTag: enc.authTag,
+          keyVersion: 1,
+        },
+      });
+      return account;
+    }
+
+    it("primeira conta válida e segunda Facebook com lease expirada: não reserva conta válida, transiciona Facebook para UNCERTAIN, libera idempotência e não chama Meta", async () => {
+      const cookie = await login("admin-a");
+      const validAcc = await createTestFbAccount("order_valid_1");
+      const expiredFbAcc = await createTestFbAccount("order_expired_2");
+
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Teste ordem: válida primeiro, Facebook expirada segundo",
+          status: "APPROVED",
+        },
+      });
+
+      const abandonedAttempt = await migration.publicationAttempt.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: post.id,
+          socialAccountId: expiredFbAcc.id,
+          status: "PROCESSING",
+          attemptNumber: 1,
+          leaseExpiresAt: new Date(Date.now() - 10_000),
+          executedAt: new Date(Date.now() - 60_000),
+        },
+      });
+
+      const fbSpy = vi.spyOn(mockPublisher, "publishFacebook");
+      const igContSpy = vi.spyOn(mockPublisher, "createInstagramContainer");
+      const igPubSpy = vi.spyOn(mockPublisher, "publishInstagramContainer");
+
+      const idempotencyKey = "idem_order_valid_first_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [validAcc.id, expiredFbAcc.id],
+          idempotencyKey,
+        },
+      );
+
+      // 1. Resposta 409
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.message).toContain(
+        "resultado incerto. Reconciliação manual necessária",
+      );
+
+      // 2. Mock da Meta NÃO foi chamado
+      expect(fbSpy).not.toHaveBeenCalled();
+      expect(igContSpy).not.toHaveBeenCalled();
+      expect(igPubSpy).not.toHaveBeenCalled();
+
+      // 3. Conta válida não ficou com nenhuma tentativa nova em PROCESSING
+      const validAttempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc.id },
+      });
+      expect(validAttempts).toHaveLength(0);
+      expect(validAttempts.some((a) => a.status === "PROCESSING")).toBe(false);
+
+      // 4. Tentativa Facebook expirada foi transicionada para UNCERTAIN
+      const updatedExpired = await migration.publicationAttempt.findUnique({
+        where: { id: abandonedAttempt.id },
+      });
+      expect(updatedExpired!.status).toBe("UNCERTAIN");
+      expect(updatedExpired!.errorCode).toBe("LEASE_EXPIRED_UNCERTAIN");
+      expect(updatedExpired!.leaseExpiresAt).toBeNull();
+
+      // 5. Auditoria de transição para UNCERTAIN gravada
+      const uncertainAudit = await migration.auditLog.findMany({
+        where: {
+          entityId: abandonedAttempt.id,
+          action: "post.publish_uncertain",
+        },
+      });
+      expect(uncertainAudit).toHaveLength(1);
+
+      // 6. Chave de idempotência liberada no Redis
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+    });
+
+    it("primeira Facebook com lease expirada e segunda válida: não reserva conta válida, transiciona Facebook para UNCERTAIN, libera idempotência e não chama Meta", async () => {
+      const cookie = await login("admin-a");
+      const expiredFbAcc = await createTestFbAccount("order_expired_first");
+      const validAcc = await createTestFbAccount("order_valid_second");
+
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Teste ordem: Facebook expirada primeiro, válida segundo",
+          status: "APPROVED",
+        },
+      });
+
+      const abandonedAttempt = await migration.publicationAttempt.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: post.id,
+          socialAccountId: expiredFbAcc.id,
+          status: "PROCESSING",
+          attemptNumber: 1,
+          leaseExpiresAt: new Date(Date.now() - 10_000),
+          executedAt: new Date(Date.now() - 60_000),
+        },
+      });
+
+      const fbSpy = vi.spyOn(mockPublisher, "publishFacebook");
+      const igContSpy = vi.spyOn(mockPublisher, "createInstagramContainer");
+      const igPubSpy = vi.spyOn(mockPublisher, "publishInstagramContainer");
+
+      const idempotencyKey = "idem_order_expired_first_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [expiredFbAcc.id, validAcc.id],
+          idempotencyKey,
+        },
+      );
+
+      // 1. Resposta 409
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.message).toContain(
+        "resultado incerto. Reconciliação manual necessária",
+      );
+
+      // 2. Mock da Meta NÃO foi chamado
+      expect(fbSpy).not.toHaveBeenCalled();
+      expect(igContSpy).not.toHaveBeenCalled();
+      expect(igPubSpy).not.toHaveBeenCalled();
+
+      // 3. Conta válida não ficou com nenhuma tentativa nova em PROCESSING
+      const validAttempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc.id },
+      });
+      expect(validAttempts).toHaveLength(0);
+      expect(validAttempts.some((a) => a.status === "PROCESSING")).toBe(false);
+
+      // 4. Tentativa Facebook expirada foi transicionada para UNCERTAIN
+      const updatedExpired = await migration.publicationAttempt.findUnique({
+        where: { id: abandonedAttempt.id },
+      });
+      expect(updatedExpired!.status).toBe("UNCERTAIN");
+      expect(updatedExpired!.errorCode).toBe("LEASE_EXPIRED_UNCERTAIN");
+      expect(updatedExpired!.leaseExpiresAt).toBeNull();
+
+      // 5. Chave de idempotência liberada no Redis
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+    });
+
+    it("três contas com bloqueio na última (Facebook expirado): nenhuma conta anterior fica em PROCESSING, libera idempotência e não chama Meta", async () => {
+      const cookie = await login("admin-a");
+      const validAcc1 = await createTestFbAccount("order_3_valid1");
+      const validAcc2 = await createTestFbAccount("order_3_valid2");
+      const expiredFbAcc3 = await createTestFbAccount("order_3_expired3");
+
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Teste ordem: três contas com bloqueio na última",
+          status: "APPROVED",
+        },
+      });
+
+      const abandonedAttempt = await migration.publicationAttempt.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: post.id,
+          socialAccountId: expiredFbAcc3.id,
+          status: "PROCESSING",
+          attemptNumber: 1,
+          leaseExpiresAt: new Date(Date.now() - 10_000),
+          executedAt: new Date(Date.now() - 60_000),
+        },
+      });
+
+      const fbSpy = vi.spyOn(mockPublisher, "publishFacebook");
+      const igContSpy = vi.spyOn(mockPublisher, "createInstagramContainer");
+      const igPubSpy = vi.spyOn(mockPublisher, "publishInstagramContainer");
+
+      const idempotencyKey = "idem_order_three_accounts_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [validAcc1.id, validAcc2.id, expiredFbAcc3.id],
+          idempotencyKey,
+        },
+      );
+
+      // 1. Resposta 409
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.message).toContain(
+        "resultado incerto. Reconciliação manual necessária",
+      );
+
+      // 2. Mock da Meta NÃO foi chamado
+      expect(fbSpy).not.toHaveBeenCalled();
+      expect(igContSpy).not.toHaveBeenCalled();
+      expect(igPubSpy).not.toHaveBeenCalled();
+
+      // 3. Nenhuma das contas válidas anteriores (validAcc1 e validAcc2) ficou em PROCESSING
+      const valid1Attempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc1.id },
+      });
+      expect(valid1Attempts).toHaveLength(0);
+
+      const valid2Attempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc2.id },
+      });
+      expect(valid2Attempts).toHaveLength(0);
+
+      // 4. Tentativa Facebook expirada foi transicionada para UNCERTAIN
+      const updatedExpired = await migration.publicationAttempt.findUnique({
+        where: { id: abandonedAttempt.id },
+      });
+      expect(updatedExpired!.status).toBe("UNCERTAIN");
+      expect(updatedExpired!.errorCode).toBe("LEASE_EXPIRED_UNCERTAIN");
+      expect(updatedExpired!.leaseExpiresAt).toBeNull();
+
+      // 5. Chave de idempotência liberada no Redis
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+    });
+
+    it("três contas com bloqueio por lease ativa na última: nenhuma conta anterior é reservada, libera idempotência e não chama Meta", async () => {
+      const cookie = await login("admin-a");
+      const validAcc1 = await createTestFbAccount("order_3_active1");
+      const validAcc2 = await createTestFbAccount("order_3_active2");
+      const activeLeaseAcc3 = await createTestFbAccount("order_3_active3");
+
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Teste ordem: três contas com lease ativa na última",
+          status: "APPROVED",
+        },
+      });
+
+      await migration.publicationAttempt.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: post.id,
+          socialAccountId: activeLeaseAcc3.id,
+          status: "PROCESSING",
+          attemptNumber: 1,
+          leaseExpiresAt: new Date(Date.now() + 120_000), // lease ativa no futuro
+          executedAt: new Date(),
+        },
+      });
+
+      const fbSpy = vi.spyOn(mockPublisher, "publishFacebook");
+      const igContSpy = vi.spyOn(mockPublisher, "createInstagramContainer");
+      const igPubSpy = vi.spyOn(mockPublisher, "publishInstagramContainer");
+
+      const idempotencyKey = "idem_order_three_active_lease_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [validAcc1.id, validAcc2.id, activeLeaseAcc3.id],
+          idempotencyKey,
+        },
+      );
+
+      // 1. Resposta 409
+      expect(res.status).toBe(409);
+      const body = await res.json();
+      expect(body.message).toContain(
+        "Publicação em andamento para a conta social",
+      );
+
+      // 2. Mock da Meta NÃO foi chamado
+      expect(fbSpy).not.toHaveBeenCalled();
+      expect(igContSpy).not.toHaveBeenCalled();
+      expect(igPubSpy).not.toHaveBeenCalled();
+
+      // 3. Nenhuma das contas válidas anteriores ficou em PROCESSING nem tem tentativa
+      const valid1Attempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc1.id },
+      });
+      expect(valid1Attempts).toHaveLength(0);
+
+      const valid2Attempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id, socialAccountId: validAcc2.id },
+      });
+      expect(valid2Attempts).toHaveLength(0);
+
+      // 4. Chave de idempotência liberada no Redis
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+    });
   });
 });
