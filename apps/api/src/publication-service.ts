@@ -596,6 +596,7 @@ export interface ExecutePublicationParams {
   appUrl: string;
   redis: Redis;
   onBeforePublish?: () => Promise<void>;
+  isScheduler?: boolean;
 }
 
 export interface ExecutePublicationResult {
@@ -623,6 +624,7 @@ export async function executePublication(
     appUrl,
     redis,
     onBeforePublish,
+    isScheduler = false,
   } = params;
 
   const fullCaption = [prepResult.post.caption, prepResult.post.hashtags]
@@ -947,20 +949,34 @@ export async function executePublication(
 
         const updated = await txRunner(async (tx) => {
           if (isAuthError) {
-            await tx.socialAccount.update({
-              where: { id: target.account.id },
-              data: { status: "EXPIRED" },
-            });
-            try {
-              await tx.oAuthCredential.update({
-                where: { socialAccountId: target.account.id },
-                data: {
-                  reconnectReason:
-                    "Token da Meta expirado ou revogado. Reconexão necessária.",
-                },
-              });
-            } catch {
-              // Scheduler possui acesso estritamente SELECT-only em OAuthCredential por política de segurança RLS
+            if (isScheduler) {
+              await tx.$executeRaw`SELECT mark_social_account_expired(${target.account.id})`;
+              await auditCallback(
+                tx,
+                target.account.id,
+                "social_account.expired",
+              );
+            } else {
+              try {
+                await tx.socialAccount.update({
+                  where: { id: target.account.id },
+                  data: { status: "EXPIRED" },
+                });
+                await auditCallback(
+                  tx,
+                  target.account.id,
+                  "social_account.expired",
+                );
+                await tx.oAuthCredential.update({
+                  where: { socialAccountId: target.account.id },
+                  data: {
+                    reconnectReason:
+                      "Token da Meta expirado ou revogado. Reconexão necessária.",
+                  },
+                });
+              } catch {
+                // Usuário humano sem can_edit_client (ex: APPROVER) tem o erro absorvido
+              }
             }
           }
 

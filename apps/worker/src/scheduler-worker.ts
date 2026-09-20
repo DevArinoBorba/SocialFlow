@@ -23,6 +23,18 @@ import { MetaPublisherAdapter } from "@socialflow/api/meta-publisher.js";
 export const LATE_TOLERANCE_MS = 15 * 60 * 1000; // 15 minutos
 export const SCHEDULE_LEASE_MS = 5 * 60 * 1000; // 5 minutos de lease
 
+export function sanitizeErrorMessage(message: string): string {
+  if (!message) return "Erro desconhecido";
+  let clean = message
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, "Bearer [REDACTED]")
+    .replace(/EAA[A-Za-z0-9]+/g, "[REDACTED_META_TOKEN]")
+    .replace(/[0-9a-f]{32,64}/gi, "[REDACTED_SECRET]");
+  if (clean.length > 250) {
+    clean = clean.slice(0, 247) + "...";
+  }
+  return clean;
+}
+
 export interface SchedulerWorkerDependencies {
   publisher?: MetaPublisherAdapter;
   onBeforePublish?: () => Promise<void>;
@@ -385,6 +397,7 @@ export async function processScheduleJob(
             status: "PROCESSING",
             executionToken,
             leaseExpiresAt,
+            attemptsMade: job.attemptsMade ?? 0,
           },
         });
 
@@ -480,7 +493,15 @@ export async function processScheduleJob(
       },
     );
   } catch (prepErr) {
-    // Falha permanente na preparação (ex: post rejeitado, conta excluída)
+    const isUncertain =
+      prepErr instanceof Error &&
+      (prepErr.message.includes("UNCERTAIN") ||
+        prepErr.message.toLowerCase().includes("incerto"));
+    const finalPrepStatus = isUncertain ? "REQUIRES_RECONCILIATION" : "FAILED";
+    const auditAction = isUncertain
+      ? "schedule.reconciliation_required"
+      : "schedule.failed";
+
     await asSchedulerActor(
       db,
       {
@@ -498,10 +519,12 @@ export async function processScheduleJob(
             status: "PROCESSING",
           },
           data: {
-            status: "FAILED",
-            failureReason:
+            status: finalPrepStatus,
+            failureReason: sanitizeErrorMessage(
               prepErr instanceof Error ? prepErr.message : String(prepErr),
+            ),
             leaseExpiresAt: null,
+            attemptsMade: (job.attemptsMade ?? 0) + 1,
           },
         });
         if (updated.count === 1) {
@@ -510,13 +533,17 @@ export async function processScheduleJob(
               organizationId: schedule.organizationId,
               actorUserId: "system:scheduler",
               entityId: schedule.id,
-              action: "schedule.failed",
+              action: auditAction,
             },
           });
         }
       },
     );
-    return { status: "failed_preparation" };
+    return {
+      status: isUncertain
+        ? "requires_reconciliation_uncertain"
+        : "failed_preparation",
+    };
   }
 
   if ("uncertainAccount" in prepResult && prepResult.uncertainAccount) {
@@ -591,12 +618,53 @@ export async function processScheduleJob(
       appUrl: config.APP_URL,
       redis,
       onBeforePublish: dependencies?.onBeforePublish,
+      isScheduler: true,
     });
   } catch (execErr) {
     const isTransient = isTransientError(execErr);
     const attemptsMade = job.attemptsMade ?? 0;
     const maxAttempts = job.opts?.attempts ?? 4;
+    const sanitizedError = sanitizeErrorMessage(
+      execErr instanceof Error ? execErr.message : String(execErr),
+    );
+
     if (isTransient && attemptsMade < maxAttempts - 1) {
+      await asSchedulerActor(
+        db,
+        {
+          organizationId: schedule.organizationId,
+          clientId: schedule.clientId,
+        },
+        async (tx) => {
+          const updated = await tx.publicationSchedule.updateMany({
+            where: {
+              id: schedule.id,
+              organizationId: schedule.organizationId,
+              clientId: schedule.clientId,
+              version,
+              executionToken,
+              status: "PROCESSING",
+            },
+            data: {
+              status: "ENQUEUED",
+              executionToken: null,
+              leaseExpiresAt: null,
+              attemptsMade: attemptsMade + 1,
+              failureReason: `Falha transitória na tentativa ${attemptsMade + 1} de ${maxAttempts}: ${sanitizedError}. Reenfileirado para nova tentativa.`,
+            },
+          });
+          if (updated.count === 1) {
+            await tx.auditLog.create({
+              data: {
+                organizationId: schedule.organizationId,
+                actorUserId: "system:scheduler",
+                entityId: schedule.id,
+                action: "schedule.retry_enqueued",
+              },
+            });
+          }
+        },
+      );
       throw execErr; // Permite retry BullMQ com backoff exponencial
     }
 
@@ -618,9 +686,9 @@ export async function processScheduleJob(
           },
           data: {
             status: "DEAD_LETTER",
-            failureReason:
-              execErr instanceof Error ? execErr.message : String(execErr),
+            failureReason: `Tentativas de execução esgotadas (${attemptsMade + 1} de ${maxAttempts}): ${sanitizedError}.`,
             leaseExpiresAt: null,
+            attemptsMade: attemptsMade + 1,
           },
         });
         if (updated.count === 1) {
@@ -656,33 +724,83 @@ export async function processScheduleJob(
     terminalStatus = "PUBLISHED";
     terminalReason = null;
     terminalAuditAction = "schedule.published";
-  } else if (execResult.hasSuccess) {
-    terminalStatus = "PARTIALLY_PUBLISHED";
-    terminalReason =
-      "Sucesso parcial: ao menos um destino foi publicado e outros falharam.";
-    terminalAuditAction = "schedule.partially_published";
   } else if (execResult.hasUncertain) {
     terminalStatus = "REQUIRES_RECONCILIATION";
     terminalReason =
-      "Resultado remoto incerto em uma ou mais contas. Requer revisão manual.";
+      "Resultado remoto incerto em uma ou mais contas. Requer revisão manual pelo administrador.";
     terminalAuditAction = "schedule.reconciliation_required";
   } else {
-    // Todas as tentativas falharam
-    const anyTransient = execResult.attempts.some(
-      (a: { errorMessage?: string | null; errorCode?: string | null }) =>
-        isTransientError(new Error(a.errorMessage || a.errorCode || "")),
+    // Nem todos tiveram sucesso e não há incertos.
+    // Avalia se há falhas transitórias elegíveis para retry
+    const failedAttempts = execResult.attempts.filter(
+      (a) => a.status === "FAILED",
+    );
+    const anyTransient = failedAttempts.some((a) =>
+      isTransientError(new Error(a.errorMessage || a.errorCode || "")),
     );
 
     const attemptsMade = job.attemptsMade ?? 0;
     const maxAttempts = job.opts?.attempts ?? 4;
+
     if (anyTransient && attemptsMade < maxAttempts - 1) {
-      throw new Error("Falha transitória na publicação agendada.");
+      let retryEnqueued = false;
+      await asSchedulerActor(
+        db,
+        {
+          organizationId: schedule.organizationId,
+          clientId: schedule.clientId,
+        },
+        async (tx) => {
+          const updated = await tx.publicationSchedule.updateMany({
+            where: {
+              id: schedule.id,
+              organizationId: schedule.organizationId,
+              clientId: schedule.clientId,
+              version,
+              executionToken,
+              status: "PROCESSING",
+            },
+            data: {
+              status: "ENQUEUED",
+              executionToken: null,
+              leaseExpiresAt: null,
+              attemptsMade: attemptsMade + 1,
+              failureReason: sanitizeErrorMessage(
+                `Falha transitória na tentativa ${attemptsMade + 1} de ${maxAttempts}. Destino pendente aguardando nova tentativa.`,
+              ),
+            },
+          });
+          if (updated.count === 1) {
+            retryEnqueued = true;
+            await tx.auditLog.create({
+              data: {
+                organizationId: schedule.organizationId,
+                actorUserId: "system:scheduler",
+                entityId: schedule.id,
+                action: "schedule.retry_enqueued",
+              },
+            });
+          }
+        },
+      );
+      if (retryEnqueued) {
+        throw new Error("Falha transitória na publicação agendada.");
+      }
     }
 
-    terminalStatus = "DEAD_LETTER";
-    terminalReason =
-      "Todas as tentativas de publicação falharam definitivamente.";
-    terminalAuditAction = "schedule.dead_letter";
+    if (execResult.hasSuccess) {
+      terminalStatus = "PARTIALLY_PUBLISHED";
+      terminalReason = sanitizeErrorMessage(
+        "Sucesso parcial: ao menos um destino foi publicado e outros falharam definitivamente.",
+      );
+      terminalAuditAction = "schedule.partially_published";
+    } else {
+      terminalStatus = "DEAD_LETTER";
+      terminalReason = sanitizeErrorMessage(
+        `Todas as tentativas de publicação falharam definitivamente (${attemptsMade + 1} de ${maxAttempts}).`,
+      );
+      terminalAuditAction = "schedule.dead_letter";
+    }
   }
 
   let finalUpdated = false;
@@ -706,6 +824,7 @@ export async function processScheduleJob(
           status: terminalStatus,
           failureReason: terminalReason,
           leaseExpiresAt: null,
+          attemptsMade: (job.attemptsMade ?? 0) + 1,
         },
       });
 
@@ -730,11 +849,11 @@ export async function processScheduleJob(
   return {
     status: execResult.allSuccess
       ? "published"
-      : execResult.hasSuccess
-        ? "partially_published"
-        : execResult.hasUncertain
-          ? "requires_reconciliation"
-          : "failed",
+      : execResult.hasUncertain
+        ? "requires_reconciliation_uncertain"
+        : execResult.hasSuccess
+          ? "partially_published"
+          : "dead_letter",
   };
 }
 

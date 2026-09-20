@@ -1,4 +1,12 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  vi,
+} from "vitest";
 import {
   createDatabase,
   createCredentialCrypto,
@@ -1816,6 +1824,430 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
       });
       expect(audit).not.toBeNull();
     });
+
+    it("primeira execução falha transitoriamente antes de qualquer sucesso; agendamento volta para estado retryable; segunda execução adquire e publica; exatamente uma publicação remota final", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:retry_transient_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let callCount = 0;
+      const transientPublisher = {
+        publishFacebook: vi.fn(async () => {
+          callCount++;
+          if (callCount === 1) {
+            throw new Error("Meta Graph 503 Service Unavailable");
+          }
+          return {
+            remoteMediaId: "fb_remote_post_retry_ok",
+            remotePermalink: "https://facebook.com/fb_remote_post_retry_ok",
+          };
+        }),
+        publishInstagram: vi.fn(),
+      } as unknown as MetaPublisherAdapter;
+
+      // 1ª execução com attemptsMade: 0, opts: { attempts: 4 }
+      await expect(
+        processScheduleJob(
+          {
+            id: sched.jobId,
+            attemptsMade: 0,
+            opts: { attempts: 4 },
+            data: {
+              scheduleId: sched.id,
+              postId: approvedPost.id,
+              organizationId: "org-a",
+              clientId: "client-a",
+              version: 1,
+            },
+          },
+          runtimeWorkerClient,
+          redis,
+          appConfig,
+          { publisher: transientPublisher },
+        ),
+      ).rejects.toThrow();
+
+      // Agendamento volta para estado retryable (ENQUEUED) com executionToken limpo
+      const afterFirst = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(afterFirst?.status).toBe("ENQUEUED");
+      expect(afterFirst?.executionToken).toBeNull();
+      expect(afterFirst?.leaseExpiresAt).toBeNull();
+      expect(afterFirst?.attemptsMade).toBe(1);
+
+      // 2ª execução com attemptsMade: 1 (retry legítimo com novo token)
+      const res2 = await processScheduleJob(
+        {
+          id: sched.jobId,
+          attemptsMade: 1,
+          opts: { attempts: 4 },
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: transientPublisher },
+      );
+      expect(res2.status).toBe("published");
+
+      // Agendamento finalizado como PUBLISHED
+      const afterSecond = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(afterSecond?.status).toBe("PUBLISHED");
+      expect(afterSecond?.leaseExpiresAt).toBeNull();
+
+      // Exatamente uma publicação remota final
+      const publishedAttempts = await migration.publicationAttempt.findMany({
+        where: {
+          postId: approvedPost.id,
+          socialAccountId: facebookAccount.id,
+          status: "PUBLISHED",
+        },
+      });
+      expect(publishedAttempts).toHaveLength(1);
+      expect(publishedAttempts[0]?.remoteMediaId).toBe(
+        "fb_remote_post_retry_ok",
+      );
+    });
+
+    it("falha transitória após sucesso em uma das contas; retry publica somente a conta restante", async () => {
+      const { facebookAccount, instagramAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id, instagramAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:partial_retry_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let fbCalls = 0;
+      let igCalls = 0;
+      const partialRetryPublisher = {
+        publishFacebook: vi.fn(async () => {
+          fbCalls++;
+          return {
+            remoteMediaId: "fb_partial_ok_1",
+            remotePermalink: "https://facebook.com/fb_partial_ok_1",
+          };
+        }),
+        publishInstagram: vi.fn(async () => {
+          igCalls++;
+          if (igCalls === 1) {
+            throw new Error("Meta Graph 503 Service Unavailable");
+          }
+          return {
+            remoteMediaId: "ig_partial_ok_2",
+            remotePermalink: "https://instagram.com/p/ig_partial_ok_2",
+          };
+        }),
+      } as unknown as MetaPublisherAdapter;
+
+      // Tentativa 1: FB sucede, IG falha transitoriamente
+      await expect(
+        processScheduleJob(
+          {
+            id: sched.jobId,
+            attemptsMade: 0,
+            opts: { attempts: 4 },
+            data: {
+              scheduleId: sched.id,
+              postId: approvedPost.id,
+              organizationId: "org-a",
+              clientId: "client-a",
+              version: 1,
+            },
+          },
+          runtimeWorkerClient,
+          redis,
+          appConfig,
+          { publisher: partialRetryPublisher },
+        ),
+      ).rejects.toThrow();
+
+      expect(fbCalls).toBe(1);
+      expect(igCalls).toBe(1);
+
+      // FB está PUBLISHED no DB
+      const fbAttempt1 = await migration.publicationAttempt.findFirst({
+        where: { postId: approvedPost.id, socialAccountId: facebookAccount.id },
+      });
+      expect(fbAttempt1?.status).toBe("PUBLISHED");
+
+      // Agendamento volta para ENQUEUED via CAS
+      const schedMid = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(schedMid?.status).toBe("ENQUEUED");
+      expect(schedMid?.attemptsMade).toBe(1);
+
+      // Tentativa 2: retry publica somente a conta restante (IG)
+      const res2 = await processScheduleJob(
+        {
+          id: sched.jobId,
+          attemptsMade: 1,
+          opts: { attempts: 4 },
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: partialRetryPublisher },
+      );
+      expect(res2.status).toBe("published");
+
+      // FB não foi chamado novamente (preservado)
+      expect(fbCalls).toBe(1);
+      // IG foi chamado pela segunda vez e sucedeu
+      expect(igCalls).toBe(2);
+
+      const schedFinal = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(schedFinal?.status).toBe("PUBLISHED");
+    });
+
+    it("UNCERTAIN bloqueia retry e transiciona para REQUIRES_RECONCILIATION", async () => {
+      const { instagramAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [instagramAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:uncertain_no_retry_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      const uncertainPublisher = {
+        publishFacebook: vi.fn(),
+        publishInstagram: vi.fn(async () => {
+          const err = new Error("Polling timeout waiting for Meta container");
+          (err as unknown as { name: string }).name =
+            "ContainerPollingTimeoutError";
+          throw err;
+        }),
+      } as unknown as MetaPublisherAdapter;
+
+      // Executa worker com attemptsMade: 0
+      const res = await processScheduleJob(
+        {
+          id: sched.jobId,
+          attemptsMade: 0,
+          opts: { attempts: 4 },
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: uncertainPublisher },
+      );
+
+      expect(res.status).toBe("requires_reconciliation_uncertain");
+
+      // Agendamento transicionado para REQUIRES_RECONCILIATION e não para ENQUEUED
+      const updated = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(updated?.status).toBe("REQUIRES_RECONCILIATION");
+      expect(updated?.leaseExpiresAt).toBeNull();
+    });
+
+    it("esgotamento de tentativas produz DEAD_LETTER via CAS", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:dead_letter_exhausted_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      const failingPublisher = {
+        publishFacebook: vi.fn(async () => {
+          throw new Error("Meta Graph 503 Service Unavailable");
+        }),
+        publishInstagram: vi.fn(),
+      } as unknown as MetaPublisherAdapter;
+
+      // Executa com attemptsMade: 3 e opts.attempts: 4 (última tentativa)
+      const res = await processScheduleJob(
+        {
+          id: sched.jobId,
+          attemptsMade: 3,
+          opts: { attempts: 4 },
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: failingPublisher },
+      );
+
+      expect(res.status).toBe("dead_letter");
+
+      const updated = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(updated?.status).toBe("DEAD_LETTER");
+      expect(updated?.leaseExpiresAt).toBeNull();
+      expect(updated?.failureReason).toMatch(
+        /definitivamente|Tentativas de execução esgotadas/,
+      );
+    });
+
+    it("retry concorrente não adquire lease ativa", async () => {
+      const { facebookAccount, approvedPost } = await setupAccountsAndPost();
+
+      // Cria agendamento já em PROCESSING com lease ativa no futuro
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "PROCESSING",
+          jobId: `sched:active_lease_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          executionToken: randomUUID(),
+          leaseExpiresAt: new Date(Date.now() + 5 * 60 * 1000),
+          version: 1,
+        },
+      });
+
+      const res = await processScheduleJob(
+        {
+          id: sched.jobId,
+          attemptsMade: 1,
+          opts: { attempts: 4 },
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: mockPublisher },
+      );
+
+      expect(res.status).toBe("skipped_not_acquired");
+    });
+
+    it("queda do worker antes da transição retryable é recuperada pela reconciliação", async () => {
+      const { facebookAccount, approvedPost } = await setupAccountsAndPost();
+
+      // Cria agendamento em PROCESSING com lease expirada (simulando crash abrupto do worker)
+      const expiredLease = new Date(Date.now() - 60 * 1000);
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(Date.now() - 3600 * 1000),
+          status: "PROCESSING",
+          jobId: `sched:crashed_worker_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          executionToken: randomUUID(),
+          leaseExpiresAt: expiredLease,
+          version: 1,
+        },
+      });
+
+      // Executa startup reconciliation
+      const reconResult = await runStartupReconciliation(
+        db as unknown as Parameters<typeof runStartupReconciliation>[0],
+        redis,
+      );
+      expect(reconResult.flaggedOrphan).toBeGreaterThanOrEqual(1);
+
+      const updated = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(updated?.status).toBe("REQUIRES_RECONCILIATION");
+      expect(updated?.failureReason).toContain("lease expirada");
+    });
   });
 
   // 8. Recuperação na Inicialização (Startup Reconciliation)
@@ -2143,6 +2575,168 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
       });
       expect(attempt?.status).toBe("PUBLISHED");
       expect(attempt?.remoteMediaId).toBeDefined();
+    });
+
+    it("scheduler consegue marcar sua conta como EXPIRED via mark_social_account_expired", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      const result = await asSchedulerActor(
+        db,
+        { organizationId: "org-a", clientId: "client-a" },
+        async (tx) => {
+          const rows = await tx.$queryRaw<
+            Array<{ mark_social_account_expired: boolean }>
+          >`
+            SELECT mark_social_account_expired(${facebookAccount.id})
+          `;
+          return rows[0]?.mark_social_account_expired;
+        },
+      );
+      expect(result).toBe(true);
+
+      const updatedAccount = await migration.socialAccount.findUnique({
+        where: { id: facebookAccount.id },
+      });
+      expect(updatedAccount?.status).toBe("EXPIRED");
+    });
+
+    it("scheduler não consegue alterar nome, username, avatar ou metadata diretamente", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      await asSchedulerActor(
+        db,
+        { organizationId: "org-a", clientId: "client-a" },
+        async (tx) => {
+          const updated = await tx.socialAccount.updateMany({
+            where: { id: facebookAccount.id },
+            data: { name: "Malicious Name Override" },
+          });
+          expect(updated.count).toBe(0); // RLS can_edit_client bloqueia update direto pelo scheduler
+        },
+      );
+
+      const unmodified = await migration.socialAccount.findUnique({
+        where: { id: facebookAccount.id },
+      });
+      expect(unmodified?.name).not.toBe("Malicious Name Override");
+    });
+
+    it("scheduler não consegue expirar conta cross-tenant", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      // Tenta expirar a conta de org-a/client-a a partir do contexto de org-b/client-b
+      const result = await asSchedulerActor(
+        db,
+        { organizationId: "org-b", clientId: "client-b" },
+        async (tx) => {
+          const rows = await tx.$queryRaw<
+            Array<{ mark_social_account_expired: boolean }>
+          >`
+            SELECT mark_social_account_expired(${facebookAccount.id})
+          `;
+          return rows[0]?.mark_social_account_expired;
+        },
+      );
+      expect(result).toBe(false);
+
+      const account = await migration.socialAccount.findUnique({
+        where: { id: facebookAccount.id },
+      });
+      expect(account?.status).toBe("ACTIVE");
+    });
+
+    it("APPROVER não consegue atualizar SocialAccount diretamente", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      await asActor(db, "approver-a", async (tx) => {
+        const updated = await tx.socialAccount.updateMany({
+          where: { id: facebookAccount.id },
+          data: { name: "Approver Name Attempt" },
+        });
+        expect(updated.count).toBe(0); // APPROVER não possui can_edit_client
+      });
+    });
+
+    it("usuários com can_edit_client (ADMIN/OWNER) continuam com permissão para atualizar SocialAccount", async () => {
+      const { facebookAccount } = await setupAccountsAndPost();
+
+      const updated = await asActor(db, "admin-a", async (tx) => {
+        return tx.socialAccount.update({
+          where: { id: facebookAccount.id },
+          data: { name: "Admin Renamed Account" },
+        });
+      });
+      expect(updated.name).toBe("Admin Renamed Account");
+    });
+
+    it("erro 190 no worker marca a conta como EXPIRED e registra auditoria", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const authErrorPublisher = {
+        publishFacebook: vi.fn(async () => {
+          const err = new Error(
+            "Error validating access token: Session has expired (code 190)",
+          );
+          (err as unknown as { name: string; code: number }).name =
+            "OAuthException";
+          (err as unknown as { name: string; code: number }).code = 190;
+          throw err;
+        }),
+        publishInstagram: vi.fn(),
+      } as unknown as MetaPublisherAdapter;
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:auth_err_190_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      const res = await processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        runtimeWorkerClient,
+        redis,
+        appConfig,
+        { publisher: authErrorPublisher },
+      );
+
+      expect(res.status).toBe("dead_letter");
+
+      // Conta social marcada como EXPIRED via mark_social_account_expired
+      const account = await migration.socialAccount.findUnique({
+        where: { id: facebookAccount.id },
+      });
+      expect(account?.status).toBe("EXPIRED");
+
+      // Log de auditoria social_account.expired registrado
+      const audit = await migration.auditLog.findFirst({
+        where: {
+          entityId: facebookAccount.id,
+          action: "social_account.expired",
+        },
+      });
+      expect(audit).not.toBeNull();
+      expect(audit?.actorUserId).toBe("system:scheduler");
     });
   });
 });

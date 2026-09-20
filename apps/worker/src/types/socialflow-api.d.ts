@@ -161,6 +161,7 @@ declare module "@socialflow/api/publication-service.js" {
     appUrl: string;
     redis: Redis;
     onBeforePublish?: () => Promise<void>;
+    isScheduler?: boolean;
   }
 
   export interface ExecutePublicationResult {

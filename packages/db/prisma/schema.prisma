@@ -385,6 +385,7 @@ model PublicationSchedule {
   createdBy          User                      @relation(fields: [createdById], references: [id])
   executionToken     String?
   leaseExpiresAt     DateTime?
+  attemptsMade       Int                       @default(0)
   cancellationReason String?
   failureReason      String?
   createdAt          DateTime                  @default(now())
