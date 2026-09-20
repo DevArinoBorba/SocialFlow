@@ -1419,3 +1419,192 @@ button.secondary:hover {
   border-top: 1px solid var(--line);
   padding-top: 16px;
 }
+
+/* Scheduler / Fase 4 Styles */
+.schedule-btn {
+  background: #0284c7;
+  color: white;
+  border: none;
+  border-radius: var(--radius);
+  padding: 10px 18px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.schedule-btn:hover {
+  background: #0369a1;
+}
+
+.post-schedules-container {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--line);
+}
+
+.post-schedules-container h4 {
+  margin: 0 0 10px;
+  font-size: 0.95rem;
+  color: var(--ink);
+}
+
+.schedule-card {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  margin-bottom: 10px;
+}
+
+.schedule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.schedule-times {
+  font-size: 0.88rem;
+  line-height: 1.4;
+  color: var(--ink);
+  margin-bottom: 8px;
+}
+
+.schedule-times p {
+  margin: 2px 0;
+}
+
+.time-summary-box {
+  background: #f0fdf4;
+  border: 1px solid #bbf7d0;
+  border-radius: var(--radius);
+  padding: 12px;
+  margin: 16px 0;
+  font-size: 0.9rem;
+}
+
+.time-summary-box p {
+  margin: 4px 0;
+}
+
+.schedule-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.small-btn {
+  padding: 6px 12px;
+  font-size: 0.82rem;
+}
+
+.badge-scheduled {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.badge-enqueued {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.badge-processing {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.badge-published {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge-partially_published {
+  background: #ffedd5;
+  color: #c2410c;
+}
+
+.badge-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge-cancelled {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.badge-dead_letter {
+  background: #fee2e2;
+  color: #991b1b;
+  border: 1px solid #f87171;
+}
+
+.badge-requires_reconciliation {
+  background: #fff1f2;
+  color: #be123c;
+  border: 1px solid #fda4af;
+}
+
+.schedule-alert {
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  margin-top: 8px;
+  font-size: 0.85rem;
+}
+
+.alert-requires_reconciliation,
+.alert-dead_letter,
+.alert-failed {
+  background: #fff1f2;
+  color: #9f1239;
+  border-left: 3px solid #e11d48;
+}
+
+.alert-partially_published {
+  background: #fffbeb;
+  color: #92400e;
+  border-left: 3px solid #f59e0b;
+}
+
+.schedule-attempts {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.schedule-attempts h5 {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.schedule-attempt-item {
+  padding: 6px 10px;
+  margin-bottom: 4px;
+  border-radius: 4px;
+  background: white;
+  border: 1px solid var(--line);
+  font-size: 0.82rem;
+}
+
+.badge-attempt {
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.75rem;
+}
+
+.badge-attempt.published {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.badge-attempt.failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.badge-attempt.uncertain {
+  background: #fef3c7;
+  color: #b45309;
+}

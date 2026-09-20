@@ -65,16 +65,11 @@ Separar workers de render, storage externo, tuning DB/Redis, horizontal
 scaling. Só executar após métricas reais demonstrarem necessidade.
 
 
-## Estado após auditoria local — 11/09/2026
+## Estado após auditoria local e homologação — 20/09/2026
 
-Fase 0: relatório, decisões propostas, matriz de APIs e modelo de ameaças
-entregues em `discovery/`. Gate com pendências documentadas; nenhuma
-dependência instalada nesta etapa. Fase 1 implementada localmente; resultados
-e pendências em [discovery/FOUNDATION-IMPLEMENTATION.md](discovery/FOUNDATION-IMPLEMENTATION.md).
-Sequência de PRs e critérios em [discovery/FOUNDATION-PRS.md](discovery/FOUNDATION-PRS.md).
+- **Fase 0 (Discovery técnico)**: Concluída.
+- **Fase 1 (Fundação)**: Concluída e testada.
+- **Fase 2 (Conteúdo e mídia)**: Concluída e testada.
+- **Fase 3 (Meta - Facebook e Instagram)**: Concluída em homologação (`socialflow-homolog`). Publicações em Facebook Page e Instagram Business validadas com IDs remotos gerados pela Meta Graph API, sem duplicações, com idempotência estrita, leases e trilha de auditoria completa. Produção permanece **não implantada**.
+- **Fase 4 (Scheduler com BullMQ)**: Em implementação no repositório local. Modelo persistente, filas BullMQ com jobs determinísticos, reconciliação na inicialização, suporte a timezone IANA (padrão `America/Cuiaba`), política de tolerância a atraso e cancelamento/reprogramação implementados e validados por suíte abrangente de testes automatizados com mocks locais.
 
-Fase 3: validar documentação/review Meta antes de implementar; teste de
-publicação controlada antecede o marco completo de agendamento da Fase 4.
-Fase 5: Direct Post público não está liberado no desenho de ferramenta
-interna; resolver elegibilidade antes do conector. Fase 7: licença Remotion
-a confirmar. A fundação continua planejada para Docker/Coolify centralizado.

@@ -129,9 +129,15 @@ importers:
 
   apps/worker:
     dependencies:
+      '@socialflow/api':
+        specifier: workspace:*
+        version: link:../api
       '@socialflow/config':
         specifier: workspace:*
         version: link:../../packages/config
+      '@socialflow/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
       '@socialflow/db':
         specifier: workspace:*
         version: link:../../packages/db

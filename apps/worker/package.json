@@ -9,7 +9,9 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
+    "@socialflow/api": "workspace:*",
     "@socialflow/config": "workspace:*",
+    "@socialflow/contracts": "workspace:*",
     "@socialflow/db": "workspace:*",
     "bullmq": "6.3.4",
     "ioredis": "6.0.0",

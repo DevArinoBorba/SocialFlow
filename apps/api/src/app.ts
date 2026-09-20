@@ -46,6 +46,7 @@ import {
   registerPublication,
   type PublicationDependencies,
 } from "./publication.js";
+import { registerScheduler } from "./scheduler.js";
 
 class HttpError extends Error {
   constructor(
@@ -206,6 +207,7 @@ export async function createApplication(
     config,
     options?.publicationDependencies,
   );
+  registerScheduler(server, scoped, redis);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {

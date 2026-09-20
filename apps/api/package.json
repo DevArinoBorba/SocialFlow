@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./publication-service.js": "./dist/publication-service.js",
+    "./meta-publisher.js": "./dist/meta-publisher.js",
+    "./media-ticket.js": "./dist/media-ticket.js",
+    "./scheduler-queue.js": "./dist/scheduler-queue.js"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

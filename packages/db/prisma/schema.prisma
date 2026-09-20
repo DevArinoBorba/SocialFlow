@@ -25,6 +25,7 @@ model User {
   accounts Account[]
   memberships Membership[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
+  publicationSchedules PublicationSchedule[]
 }
 model Session {
   id String @id
@@ -85,6 +86,7 @@ model Organization {
   socialAccounts SocialAccount[]
   publicationAttempts PublicationAttempt[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
+  publicationSchedules PublicationSchedule[]
 }
 model Client {
   id String @id @default(uuid())
@@ -102,6 +104,7 @@ model Client {
   socialAccounts SocialAccount[]
   publicationAttempts PublicationAttempt[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
+  publicationSchedules PublicationSchedule[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -156,6 +159,7 @@ model MediaAsset {
   archived Boolean @default(false)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+  publicationSchedules PublicationSchedule[]
   @@unique([organizationId, id])
   @@index([organizationId, clientId, createdAt, id])
 }
@@ -227,6 +231,7 @@ model Post {
   createdAt           DateTime             @default(now())
   updatedAt           DateTime             @updatedAt
   publicationAttempts PublicationAttempt[]
+  schedules           PublicationSchedule[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
@@ -315,6 +320,8 @@ model PublicationAttempt {
   attemptNumber       Int                      @default(1)
   executedAt          DateTime                 @default(now())
   leaseExpiresAt      DateTime?
+  scheduleId          String?
+  schedule            PublicationSchedule?     @relation(fields: [organizationId, clientId, scheduleId], references: [organizationId, clientId, id], onDelete: SetNull)
   createdAt           DateTime                 @default(now())
   updatedAt           DateTime                 @updatedAt
 
@@ -324,6 +331,7 @@ model PublicationAttempt {
   @@index([postId, socialAccountId])
   @@index([creationContainerId])
   @@index([status, leaseExpiresAt])
+  @@index([organizationId, clientId, scheduleId])
 }
 
 model OAuthDiscoveryConsumption {
@@ -342,5 +350,49 @@ model OAuthDiscoveryConsumption {
   @@unique([organizationId, discoveryId])
   @@unique([organizationId, clientId, discoveryId])
   @@index([organizationId, clientId, discoveryId])
+}
+
+enum PublicationScheduleStatus {
+  SCHEDULED
+  ENQUEUED
+  PROCESSING
+  PUBLISHED
+  PARTIALLY_PUBLISHED
+  FAILED
+  CANCELLED
+  DEAD_LETTER
+  REQUIRES_RECONCILIATION
+}
+
+model PublicationSchedule {
+  id                 String                    @id @default(uuid())
+  organizationId     String
+  organization       Organization              @relation(fields: [organizationId], references: [id])
+  clientId           String
+  client             Client                    @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  postId             String
+  post               Post                      @relation(fields: [organizationId, clientId, postId], references: [organizationId, clientId, id], onDelete: Cascade)
+  targetAccountIds   String[]
+  mediaAssetId       String?
+  mediaAsset         MediaAsset?               @relation(fields: [organizationId, mediaAssetId], references: [organizationId, id], onDelete: SetNull)
+  scheduledTimezone  String
+  scheduledLocalTime String
+  scheduledForUtc    DateTime
+  status             PublicationScheduleStatus @default(SCHEDULED)
+  version            Int                       @default(1)
+  jobId              String
+  createdById        String
+  createdBy          User                      @relation(fields: [createdById], references: [id])
+  cancellationReason String?
+  failureReason      String?
+  createdAt          DateTime                  @default(now())
+  updatedAt          DateTime                  @updatedAt
+  publicationAttempts PublicationAttempt[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@index([organizationId, clientId, status, scheduledForUtc])
+  @@index([postId, status])
+  @@index([jobId])
 }
 

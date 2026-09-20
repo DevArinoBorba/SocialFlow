@@ -8,7 +8,71 @@ import type {
   PostStatus,
   SocialAccountDto,
   PublishPostResponse,
+  PublicationScheduleDto,
 } from "@socialflow/contracts";
+import {
+  DEFAULT_TIMEZONE,
+  parseLocalDateTimeToUtc,
+} from "@socialflow/contracts";
+
+const COMMON_TIMEZONES = [
+  { value: "America/Cuiaba", label: "America/Cuiaba (Cuiabá / MT - UTC-4)" },
+  {
+    value: "America/Sao_Paulo",
+    label: "America/Sao_Paulo (Brasília / SP - UTC-3)",
+  },
+  { value: "America/Manaus", label: "America/Manaus (Manaus / AM - UTC-4)" },
+  { value: "America/Belem", label: "America/Belem (Belém / PA - UTC-3)" },
+  {
+    value: "America/Fortaleza",
+    label: "America/Fortaleza (Fortaleza / CE - UTC-3)",
+  },
+  { value: "America/Recife", label: "America/Recife (Recife / PE - UTC-3)" },
+  {
+    value: "America/Porto_Velho",
+    label: "America/Porto_Velho (Porto Velho / RO - UTC-4)",
+  },
+  {
+    value: "America/Boa_Vista",
+    label: "America/Boa_Vista (Boa Vista / RR - UTC-4)",
+  },
+  {
+    value: "America/Rio_Branco",
+    label: "America/Rio_Branco (Rio Branco / AC - UTC-5)",
+  },
+  { value: "UTC", label: "UTC (Tempo Universal Coordenado - UTC+0)" },
+  {
+    value: "America/New_York",
+    label: "America/New_York (Nova York - EST/EDT)",
+  },
+  { value: "Europe/London", label: "Europe/London (Londres - GMT/BST)" },
+  { value: "Europe/Lisbon", label: "Europe/Lisbon (Lisboa - WET/WEST)" },
+];
+
+function getScheduleStatusLabel(status: string) {
+  switch (status) {
+    case "SCHEDULED":
+      return "Agendado";
+    case "ENQUEUED":
+      return "Na fila";
+    case "PROCESSING":
+      return "Em processamento";
+    case "PUBLISHED":
+      return "Publicado";
+    case "PARTIALLY_PUBLISHED":
+      return "Publicado parcialmente";
+    case "FAILED":
+      return "Falhou";
+    case "CANCELLED":
+      return "Cancelado";
+    case "DEAD_LETTER":
+      return "Falha irrecuperável";
+    case "REQUIRES_RECONCILIATION":
+      return "Requer reconciliação";
+    default:
+      return status;
+  }
+}
 
 type Props = {
   org: string;
@@ -96,6 +160,33 @@ export function ContentManager({
   const [publishModalError, setPublishModalError] = useState("");
   const [hasConfirmedWarning, setHasConfirmedWarning] = useState(false);
 
+  // Estado de Agendamentos (Fase 4)
+  const [postSchedules, setPostSchedules] = useState<
+    Record<string, PublicationScheduleDto[]>
+  >({});
+  const [schedulingPost, setSchedulingPost] = useState<Post | null>(null);
+  const [scheduleLocalTime, setScheduleLocalTime] = useState("");
+  const [scheduleTimezone, setScheduleTimezone] = useState(DEFAULT_TIMEZONE);
+  const [scheduleConfirmed, setScheduleConfirmed] = useState(false);
+  const [scheduleModalError, setScheduleModalError] = useState("");
+  const [scheduleBusy, setScheduleBusy] = useState(false);
+
+  // Estado de Reprogramação
+  const [reschedulingSchedule, setReschedulingSchedule] =
+    useState<PublicationScheduleDto | null>(null);
+  const [rescheduleLocalTime, setRescheduleLocalTime] = useState("");
+  const [rescheduleTimezone, setRescheduleTimezone] =
+    useState(DEFAULT_TIMEZONE);
+  const [rescheduleConfirmed, setRescheduleConfirmed] = useState(false);
+  const [rescheduleModalError, setRescheduleModalError] = useState("");
+  const [rescheduleBusy, setRescheduleBusy] = useState(false);
+
+  // Estado de Cancelamento
+  const [cancellingSchedule, setCancellingSchedule] =
+    useState<PublicationScheduleDto | null>(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelBusy, setCancelBusy] = useState(false);
+
   const refresh = useCallback(() => setRevision((v) => v + 1), []);
 
   // Carregar posts
@@ -140,6 +231,236 @@ export function ContentManager({
       live = false;
     };
   }, [batchBase, showBatches, revision]);
+
+  // Carregar agendamentos para posts aprovados
+  useEffect(() => {
+    let live = true;
+    const approvedPosts = posts.filter((p) => p.status === "APPROVED");
+    if (approvedPosts.length === 0) {
+      setPostSchedules({});
+      return;
+    }
+
+    Promise.all(
+      approvedPosts.map((p) =>
+        request<{ schedules: PublicationScheduleDto[] }>(
+          `${postBase}/${p.id}/schedules`,
+        )
+          .then((res) => ({ postId: p.id, schedules: res.schedules }))
+          .catch(() => ({ postId: p.id, schedules: [] })),
+      ),
+    ).then((results) => {
+      if (!live) return;
+      const map: Record<string, PublicationScheduleDto[]> = {};
+      for (const item of results) {
+        map[item.postId] = item.schedules;
+      }
+      setPostSchedules(map);
+    });
+
+    return () => {
+      live = false;
+    };
+  }, [posts, postBase, revision]);
+
+  const handleOpenScheduleModal = async (post: Post) => {
+    if (!canApprove || post.status !== "APPROVED") return;
+    setSchedulingPost(post);
+    setScheduleModalError("");
+    setScheduleConfirmed(false);
+    setScheduleBusy(true);
+
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const defaultLocalTime = `${tomorrow.getFullYear()}-${pad(
+      tomorrow.getMonth() + 1,
+    )}-${pad(tomorrow.getDate())}T${pad(tomorrow.getHours())}:${pad(
+      tomorrow.getMinutes(),
+    )}`;
+    setScheduleLocalTime(defaultLocalTime);
+    setScheduleTimezone(DEFAULT_TIMEZONE);
+
+    try {
+      const [accounts, mediaResponse] = await Promise.all([
+        request<SocialAccountDto[]>(
+          `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/social-accounts`,
+        ),
+        request<{
+          items: Array<{
+            id: string;
+            name: string;
+            mimeType: string | null;
+            width: number | null;
+            height: number | null;
+          }>;
+        }>(
+          `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/media`,
+        ),
+      ]);
+
+      const active = accounts.filter((a) => a.status === "ACTIVE");
+      setActiveAccounts(active);
+      setSelectedAccountIds(active.map((a) => a.id));
+      const assets = Array.isArray(mediaResponse?.items)
+        ? mediaResponse.items
+        : [];
+      setMediaAssets(assets);
+      if (assets.length > 0 && assets[0]) {
+        setSelectedMediaId(assets[0].id);
+      } else {
+        setSelectedMediaId("");
+      }
+    } catch (err) {
+      setScheduleModalError((err as Error).message);
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
+
+  const handleConfirmSchedule = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!schedulingPost) return;
+
+    if (selectedAccountIds.length === 0) {
+      setScheduleModalError("Selecione ao menos uma conta social.");
+      return;
+    }
+
+    const hasInstagram = activeAccounts.some(
+      (a) =>
+        selectedAccountIds.includes(a.id) &&
+        a.platform === "INSTAGRAM_BUSINESS",
+    );
+    if (hasInstagram && !selectedMediaId) {
+      setScheduleModalError(
+        "Publicações no Instagram exigem a seleção de uma imagem.",
+      );
+      return;
+    }
+
+    if (!scheduleConfirmed) {
+      setScheduleModalError(
+        "Você deve marcar a caixa confirmando o agendamento.",
+      );
+      return;
+    }
+
+    setScheduleBusy(true);
+    setScheduleModalError("");
+
+    try {
+      await request(`${postBase}/${schedulingPost.id}/schedules`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          targetAccountIds: selectedAccountIds,
+          mediaAssetId: selectedMediaId || null,
+          scheduledTimezone: scheduleTimezone,
+          scheduledLocalTime: scheduleLocalTime,
+          confirmed: true,
+        }),
+      });
+
+      setNotice("Publicação agendada com sucesso!");
+      setSchedulingPost(null);
+      refresh();
+    } catch (err) {
+      setScheduleModalError(
+        (err as Error).message || "Falha ao agendar publicação.",
+      );
+    } finally {
+      setScheduleBusy(false);
+    }
+  };
+
+  const handleOpenRescheduleModal = (schedule: PublicationScheduleDto) => {
+    setReschedulingSchedule(schedule);
+    setRescheduleLocalTime(schedule.scheduledLocalTime);
+    setRescheduleTimezone(schedule.scheduledTimezone);
+    setRescheduleConfirmed(false);
+    setRescheduleModalError("");
+  };
+
+  const handleConfirmReschedule = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!reschedulingSchedule) return;
+
+    if (!rescheduleConfirmed) {
+      setRescheduleModalError(
+        "Você deve marcar a caixa confirmando a reprogramação.",
+      );
+      return;
+    }
+
+    setRescheduleBusy(true);
+    setRescheduleModalError("");
+
+    try {
+      await request(
+        `${postBase}/${reschedulingSchedule.postId}/schedules/${reschedulingSchedule.id}/reschedule`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            scheduledTimezone: rescheduleTimezone,
+            scheduledLocalTime: rescheduleLocalTime,
+            confirmed: true,
+          }),
+        },
+      );
+
+      setNotice("Publicação reprogramada com sucesso!");
+      setReschedulingSchedule(null);
+      refresh();
+    } catch (err) {
+      setRescheduleModalError(
+        (err as Error).message || "Falha ao reprogramar publicação.",
+      );
+    } finally {
+      setRescheduleBusy(false);
+    }
+  };
+
+  const handleOpenCancelDialog = (schedule: PublicationScheduleDto) => {
+    setCancellingSchedule(schedule);
+    setCancelReason("");
+  };
+
+  const handleConfirmCancel = async () => {
+    if (!cancellingSchedule) return;
+    setCancelBusy(true);
+
+    try {
+      await request(
+        `${postBase}/${cancellingSchedule.postId}/schedules/${cancellingSchedule.id}/cancel`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            reason: cancelReason || "Cancelado pelo usuário",
+          }),
+        },
+      );
+
+      setNotice("Agendamento cancelado com sucesso.");
+      setCancellingSchedule(null);
+      refresh();
+    } catch (err) {
+      setError((err as Error).message || "Falha ao cancelar agendamento.");
+    } finally {
+      setCancelBusy(false);
+    }
+  };
+
+  function getPreviewUtc(localTime: string, tz: string): string | null {
+    if (!localTime || !tz) return null;
+    try {
+      const utc = parseLocalDateTimeToUtc(localTime, tz);
+      return utc.toISOString();
+    } catch {
+      return null;
+    }
+  }
 
   const handleOpenPublishModal = async (post: Post) => {
     if (!canApprove || post.status !== "APPROVED") return;
@@ -931,18 +1252,125 @@ export function ContentManager({
                     </>
                   )}
 
-                  {/* Aprovado -> Publicar Agora */}
+                  {/* Aprovado -> Publicar Agora ou Agendar */}
                   {post.status === "APPROVED" && canApprove && (
-                    <button
-                      type="button"
-                      className="publish-btn"
-                      disabled={busy}
-                      onClick={() => handleOpenPublishModal(post)}
-                    >
-                      Publicar agora…
-                    </button>
+                    <>
+                      <button
+                        type="button"
+                        className="publish-btn"
+                        disabled={busy}
+                        onClick={() => handleOpenPublishModal(post)}
+                      >
+                        Publicar agora…
+                      </button>
+                      <button
+                        type="button"
+                        className="schedule-btn"
+                        disabled={busy}
+                        onClick={() => handleOpenScheduleModal(post)}
+                      >
+                        Agendar publicação…
+                      </button>
+                    </>
                   )}
                 </div>
+
+                {/* Seção de Agendamentos do Post */}
+                {postSchedules[post.id]?.length ? (
+                  <div className="post-schedules-container">
+                    <h4>Agendamentos de Publicação</h4>
+                    {postSchedules[post.id]?.map((sched) => (
+                      <div
+                        key={sched.id}
+                        className={`schedule-card schedule-status-${sched.status.toLowerCase()}`}
+                      >
+                        <div className="schedule-header">
+                          <span
+                            className={`badge badge-${sched.status.toLowerCase()}`}
+                          >
+                            {getScheduleStatusLabel(sched.status)}
+                          </span>
+                          <span className="small muted">
+                            Versão #{sched.version}
+                          </span>
+                        </div>
+                        <div className="schedule-times">
+                          <p>
+                            <strong>Horário local:</strong>{" "}
+                            {sched.scheduledLocalTime} (
+                            {sched.scheduledTimezone})
+                          </p>
+                          <p>
+                            <strong>Horário UTC:</strong>{" "}
+                            {new Date(sched.scheduledForUtc).toISOString()}
+                          </p>
+                        </div>
+                        {sched.failureReason && (
+                          <div
+                            className={`schedule-alert alert-${sched.status.toLowerCase()}`}
+                          >
+                            <strong>Aviso:</strong> {sched.failureReason}
+                          </div>
+                        )}
+                        {/* Ações para estados ativos */}
+                        {["SCHEDULED", "ENQUEUED"].includes(sched.status) &&
+                          canApprove && (
+                            <div className="schedule-actions">
+                              <button
+                                type="button"
+                                className="secondary small-btn"
+                                onClick={() => handleOpenRescheduleModal(sched)}
+                              >
+                                Reprogramar…
+                              </button>
+                              <button
+                                type="button"
+                                className="danger-btn small-btn"
+                                onClick={() => handleOpenCancelDialog(sched)}
+                              >
+                                Cancelar agendamento
+                              </button>
+                            </div>
+                          )}
+                        {/* Histórico por plataforma */}
+                        {sched.attempts && sched.attempts.length > 0 && (
+                          <div className="schedule-attempts">
+                            <h5>Histórico por plataforma:</h5>
+                            {sched.attempts.map((att) => (
+                              <div
+                                key={att.id}
+                                className="schedule-attempt-item"
+                              >
+                                <div>
+                                  <strong>{att.platform}</strong>:{" "}
+                                  <span
+                                    className={`badge-attempt ${att.status.toLowerCase()}`}
+                                  >
+                                    {att.status}
+                                  </span>
+                                </div>
+                                {att.remotePermalink && (
+                                  <a
+                                    href={att.remotePermalink}
+                                    target="_blank"
+                                    rel="noreferrer noopener"
+                                  >
+                                    Ver publicação na Meta ↗
+                                  </a>
+                                )}
+                                {att.errorMessage && (
+                                  <p className="small error-text">
+                                    {att.errorMessage}
+                                  </p>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
 
                 {/* Diálogo inline para informar justificativa de rejeição */}
                 {isRejecting && (
@@ -1299,6 +1727,345 @@ export function ContentManager({
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+      {/* Modal de Agendamento */}
+      {schedulingPost && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="schedule-modal-title"
+        >
+          <div className="publish-modal">
+            <h3 id="schedule-modal-title">Agendar Publicação</h3>
+            <p className="muted">
+              Agendando post:{" "}
+              <strong>{schedulingPost.title || "Sem título"}</strong>
+            </p>
+
+            {scheduleModalError && (
+              <p role="alert" className="error">
+                {scheduleModalError}
+              </p>
+            )}
+
+            <form onSubmit={handleConfirmSchedule}>
+              <div className="publish-accounts-group">
+                <label>Selecione as contas de destino:</label>
+                {activeAccounts.length === 0 ? (
+                  <p className="muted">
+                    Nenhuma conta ativa conectada. Conecte uma conta antes de
+                    agendar.
+                  </p>
+                ) : (
+                  activeAccounts.map((acc) => (
+                    <label
+                      key={acc.id}
+                      className="account-check-card"
+                      htmlFor={`sched-acc-${acc.id}`}
+                    >
+                      <input
+                        id={`sched-acc-${acc.id}`}
+                        type="checkbox"
+                        checked={selectedAccountIds.includes(acc.id)}
+                        disabled={scheduleBusy}
+                        onChange={() => handleToggleAccount(acc.id)}
+                      />
+                      <div>
+                        <strong>{acc.name}</strong>{" "}
+                        {acc.username && (
+                          <span className="muted">(@{acc.username})</span>
+                        )}
+                      </div>
+                      <span
+                        className={`account-badge ${
+                          acc.platform === "FACEBOOK_PAGE"
+                            ? "facebook"
+                            : "instagram"
+                        }`}
+                      >
+                        {acc.platform === "FACEBOOK_PAGE"
+                          ? "Facebook"
+                          : "Instagram"}
+                      </span>
+                    </label>
+                  ))
+                )}
+              </div>
+
+              {/* Seleção de Mídia */}
+              <div className="publish-media-picker">
+                <label htmlFor="schedule-media-select">
+                  Imagem da publicação:{" "}
+                  {activeAccounts.some(
+                    (a) =>
+                      selectedAccountIds.includes(a.id) &&
+                      a.platform === "INSTAGRAM_BUSINESS",
+                  ) && (
+                    <span className="error-text">
+                      (Obrigatório para Instagram)
+                    </span>
+                  )}
+                </label>
+                <select
+                  id="schedule-media-select"
+                  value={selectedMediaId}
+                  disabled={scheduleBusy}
+                  onChange={(e) => setSelectedMediaId(e.target.value)}
+                >
+                  <option value="">Nenhuma imagem selecionada</option>
+                  {mediaAssets.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* Data, Hora e Fuso Horário */}
+              <div className="fields">
+                <div>
+                  <label htmlFor="schedule-local-time">
+                    Data e Horário Local *
+                  </label>
+                  <input
+                    id="schedule-local-time"
+                    type="datetime-local"
+                    required
+                    value={scheduleLocalTime}
+                    disabled={scheduleBusy}
+                    onChange={(e) => setScheduleLocalTime(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="schedule-timezone">
+                    Fuso Horário (IANA) *
+                  </label>
+                  <select
+                    id="schedule-timezone"
+                    required
+                    value={scheduleTimezone}
+                    disabled={scheduleBusy}
+                    onChange={(e) => setScheduleTimezone(e.target.value)}
+                  >
+                    {COMMON_TIMEZONES.map((tz) => (
+                      <option key={tz.value} value={tz.value}>
+                        {tz.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Resumo dinâmico Local vs UTC */}
+              <div className="time-summary-box">
+                <p>
+                  <strong>Horário Local:</strong>{" "}
+                  {scheduleLocalTime || "Informe a data"} ({scheduleTimezone})
+                </p>
+                <p>
+                  <strong>Horário UTC calculado:</strong>{" "}
+                  {getPreviewUtc(scheduleLocalTime, scheduleTimezone) ||
+                    "Preencha a data e fuso válidos"}
+                </p>
+              </div>
+
+              {/* Confirmação obrigatória */}
+              <div style={{ margin: "16px 0" }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 8 }}
+                >
+                  <input
+                    id="schedule-confirm-check"
+                    type="checkbox"
+                    checked={scheduleConfirmed}
+                    disabled={scheduleBusy}
+                    onChange={(e) => setScheduleConfirmed(e.target.checked)}
+                  />
+                  <span>
+                    Confirmo o agendamento desta publicação para a data e
+                    horário informados.
+                  </span>
+                </label>
+              </div>
+
+              <div className="publish-modal-actions">
+                <button
+                  type="button"
+                  className="quiet"
+                  disabled={scheduleBusy}
+                  onClick={() => setSchedulingPost(null)}
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  className="schedule-btn"
+                  disabled={scheduleBusy || !scheduleConfirmed}
+                >
+                  {scheduleBusy ? "Agendando…" : "Confirmar e agendar"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Reprogramação */}
+      {reschedulingSchedule && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="reschedule-modal-title"
+        >
+          <div className="publish-modal">
+            <h3 id="reschedule-modal-title">Reprogramar Publicação</h3>
+
+            {rescheduleModalError && (
+              <p role="alert" className="error">
+                {rescheduleModalError}
+              </p>
+            )}
+
+            <form onSubmit={handleConfirmReschedule}>
+              <div className="fields">
+                <div>
+                  <label htmlFor="reschedule-local-time">
+                    Nova Data e Horário Local *
+                  </label>
+                  <input
+                    id="reschedule-local-time"
+                    type="datetime-local"
+                    required
+                    value={rescheduleLocalTime}
+                    disabled={rescheduleBusy}
+                    onChange={(e) => setRescheduleLocalTime(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label htmlFor="reschedule-timezone">
+                    Fuso Horário (IANA) *
+                  </label>
+                  <select
+                    id="reschedule-timezone"
+                    required
+                    value={rescheduleTimezone}
+                    disabled={rescheduleBusy}
+                    onChange={(e) => setRescheduleTimezone(e.target.value)}
+                  >
+                    {COMMON_TIMEZONES.map((tz) => (
+                      <option key={tz.value} value={tz.value}>
+                        {tz.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div className="time-summary-box">
+                <p>
+                  <strong>Novo Horário Local:</strong> {rescheduleLocalTime} (
+                  {rescheduleTimezone})
+                </p>
+                <p>
+                  <strong>Novo Horário UTC:</strong>{" "}
+                  {getPreviewUtc(rescheduleLocalTime, rescheduleTimezone) ||
+                    "Preencha a data e fuso válidos"}
+                </p>
+              </div>
+
+              <div style={{ margin: "16px 0" }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 8 }}
+                >
+                  <input
+                    id="reschedule-confirm-check"
+                    type="checkbox"
+                    checked={rescheduleConfirmed}
+                    disabled={rescheduleBusy}
+                    onChange={(e) => setRescheduleConfirmed(e.target.checked)}
+                  />
+                  <span>
+                    Confirmo a reprogramação da data e horário desta publicação.
+                  </span>
+                </label>
+              </div>
+
+              <div className="publish-modal-actions">
+                <button
+                  type="button"
+                  className="quiet"
+                  disabled={rescheduleBusy}
+                  onClick={() => setReschedulingSchedule(null)}
+                >
+                  Fechar
+                </button>
+                <button
+                  type="submit"
+                  className="schedule-btn"
+                  disabled={rescheduleBusy || !rescheduleConfirmed}
+                >
+                  {rescheduleBusy
+                    ? "Reprogramando…"
+                    : "Confirmar reprogramação"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Diálogo de Cancelamento */}
+      {cancellingSchedule && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="cancel-modal-title"
+        >
+          <div className="publish-modal">
+            <h3 id="cancel-modal-title">Cancelar Agendamento</h3>
+            <p>
+              Tem certeza que deseja cancelar o agendamento desta publicação? O
+              job na fila será removido imediatamente.
+            </p>
+
+            <div style={{ margin: "14px 0" }}>
+              <label htmlFor="cancel-reason-input">
+                Motivo do cancelamento (opcional):
+              </label>
+              <input
+                id="cancel-reason-input"
+                type="text"
+                maxLength={500}
+                placeholder="Ex: Mudança na estratégia de marketing"
+                value={cancelReason}
+                disabled={cancelBusy}
+                onChange={(e) => setCancelReason(e.target.value)}
+              />
+            </div>
+
+            <div className="publish-modal-actions">
+              <button
+                type="button"
+                className="quiet"
+                disabled={cancelBusy}
+                onClick={() => setCancellingSchedule(null)}
+              >
+                Voltar
+              </button>
+              <button
+                type="button"
+                className="danger-btn"
+                disabled={cancelBusy}
+                onClick={handleConfirmCancel}
+              >
+                {cancelBusy ? "Cancelando…" : "Confirmar cancelamento"}
+              </button>
+            </div>
           </div>
         </div>
       )}

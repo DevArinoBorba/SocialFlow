@@ -49,6 +49,31 @@ worker.on("error", () =>
 worker.on("failed", (job) =>
   console.error(JSON.stringify({ event: "diagnostic_failed", jobId: job?.id })),
 );
+import {
+  createSchedulerWorker,
+  runStartupReconciliation,
+} from "./scheduler-worker.js";
+
+// Executa reconciliação de inicialização: recupera agendamentos sem job e detecta atrasos
+try {
+  const reconResult = await runStartupReconciliation(db, redis);
+  console.info(
+    JSON.stringify({
+      event: "scheduler_startup_reconciliation_completed",
+      ...reconResult,
+    }),
+  );
+} catch (reconErr) {
+  console.error(
+    JSON.stringify({
+      event: "scheduler_startup_reconciliation_failed",
+      error: reconErr instanceof Error ? reconErr.message : String(reconErr),
+    }),
+  );
+}
+
+const schedulerWorker = createSchedulerWorker(db, redis, config);
+
 let stopping = false;
 const server = createServer(async (req, res) => {
   if (req.url !== "/health/ready" && req.url !== "/health/live") {
@@ -63,6 +88,7 @@ const server = createServer(async (req, res) => {
           db.$queryRaw`SELECT 1`,
           redis.ping(),
           worker.waitUntilReady(),
+          schedulerWorker.waitUntilReady(),
         ]),
       );
     res
@@ -79,10 +105,12 @@ for (const signal of ["SIGINT", "SIGTERM"])
     const deadline = setTimeout(() => process.exit(1), 25000);
     deadline.unref();
     server.close();
-    void worker.close().then(async () => {
-      redis.disconnect();
-      await db.$disconnect();
-      clearTimeout(deadline);
-      process.exit(0);
-    });
+    void Promise.all([worker.close(), schedulerWorker.close()]).then(
+      async () => {
+        redis.disconnect();
+        await db.$disconnect();
+        clearTimeout(deadline);
+        process.exit(0);
+      },
+    );
   });

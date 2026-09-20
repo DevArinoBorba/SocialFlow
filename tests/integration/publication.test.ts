@@ -23,9 +23,7 @@ import {
   startMetaMockServer,
   type MetaMockServer,
 } from "../helpers/meta-mock.js";
-// @ts-expect-error dist output does not emit d.ts
 import { MetaPublisherAdapter } from "../../apps/api/dist/meta-publisher.js";
-// @ts-expect-error dist output does not emit d.ts
 import { createPublicMediaTicket } from "../../apps/api/dist/media-ticket.js";
 
 const db = createDatabase(process.env.DATABASE_URL!);
