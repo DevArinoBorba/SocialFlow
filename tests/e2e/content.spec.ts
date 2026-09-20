@@ -381,6 +381,9 @@ test("publish button visibility strictly requires APPROVED status and canApprove
     await expect(
       rejectedCard.getByRole("button", { name: "Publicar agora…" }),
     ).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Sair" }).click();
+    await expect(page.getByLabel("E-mail")).toBeVisible();
   }
 
   // 2. ADMIN: vê o botão no post APPROVED, mas NUNCA em DRAFT, IN_REVIEW ou REJECTED
@@ -413,6 +416,9 @@ test("publish button visibility strictly requires APPROVED status and canApprove
     await expect(
       rejectedCard.getByRole("button", { name: "Publicar agora…" }),
     ).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Sair" }).click();
+    await expect(page.getByLabel("E-mail")).toBeVisible();
   }
 
   // 3. APPROVER: vê o botão no post APPROVED, mas NUNCA em DRAFT, IN_REVIEW ou REJECTED
@@ -445,6 +451,9 @@ test("publish button visibility strictly requires APPROVED status and canApprove
     await expect(
       rejectedCard.getByRole("button", { name: "Publicar agora…" }),
     ).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Sair" }).click();
+    await expect(page.getByLabel("E-mail")).toBeVisible();
   }
 
   // 4. EDITOR: NÃO vê o botão em post APPROVED (mesmo com canWrite=true), nem em nenhum outro
@@ -494,6 +503,9 @@ test("publish button visibility strictly requires APPROVED status and canApprove
       },
     );
     expect(directRes.status()).toBe(403);
+
+    await page.getByRole("button", { name: "Sair" }).click();
+    await expect(page.getByLabel("E-mail")).toBeVisible();
   }
 
   // 5. CLIENT_VIEWER: NÃO vê o botão em post APPROVED nem em nenhum outro
@@ -526,5 +538,8 @@ test("publish button visibility strictly requires APPROVED status and canApprove
     await expect(
       rejectedCard.getByRole("button", { name: "Publicar agora…" }),
     ).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Sair" }).click();
+    await expect(page.getByLabel("E-mail")).toBeVisible();
   }
 });
