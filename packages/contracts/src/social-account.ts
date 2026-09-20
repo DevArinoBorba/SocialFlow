@@ -115,6 +115,7 @@ export const publicationAttemptDto = z.strictObject({
   errorMessage: z.string().nullable().optional(),
   attemptNumber: z.number().int().min(1),
   executedAt: z.union([z.string(), z.date()]),
+  leaseExpiresAt: z.union([z.string(), z.date()]).nullable().optional(),
   createdAt: z.union([z.string(), z.date()]),
   updatedAt: z.union([z.string(), z.date()]),
 });
@@ -143,3 +144,21 @@ export const publishPostResponse = z.strictObject({
   attempts: z.array(publicationAttemptDto),
 });
 export type PublishPostResponse = z.infer<typeof publishPostResponse>;
+
+export const resolvePublicationAttemptInput = z.strictObject({
+  decision: z.enum(["CONFIRM_PUBLISHED", "CONFIRM_FAILED", "DISMISS"]),
+  remoteMediaId: z.string().max(255).optional().nullable(),
+  remotePermalink: z.string().url().max(1000).optional().nullable(),
+  notes: z.string().max(1000).optional(),
+});
+export type ResolvePublicationAttemptInput = z.infer<
+  typeof resolvePublicationAttemptInput
+>;
+
+export const resolvePublicationAttemptResponse = z.strictObject({
+  success: z.boolean(),
+  attempt: publicationAttemptDto,
+});
+export type ResolvePublicationAttemptResponse = z.infer<
+  typeof resolvePublicationAttemptResponse
+>;

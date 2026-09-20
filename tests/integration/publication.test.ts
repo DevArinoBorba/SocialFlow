@@ -1020,4 +1020,529 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
     const errExpired = await resExpired.json();
     expect(errExpired.message).toBe("Mídia indisponível ou expirada.");
   });
+
+  it("falha na preparação ou ticket após reserva finaliza tentativa atomicamente como FAILED com PREPARATION_FAILED, grava audit e libera idempotência", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_prep_fail_" + randomUUID().slice(0, 8),
+        name: "Página Falha Preparação",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: fbAccount.platformAccountId,
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste falha de preparação pós-reserva",
+        status: "APPROVED",
+      },
+    });
+
+    // Simula erro de preparação/Redis após a reserva
+    onBeforePublishHook = async () => {
+      throw new Error(
+        "Simulação: falha de infraestrutura no Redis antes da chamada à Meta",
+      );
+    };
+
+    const idempotencyKey = "idem_prep_fail_" + randomUUID();
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey,
+      },
+    );
+
+    // 1. Resposta é 503 com mensagem sanitizada (sem vazar detalhes internos)
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.message).toBe(
+      "Falha na preparação da publicação. Tente novamente.",
+    );
+
+    // 2. Nenhuma tentativa permaneceu como PROCESSING: foi atomicamente marcada como FAILED
+    const attempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.status).toBe("FAILED");
+    expect(attempts[0]!.errorCode).toBe("PREPARATION_FAILED");
+    expect(attempts[0]!.leaseExpiresAt).toBeNull();
+
+    // 3. Auditoria foi registrada
+    const auditLogs = await migration.auditLog.findMany({
+      where: { entityId: attempts[0]!.id, action: "post.publish_failed" },
+    });
+    expect(auditLogs).toHaveLength(1);
+
+    // 4. Chave HTTP de idempotência foi liberada no Redis
+    const redisKey = `idempotency:publish:org-a:client-a:${post.id}:${idempotencyKey}`;
+    const cached = await redis.get(redisKey);
+    expect(cached).toBeNull();
+
+    // 5. Nova tentativa subsequente pode ser executada com sucesso
+    onBeforePublishHook = undefined;
+    const retryRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey,
+      },
+    );
+    expect(retryRes.status).toBe(200);
+    const retryBody = await retryRes.json();
+    expect(retryBody.success).toBe(true);
+
+    const updatedAttempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+      orderBy: { attemptNumber: "asc" },
+    });
+    expect(updatedAttempts).toHaveLength(2);
+    expect(updatedAttempts[0]!.status).toBe("FAILED");
+    expect(updatedAttempts[1]!.status).toBe("PUBLISHED");
+    expect(updatedAttempts[1]!.attemptNumber).toBe(2);
+  });
+
+  it("lease ativa em tentativa PROCESSING bloqueia concorrência (409)", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_active_lease_" + randomUUID().slice(0, 8),
+        name: "Página Lease Ativo",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: fbAccount.platformAccountId,
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste lease ativo bloqueando concorrência",
+        status: "APPROVED",
+      },
+    });
+
+    // Cria tentativa em PROCESSING com lease futura (+2 minutos)
+    await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post.id,
+        socialAccountId: fbAccount.id,
+        status: "PROCESSING",
+        attemptNumber: 1,
+        leaseExpiresAt: new Date(Date.now() + 120_000),
+        executedAt: new Date(),
+      },
+    });
+
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_active_lease_" + randomUUID(),
+      },
+    );
+
+    expect(res.status).toBe(409);
+    const body = await res.json();
+    expect(body.message).toContain("Publicação em andamento");
+
+    // Nenhuma nova tentativa foi criada
+    const attempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.status).toBe("PROCESSING");
+  });
+
+  it("lease expirada para Instagram permite retomada controlada aproveitando o mesmo container sem duplicar", async () => {
+    const cookie = await login("admin-a");
+
+    const igAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "INSTAGRAM_BUSINESS",
+        platformAccountId: "ig_acc_expired_lease_" + randomUUID().slice(0, 8),
+        name: "IG Lease Expirada",
+        status: "ACTIVE",
+      },
+    });
+    const igEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: igAccount.platformAccountId,
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: igAccount.id,
+        encryptedAccessToken: igEnc.encryptedAccessToken,
+        iv: igEnc.iv,
+        authTag: igEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const testBytes = Buffer.from("imagem-para-ig-retomada", "utf8");
+    const mediaId = randomUUID();
+    const storageKey = `media/org-a/client-a/${mediaId}`;
+    await mockStorage.put(storageKey, testBytes);
+
+    const mediaAsset = await migration.mediaAsset.create({
+      data: {
+        id: mediaId,
+        organizationId: "org-a",
+        clientId: "client-a",
+        name: "Imagem IG Retomada",
+        storageKey,
+        mimeType: "image/jpeg",
+        byteSize: 10240,
+        width: 1080,
+        height: 1080,
+        sha256:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+        status: "ready",
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste retomada Instagram de container abandonado",
+        status: "APPROVED",
+      },
+    });
+
+    // Cria tentativa anterior interrompida em CONTAINER_CREATED com lease já vencida (-10s)
+    const abandonedContainerId = "ig_container_mock_resumed_777";
+    const previousAttempt = await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post.id,
+        socialAccountId: igAccount.id,
+        status: "CONTAINER_CREATED",
+        creationContainerId: abandonedContainerId,
+        attemptNumber: 1,
+        leaseExpiresAt: new Date(Date.now() - 10_000),
+        executedAt: new Date(Date.now() - 60_000),
+      },
+    });
+
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [igAccount.id],
+        mediaAssetId: mediaAsset.id,
+        idempotencyKey: "idem_ig_resume_" + randomUUID(),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+
+    const attempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: igAccount.id },
+      orderBy: { attemptNumber: "asc" },
+    });
+    expect(attempts).toHaveLength(2);
+
+    // Tentativa 1 expirada foi concluída como FAILED com código seguro
+    expect(attempts[0]!.id).toBe(previousAttempt.id);
+    expect(attempts[0]!.status).toBe("FAILED");
+    expect(attempts[0]!.errorCode).toBe("ABANDONED_LEASE_EXPIRED");
+    expect(attempts[0]!.leaseExpiresAt).toBeNull();
+
+    // Tentativa 2 foi concluída como PUBLISHED, reutilizando o mesmo container
+    expect(attempts[1]!.status).toBe("PUBLISHED");
+    expect(attempts[1]!.attemptNumber).toBe(2);
+    expect(attempts[1]!.creationContainerId).toBe(abandonedContainerId);
+    expect(attempts[1]!.leaseExpiresAt).toBeNull();
+
+    // Auditorias registradas
+    const expiredAudit = await migration.auditLog.findMany({
+      where: { entityId: previousAttempt.id, action: "post.lease_expired" },
+    });
+    expect(expiredAudit).toHaveLength(1);
+
+    const publishedAudit = await migration.auditLog.findMany({
+      where: { entityId: attempts[1]!.id, action: "post.published" },
+    });
+    expect(publishedAudit).toHaveLength(1);
+  });
+
+  it("lease expirada para Facebook transiciona para UNCERTAIN, bloqueia republicação e permite resolução manual pelo administrador", async () => {
+    const adminCookie = await login("admin-a");
+    const viewerCookie = await login("viewer-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_expired_lease_" + randomUUID().slice(0, 8),
+        name: "Página FB Lease Expirada",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: fbAccount.platformAccountId,
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste lease expirada Facebook transiciona para UNCERTAIN",
+        status: "APPROVED",
+      },
+    });
+
+    // Cria tentativa em PROCESSING com lease expirada (-10s)
+    const abandonedAttempt = await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post.id,
+        socialAccountId: fbAccount.id,
+        status: "PROCESSING",
+        attemptNumber: 1,
+        leaseExpiresAt: new Date(Date.now() - 10_000),
+        executedAt: new Date(Date.now() - 60_000),
+      },
+    });
+
+    // 1. Tentar publicar novamente bloqueia com 409 e transiciona para UNCERTAIN
+    const pubRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      adminCookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_fb_expired_lease_" + randomUUID(),
+      },
+    );
+
+    expect(pubRes.status).toBe(409);
+    const pubBody = await pubRes.json();
+    expect(pubBody.message).toContain(
+      "resultado incerto. Reconciliação manual necessária",
+    );
+
+    const uncertainAttempt = await migration.publicationAttempt.findUnique({
+      where: { id: abandonedAttempt.id },
+    });
+    expect(uncertainAttempt!.status).toBe("UNCERTAIN");
+    expect(uncertainAttempt!.errorCode).toBe("LEASE_EXPIRED_UNCERTAIN");
+    expect(uncertainAttempt!.leaseExpiresAt).toBeNull();
+
+    const uncertainAudit = await migration.auditLog.findMany({
+      where: {
+        entityId: abandonedAttempt.id,
+        action: "post.publish_uncertain",
+      },
+    });
+    expect(uncertainAudit).toHaveLength(1);
+
+    // 2. Tentativa subsequente de publicação continua bloqueada por UNCERTAIN
+    const blockedRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      adminCookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_fb_blocked_uncertain_" + randomUUID(),
+      },
+    );
+    expect(blockedRes.status).toBe(409);
+    const blockedBody = await blockedRes.json();
+    expect(blockedBody.message).toContain(
+      "estado incerto aguardando reconciliação manual",
+    );
+
+    // 3. Usuário sem permissão de admin (CLIENT_VIEWER) tenta reconciliar: recebe 403
+    const resolveForbiddenRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/attempts/${abandonedAttempt.id}/resolve`,
+      viewerCookie,
+      "POST",
+      {
+        decision: "CONFIRM_FAILED",
+      },
+    );
+    expect(resolveForbiddenRes.status).toBe(403);
+
+    // 4. Admin resolve manualmente como CONFIRM_FAILED
+    const resolveRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/attempts/${abandonedAttempt.id}/resolve`,
+      adminCookie,
+      "POST",
+      {
+        decision: "CONFIRM_FAILED",
+        notes: "Verificado no feed do Facebook: post não foi publicado.",
+      },
+    );
+    expect(resolveRes.status).toBe(200);
+    const resolveBody = await resolveRes.json();
+    expect(resolveBody.success).toBe(true);
+    expect(resolveBody.attempt.status).toBe("FAILED");
+    expect(resolveBody.attempt.errorCode).toBe("MANUALLY_RECONCILED_FAILED");
+
+    const reconciledAudit = await migration.auditLog.findMany({
+      where: {
+        entityId: abandonedAttempt.id,
+        action: "post.reconciled_failed",
+      },
+    });
+    expect(reconciledAudit).toHaveLength(1);
+
+    // 5. Após CONFIRM_FAILED, nova publicação controlada é permitida (attemptNumber 2)
+    const retryRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      adminCookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_fb_after_reconcile_" + randomUUID(),
+      },
+    );
+    expect(retryRes.status).toBe(200);
+    const retryBody = await retryRes.json();
+    expect(retryBody.success).toBe(true);
+
+    const finalAttempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+      orderBy: { attemptNumber: "asc" },
+    });
+    expect(finalAttempts).toHaveLength(2);
+    expect(finalAttempts[0]!.status).toBe("FAILED");
+    expect(finalAttempts[1]!.status).toBe("PUBLISHED");
+    expect(finalAttempts[1]!.attemptNumber).toBe(2);
+
+    // 6. Teste de CONFIRM_PUBLISHED em outro post incerto impede duplicação definitiva
+    const post2 = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Post 2 reconciliado como publicado",
+        status: "APPROVED",
+      },
+    });
+    const uncertainAttempt2 = await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post2.id,
+        socialAccountId: fbAccount.id,
+        status: "UNCERTAIN",
+        errorCode: "REMOTE_TIMEOUT",
+        attemptNumber: 1,
+        executedAt: new Date(),
+      },
+    });
+
+    const confirmPubRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post2.id}/attempts/${uncertainAttempt2.id}/resolve`,
+      adminCookie,
+      "POST",
+      {
+        decision: "CONFIRM_PUBLISHED",
+        remoteMediaId: "fb_post_manual_confirmed_789",
+        remotePermalink: "https://facebook.com/posts/789",
+        notes: "Encontrado no feed da página",
+      },
+    );
+    expect(confirmPubRes.status).toBe(200);
+    const confirmPubBody = await confirmPubRes.json();
+    expect(confirmPubBody.attempt.status).toBe("PUBLISHED");
+    expect(confirmPubBody.attempt.remoteMediaId).toBe(
+      "fb_post_manual_confirmed_789",
+    );
+
+    const confAudit = await migration.auditLog.findMany({
+      where: {
+        entityId: uncertainAttempt2.id,
+        action: "post.reconciled_published",
+      },
+    });
+    expect(confAudit).toHaveLength(1);
+
+    // Tentar publicar post2 novamente agora é definitivamente bloqueado (409)
+    const post2Blocked = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post2.id}/publish`,
+      adminCookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_post2_dup_" + randomUUID(),
+      },
+    );
+    expect(post2Blocked.status).toBe(409);
+    const post2BlockedBody = await post2Blocked.json();
+    expect(post2BlockedBody.message).toContain("já publicado com sucesso");
+  });
 });

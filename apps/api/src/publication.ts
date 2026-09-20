@@ -9,6 +9,8 @@ import type { Config } from "@socialflow/config";
 import {
   publishPostInput,
   publishPostResponse,
+  resolvePublicationAttemptInput,
+  resolvePublicationAttemptResponse,
   type PublicationAttemptDto,
   type Role,
 } from "@socialflow/contracts";
@@ -34,6 +36,8 @@ export interface PublicationDependencies {
   masterKey?: string | Buffer;
   onBeforePublish?: () => Promise<void>;
 }
+
+export const LEASE_DURATION_MS = 3 * 60 * 1000; // 3 minutos
 
 export class PublicationError extends Error {
   constructor(
@@ -67,6 +71,7 @@ interface TargetPrep {
     errorMessage: string | null;
     attemptNumber: number;
     executedAt: Date;
+    leaseExpiresAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
   };
@@ -201,20 +206,9 @@ export function registerPublication(
           return;
         }
 
-        const status =
-          error &&
-          typeof error === "object" &&
-          "status" in error &&
-          typeof error.status === "number"
-            ? error.status
-            : error instanceof PublicationError
-              ? error.status
-              : 503;
-
-        if (status !== 503) {
-          res.status(status).json({
-            message:
-              error instanceof Error ? error.message : "Erro na requisição.",
+        if (error instanceof PublicationError) {
+          res.status(error.status).json({
+            message: error.message,
           });
           return;
         }
@@ -419,18 +413,81 @@ export function registerPublication(
                   "UNCERTAIN",
                 ].includes(a.status),
               );
+
+              let previousContainerId: string | null = null;
               if (active) {
-                throw new PublicationError(
-                  409,
-                  `Publicação em andamento ou aguardando reconciliação para a conta social ${account.name || account.id}.`,
-                );
+                if (active.status === "UNCERTAIN") {
+                  throw new PublicationError(
+                    409,
+                    `Publicação em estado incerto aguardando reconciliação manual pelo administrador para a conta social ${account.name || account.id}.`,
+                  );
+                }
+
+                const now = new Date();
+                const isLeaseActive =
+                  active.leaseExpiresAt && active.leaseExpiresAt > now;
+
+                if (isLeaseActive) {
+                  throw new PublicationError(
+                    409,
+                    `Publicação em andamento para a conta social ${account.name || account.id}.`,
+                  );
+                }
+
+                // Lease expirado: processo anterior foi abandonado ou interrompido
+                if (account.platform === "INSTAGRAM_BUSINESS") {
+                  previousContainerId = active.creationContainerId;
+                  await tx.publicationAttempt.update({
+                    where: { id: active.id },
+                    data: {
+                      status: "FAILED",
+                      errorCode: "ABANDONED_LEASE_EXPIRED",
+                      errorMessage: previousContainerId
+                        ? "Execução anterior expirou. Tentativa retomada automaticamente aproveitando container existente."
+                        : "Execução anterior expirou antes da criação do container. Tentativa retomada.",
+                      leaseExpiresAt: null,
+                    },
+                  });
+                  await audit(tx, req, userId, active.id, "post.lease_expired");
+                } else {
+                  // Facebook: sem ID remoto de confirmação, não é seguro republicar automaticamente.
+                  // Transiciona para UNCERTAIN e exige resolução manual do administrador.
+                  await tx.publicationAttempt.update({
+                    where: { id: active.id },
+                    data: {
+                      status: "UNCERTAIN",
+                      errorCode: "LEASE_EXPIRED_UNCERTAIN",
+                      errorMessage:
+                        "Execução anterior no Facebook expirou antes da confirmação. Reconciliação manual necessária pelo administrador.",
+                      leaseExpiresAt: null,
+                    },
+                  });
+                  await audit(
+                    tx,
+                    req,
+                    userId,
+                    active.id,
+                    "post.publish_uncertain",
+                  );
+
+                  return {
+                    uncertainAccount: {
+                      id: account.id,
+                      name: account.name,
+                    },
+                    post: null as never,
+                    mediaAsset: null as never,
+                    targets: [] as never,
+                  };
+                }
               }
 
               // 3. Retomada permitida após FAILED (ou primeira tentativa)
               const lastAttempt = accountAttempts[0];
               const attemptNumber = (lastAttempt?.attemptNumber ?? 0) + 1;
-              const previousContainerId =
-                lastAttempt?.creationContainerId ?? null;
+              if (!previousContainerId) {
+                previousContainerId = lastAttempt?.creationContainerId ?? null;
+              }
 
               // Valida status da conta e credencial
               if (account.status !== "ACTIVE" || !account.credential) {
@@ -538,6 +595,7 @@ export function registerPublication(
                   status: "PROCESSING",
                   attemptNumber,
                   creationContainerId: previousContainerId,
+                  leaseExpiresAt: new Date(Date.now() + LEASE_DURATION_MS),
                   executedAt: new Date(),
                 },
               });
@@ -573,6 +631,18 @@ export function registerPublication(
         throw dbErr;
       }
 
+      if ("uncertainAccount" in prepResult && prepResult.uncertainAccount) {
+        await redis.del(redisKey);
+        const acc = prepResult.uncertainAccount as {
+          id: string;
+          name: string | null;
+        };
+        throw new PublicationError(
+          409,
+          `Publicação anterior no Facebook foi interrompida com resultado incerto. Reconciliação manual necessária pelo administrador para a conta social ${acc.name || acc.id}.`,
+        );
+      }
+
       // ETAPA 2: CHAMADAS EXTERNAS À META (TOTALMENTE FORA DE TRANSAÇÃO DE BANCO)
       // Nenhuma transação ou lock de banco é mantido durante requisições HTTP ou polling.
       const attemptsResult: PublicationAttemptDto[] = [];
@@ -581,22 +651,80 @@ export function registerPublication(
         .join("\n\n");
 
       let imageUrl: string | null = null;
-      if (prepResult.mediaAsset) {
-        // Gera identificador criptográfico opaco com TTL de 60 minutos no Redis
-        const ticketId = await createPublicMediaTicket(redis, {
-          organizationId,
-          clientId,
-          mediaId: prepResult.mediaAsset.id,
-          storageKey: prepResult.mediaAsset.storageKey,
-          mimeType: prepResult.mediaAsset.mimeType || "image/jpeg",
-          byteSize: prepResult.mediaAsset.byteSize || 0,
-          sha256: prepResult.mediaAsset.sha256 || "",
-        });
-        imageUrl = `${config.APP_URL}/api/public/media/${ticketId}`;
-      }
+      try {
+        if (prepResult.mediaAsset) {
+          // Gera identificador criptográfico opaco com TTL de 60 minutos no Redis
+          const ticketId = await createPublicMediaTicket(redis, {
+            organizationId,
+            clientId,
+            mediaId: prepResult.mediaAsset.id,
+            storageKey: prepResult.mediaAsset.storageKey,
+            mimeType: prepResult.mediaAsset.mimeType || "image/jpeg",
+            byteSize: prepResult.mediaAsset.byteSize || 0,
+            sha256: prepResult.mediaAsset.sha256 || "",
+          });
+          imageUrl = `${config.APP_URL}/api/public/media/${ticketId}`;
+        }
 
-      if (dependencies?.onBeforePublish) {
-        await dependencies.onBeforePublish();
+        if (dependencies?.onBeforePublish) {
+          await dependencies.onBeforePublish();
+        }
+      } catch (prepErr) {
+        // Toda exceção pós-reserva e pré-Meta finaliza atomicamente as tentativas afetadas como FAILED
+        // com código seguro PREPARATION_FAILED, auditando e liberando a chave de idempotência
+        try {
+          await shortTx(req, organizationId, clientId, async (tx, userId) => {
+            for (const target of prepResult.targets) {
+              if (!target.skippedDueToError) {
+                await tx.publicationAttempt.update({
+                  where: { id: target.attempt.id },
+                  data: {
+                    status: "FAILED",
+                    errorCode: "PREPARATION_FAILED",
+                    errorMessage:
+                      "Falha na preparação da publicação antes do envio.",
+                    leaseExpiresAt: null,
+                  },
+                });
+                await audit(
+                  tx,
+                  req,
+                  userId,
+                  target.attempt.id,
+                  "post.publish_failed",
+                );
+              }
+            }
+          });
+        } catch (cleanupErr) {
+          console.error(
+            JSON.stringify({
+              event: "publication_prep_cleanup_failed",
+              error:
+                cleanupErr instanceof Error
+                  ? cleanupErr.message
+                  : String(cleanupErr),
+            }),
+          );
+        }
+
+        try {
+          await redis.del(redisKey);
+        } catch {
+          // Erro de limpeza do Redis ignorado intencionalmente
+        }
+
+        console.error(
+          JSON.stringify({
+            event: "publication_preparation_failed",
+            error: prepErr instanceof Error ? prepErr.message : String(prepErr),
+          }),
+        );
+
+        throw new PublicationError(
+          503,
+          "Falha na preparação da publicação. Tente novamente.",
+        );
       }
 
       for (const target of prepResult.targets) {
@@ -616,6 +744,7 @@ export function registerPublication(
             errorMessage: target.attempt.errorMessage,
             attemptNumber: target.attempt.attemptNumber,
             executedAt: target.attempt.executedAt,
+            leaseExpiresAt: target.attempt.leaseExpiresAt ?? null,
             createdAt: target.attempt.createdAt,
             updatedAt: target.attempt.updatedAt,
           });
@@ -638,47 +767,27 @@ export function registerPublication(
           errorMessage: null,
           attemptNumber: target.attempt.attemptNumber,
           executedAt: target.attempt.executedAt,
+          leaseExpiresAt: null,
           createdAt: target.attempt.createdAt,
           updatedAt: target.attempt.updatedAt,
         };
 
+        let pubResult: {
+          remoteMediaId: string;
+          remotePermalink: string | null;
+          creationContainerId?: string;
+        } | null = null;
+
         try {
           if (target.account.platform === "FACEBOOK_PAGE") {
-            const pubResult = await publisher.publishFacebook({
+            pubResult = await publisher.publishFacebook({
               pageId: target.account.platformAccountId,
               accessToken,
               caption: fullCaption,
               imageUrl: imageUrl || undefined,
             });
-
-            // Transação curta de sucesso
-            const updated = await shortTx(
-              req,
-              organizationId,
-              clientId,
-              async (tx, userId) => {
-                const res = await tx.publicationAttempt.update({
-                  where: { id: target.attempt.id },
-                  data: {
-                    status: "PUBLISHED",
-                    remoteMediaId: pubResult.remoteMediaId,
-                    remotePermalink: pubResult.remotePermalink,
-                  },
-                });
-                await audit(tx, req, userId, res.id, "post.published");
-                return res;
-              },
-            );
-
-            finalAttemptRecord = {
-              ...finalAttemptRecord,
-              status: "PUBLISHED",
-              remoteMediaId: updated.remoteMediaId,
-              remotePermalink: updated.remotePermalink,
-              updatedAt: updated.updatedAt,
-            };
           } else if (target.account.platform === "INSTAGRAM_BUSINESS") {
-            const pubResult = await publisher.publishInstagram(
+            pubResult = await publisher.publishInstagram(
               {
                 igUserId: target.account.platformAccountId,
                 accessToken,
@@ -688,7 +797,7 @@ export function registerPublication(
               {
                 existingContainerId: target.previousContainerId,
                 onContainerCreated: async (containerId) => {
-                  // Transação curta para persistir container antes do polling
+                  // Transação curta para persistir container antes do polling e renovar lease
                   await shortTx(
                     req,
                     organizationId,
@@ -699,6 +808,9 @@ export function registerPublication(
                         data: {
                           status: "CONTAINER_CREATED",
                           creationContainerId: containerId,
+                          leaseExpiresAt: new Date(
+                            Date.now() + LEASE_DURATION_MS,
+                          ),
                         },
                       });
                       await audit(
@@ -713,8 +825,10 @@ export function registerPublication(
                 },
               },
             );
+          }
 
-            // Transação curta de sucesso
+          // Transação curta de persistência do sucesso remoto
+          try {
             const updated = await shortTx(
               req,
               organizationId,
@@ -724,9 +838,12 @@ export function registerPublication(
                   where: { id: target.attempt.id },
                   data: {
                     status: "PUBLISHED",
-                    creationContainerId: pubResult.creationContainerId,
-                    remoteMediaId: pubResult.remoteMediaId,
-                    remotePermalink: pubResult.remotePermalink,
+                    creationContainerId:
+                      pubResult!.creationContainerId ??
+                      target.attempt.creationContainerId,
+                    remoteMediaId: pubResult!.remoteMediaId,
+                    remotePermalink: pubResult!.remotePermalink,
+                    leaseExpiresAt: null,
                   },
                 });
                 await audit(tx, req, userId, res.id, "post.published");
@@ -740,8 +857,81 @@ export function registerPublication(
               creationContainerId: updated.creationContainerId,
               remoteMediaId: updated.remoteMediaId,
               remotePermalink: updated.remotePermalink,
+              leaseExpiresAt: null,
               updatedAt: updated.updatedAt,
             };
+          } catch (persistErr) {
+            // Sucesso remoto na Meta, mas houve falha ao salvar confirmação no banco.
+            // Transiciona para UNCERTAIN com remoteMediaId para evitar republicação duplicada.
+            console.error(
+              JSON.stringify({
+                event: "publication_post_success_persistence_failed",
+                attemptId: target.attempt.id,
+                error:
+                  persistErr instanceof Error
+                    ? persistErr.message
+                    : String(persistErr),
+              }),
+            );
+
+            try {
+              const updated = await shortTx(
+                req,
+                organizationId,
+                clientId,
+                async (tx, userId) => {
+                  const res = await tx.publicationAttempt.update({
+                    where: { id: target.attempt.id },
+                    data: {
+                      status: "UNCERTAIN",
+                      creationContainerId:
+                        pubResult!.creationContainerId ??
+                        target.attempt.creationContainerId,
+                      remoteMediaId: pubResult!.remoteMediaId,
+                      remotePermalink: pubResult!.remotePermalink,
+                      errorCode: "REMOTE_SUCCESS_PERSISTENCE_FAILED",
+                      errorMessage:
+                        "Publicação realizada com sucesso na Meta, mas houve falha ao persistir confirmação local.",
+                      leaseExpiresAt: null,
+                    },
+                  });
+                  await audit(
+                    tx,
+                    req,
+                    userId,
+                    res.id,
+                    "post.publish_uncertain",
+                  );
+                  return res;
+                },
+              );
+
+              finalAttemptRecord = {
+                ...finalAttemptRecord,
+                status: "UNCERTAIN",
+                creationContainerId: updated.creationContainerId,
+                remoteMediaId: updated.remoteMediaId,
+                remotePermalink: updated.remotePermalink,
+                errorCode: updated.errorCode,
+                errorMessage: updated.errorMessage,
+                leaseExpiresAt: null,
+                updatedAt: updated.updatedAt,
+              };
+            } catch {
+              finalAttemptRecord = {
+                ...finalAttemptRecord,
+                status: "UNCERTAIN",
+                creationContainerId:
+                  pubResult!.creationContainerId ??
+                  target.attempt.creationContainerId,
+                remoteMediaId: pubResult!.remoteMediaId,
+                remotePermalink: pubResult!.remotePermalink,
+                errorCode: "REMOTE_SUCCESS_PERSISTENCE_FAILED",
+                errorMessage:
+                  "Publicação realizada com sucesso na Meta, mas houve falha ao persistir confirmação local.",
+                leaseExpiresAt: null,
+              };
+            }
           }
         } catch (metaErr: unknown) {
           const timeout = isTimeoutError(metaErr);
@@ -770,6 +960,7 @@ export function registerPublication(
                       metaErr instanceof Error
                         ? metaErr.message
                         : "Tempo limite esgotado. Resultado remoto incerto.",
+                    leaseExpiresAt: null,
                   },
                 });
                 await audit(tx, req, userId, res.id, "post.publish_uncertain");
@@ -782,6 +973,7 @@ export function registerPublication(
               status: "UNCERTAIN",
               errorCode: updated.errorCode,
               errorMessage: updated.errorMessage,
+              leaseExpiresAt: null,
               updatedAt: updated.updatedAt,
             };
           } else {
@@ -826,6 +1018,7 @@ export function registerPublication(
                     status: "FAILED",
                     errorCode,
                     errorMessage,
+                    leaseExpiresAt: null,
                   },
                 });
                 await audit(tx, req, userId, res.id, "post.publish_failed");
@@ -838,6 +1031,7 @@ export function registerPublication(
               status: "FAILED",
               errorCode: updated.errorCode,
               errorMessage: updated.errorMessage,
+              leaseExpiresAt: null,
               updatedAt: updated.updatedAt,
             };
           }
@@ -861,6 +1055,187 @@ export function registerPublication(
       await redis.set(redisKey, JSON.stringify(finalResponse), "EX", 86400);
 
       res.status(200).json(finalResponse);
+    }),
+  );
+
+  // --- MANUAL RECONCILIATION / RESOLUTION ENDPOINT (OWNER/ADMIN) ---
+  server.post(
+    "/api/organizations/:org/clients/:clientId/posts/:postId/attempts/:attemptId/resolve",
+    handler(async (req, res) => {
+      const parsed = resolvePublicationAttemptInput.safeParse(req.body);
+      if (!parsed.success) {
+        const errorMsg =
+          parsed.error.issues[0]?.message || "Dados de resolução inválidos.";
+        throw new PublicationError(400, errorMsg);
+      }
+
+      const { decision, remoteMediaId, remotePermalink, notes } = parsed.data;
+      const organizationId = param(req, "org");
+      const clientId = param(req, "clientId");
+      const postId = param(req, "postId");
+      const attemptId = param(req, "attemptId");
+
+      const result = await accessScope(
+        req,
+        organizationId,
+        clientId,
+        ["OWNER", "ADMIN"],
+        async (tx, userId) => {
+          const attempt = await tx.publicationAttempt.findFirst({
+            where: {
+              id: attemptId,
+              organizationId,
+              clientId,
+              postId,
+            },
+            include: {
+              socialAccount: {
+                select: { platform: true },
+              },
+            },
+          });
+
+          if (!attempt) {
+            throw new PublicationError(
+              404,
+              "Tentativa de publicação não encontrada.",
+            );
+          }
+
+          if (attempt.status === "PUBLISHED") {
+            throw new PublicationError(
+              400,
+              "Tentativa já confirmada como publicada. Nenhuma ação necessária.",
+            );
+          }
+
+          const now = new Date();
+          const isLeaseActive =
+            ["PENDING", "PROCESSING", "CONTAINER_CREATED"].includes(
+              attempt.status,
+            ) &&
+            attempt.leaseExpiresAt &&
+            attempt.leaseExpiresAt > now;
+
+          if (isLeaseActive) {
+            throw new PublicationError(
+              409,
+              "Tentativa ainda em execução ativa. Aguarde a expiração do lease antes de resolver.",
+            );
+          }
+
+          if (decision === "CONFIRM_PUBLISHED") {
+            // Verifica se já não existe outra tentativa publicada para a mesma conta
+            const otherPublished = await tx.publicationAttempt.findFirst({
+              where: {
+                organizationId,
+                clientId,
+                postId,
+                socialAccountId: attempt.socialAccountId,
+                status: "PUBLISHED",
+                id: { not: attempt.id },
+              },
+            });
+            if (otherPublished) {
+              throw new PublicationError(
+                409,
+                "Outra tentativa já está confirmada como publicada para esta conta social.",
+              );
+            }
+
+            const updated = await tx.publicationAttempt.update({
+              where: { id: attempt.id },
+              data: {
+                status: "PUBLISHED",
+                remoteMediaId:
+                  remoteMediaId || attempt.remoteMediaId || "MANUAL_CONFIRMED",
+                remotePermalink: remotePermalink || attempt.remotePermalink,
+                leaseExpiresAt: null,
+                errorMessage: notes
+                  ? `Reconciliado manualmente como publicado: ${notes}`
+                  : (attempt.errorMessage ?? null),
+              },
+            });
+
+            await audit(
+              tx,
+              req,
+              userId,
+              attempt.id,
+              "post.reconciled_published",
+            );
+
+            return {
+              ...updated,
+              platform: attempt.socialAccount.platform,
+            };
+          }
+
+          if (decision === "CONFIRM_FAILED") {
+            const updated = await tx.publicationAttempt.update({
+              where: { id: attempt.id },
+              data: {
+                status: "FAILED",
+                errorCode: "MANUALLY_RECONCILED_FAILED",
+                errorMessage: notes
+                  ? `Reconciliado manualmente como falho: ${notes}`
+                  : "Reconciliado manualmente como falho pelo administrador.",
+                leaseExpiresAt: null,
+              },
+            });
+
+            await audit(tx, req, userId, attempt.id, "post.reconciled_failed");
+
+            return {
+              ...updated,
+              platform: attempt.socialAccount.platform,
+            };
+          }
+
+          // DISMISS: Mantém o registro com anotação do admin sem alterar status conclusivo
+          const updated = await tx.publicationAttempt.update({
+            where: { id: attempt.id },
+            data: {
+              leaseExpiresAt: null,
+              errorMessage: notes
+                ? `Decisão mantida pelo administrador: ${notes}`
+                : attempt.errorMessage,
+            },
+          });
+
+          await audit(tx, req, userId, attempt.id, "post.reconciled_dismissed");
+
+          return {
+            ...updated,
+            platform: attempt.socialAccount.platform,
+          };
+        },
+      );
+
+      const responseDto = resolvePublicationAttemptResponse.parse({
+        success: true,
+        attempt: {
+          id: result.id,
+          organizationId: result.organizationId,
+          clientId: result.clientId,
+          postId: result.postId,
+          socialAccountId: result.socialAccountId,
+          platform: result.platform as PublicationAttemptDto["platform"],
+          status: result.status as PublicationAttemptDto["status"],
+          creationContainerId: result.creationContainerId,
+          remoteMediaId: result.remoteMediaId,
+          remotePermalink: result.remotePermalink,
+          errorCode: result.errorCode,
+          errorMessage: result.errorMessage,
+          attemptNumber: result.attemptNumber,
+          executedAt: result.executedAt,
+          leaseExpiresAt: result.leaseExpiresAt,
+          createdAt: result.createdAt,
+          updatedAt: result.updatedAt,
+        },
+      });
+
+      res.status(200).json(responseDto);
     }),
   );
 }
