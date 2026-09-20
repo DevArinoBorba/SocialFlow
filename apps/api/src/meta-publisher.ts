@@ -108,6 +108,23 @@ function sanitizeMessage(msg: string, tokenToScrub?: string): string {
   return cleaned;
 }
 
+export function isTimeoutError(err: unknown): boolean {
+  if (!err) return false;
+  if (err instanceof MetaTimeoutError) return true;
+  const msg = err instanceof Error ? err.message : String(err);
+  const name = err instanceof Error ? err.name : "";
+  const code = (err as { code?: string }).code;
+  return (
+    name === "AbortError" ||
+    name === "TimeoutError" ||
+    code === "ETIMEDOUT" ||
+    code === "ECONNRESET" ||
+    code === "ESOCKETTIMEDOUT" ||
+    msg.toLowerCase().includes("timeout") ||
+    msg.toLowerCase().includes("timed out")
+  );
+}
+
 export class MetaPublisherAdapter {
   private readonly graphBaseUrl: string;
   private readonly graphVersion: string;
@@ -205,18 +222,31 @@ export class MetaPublisherAdapter {
       const formData = new URLSearchParams();
       formData.set("url", imageUrl);
       formData.set("caption", caption);
-      formData.set("access_token", accessToken);
 
       let response: Response;
       try {
         response = await this.fetchFn(url, {
           method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Authorization: `Bearer ${accessToken}`,
+          },
           body: formData.toString(),
         });
       } catch (networkError) {
+        if (isTimeoutError(networkError)) {
+          throw new MetaTimeoutError(
+            `Tempo limite esgotado ao publicar no Facebook: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+          );
+        }
         throw new MetaPublishError(
           `Falha de conexão com a Meta: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+        );
+      }
+
+      if (response.status === 504 || response.status === 502) {
+        throw new MetaTimeoutError(
+          `Resposta remota incerta da Meta (HTTP ${response.status}).`,
         );
       }
 
@@ -239,18 +269,31 @@ export class MetaPublisherAdapter {
       const url = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(pageId)}/feed`;
       const formData = new URLSearchParams();
       formData.set("message", caption);
-      formData.set("access_token", accessToken);
 
       let response: Response;
       try {
         response = await this.fetchFn(url, {
           method: "POST",
-          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            Authorization: `Bearer ${accessToken}`,
+          },
           body: formData.toString(),
         });
       } catch (networkError) {
+        if (isTimeoutError(networkError)) {
+          throw new MetaTimeoutError(
+            `Tempo limite esgotado ao publicar no Facebook: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+          );
+        }
         throw new MetaPublishError(
           `Falha de conexão com a Meta: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+        );
+      }
+
+      if (response.status === 504 || response.status === 502) {
+        throw new MetaTimeoutError(
+          `Resposta remota incerta da Meta (HTTP ${response.status}).`,
         );
       }
 
@@ -282,13 +325,15 @@ export class MetaPublisherAdapter {
     const formData = new URLSearchParams();
     formData.set("image_url", imageUrl);
     formData.set("caption", caption);
-    formData.set("access_token", accessToken);
 
     let response: Response;
     try {
       response = await this.fetchFn(url, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: formData.toString(),
       });
     } catch (networkError) {
@@ -322,11 +367,16 @@ export class MetaPublisherAdapter {
     statusCode: "EXPIRED" | "ERROR" | "FINISHED" | "IN_PROGRESS";
     statusMessage?: string;
   }> {
-    const url = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(containerId)}?fields=status_code,status&access_token=${encodeURIComponent(accessToken)}`;
+    const url = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(containerId)}?fields=status_code,status`;
 
     let response: Response;
     try {
-      response = await this.fetchFn(url, { method: "GET" });
+      response = await this.fetchFn(url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
     } catch (networkError) {
       throw new MetaPublishError(
         `Falha ao consultar status do container Instagram: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
@@ -406,18 +456,31 @@ export class MetaPublisherAdapter {
     const url = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(igUserId)}/media_publish`;
     const formData = new URLSearchParams();
     formData.set("creation_id", containerId);
-    formData.set("access_token", accessToken);
 
     let response: Response;
     try {
       response = await this.fetchFn(url, {
         method: "POST",
-        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          Authorization: `Bearer ${accessToken}`,
+        },
         body: formData.toString(),
       });
     } catch (networkError) {
+      if (isTimeoutError(networkError)) {
+        throw new MetaTimeoutError(
+          `Tempo limite esgotado ao publicar container no Instagram: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+        );
+      }
       throw new MetaPublishError(
         `Falha ao publicar container no Instagram: ${sanitizeMessage((networkError as Error).message, accessToken)}`,
+      );
+    }
+
+    if (response.status === 504 || response.status === 502) {
+      throw new MetaTimeoutError(
+        `Resposta remota incerta da Meta (HTTP ${response.status}).`,
       );
     }
 
@@ -432,8 +495,13 @@ export class MetaPublisherAdapter {
     // Tenta obter o permalink público do Instagram
     let remotePermalink: string | null = null;
     try {
-      const permalinkUrl = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(remoteMediaId)}?fields=permalink&access_token=${encodeURIComponent(accessToken)}`;
-      const permalinkRes = await this.fetchFn(permalinkUrl, { method: "GET" });
+      const permalinkUrl = `${this.graphBaseUrl}/${this.graphVersion}/${encodeURIComponent(remoteMediaId)}?fields=permalink`;
+      const permalinkRes = await this.fetchFn(permalinkUrl, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      });
       if (permalinkRes.ok) {
         const permalinkJson = await permalinkRes.json().catch(() => ({}));
         if (permalinkJson.permalink) {
@@ -456,14 +524,54 @@ export class MetaPublisherAdapter {
    * 2. Polling até FINISHED
    * 3. Publicar container
    */
+  /**
+   * Orquestra a publicação no Instagram, suportando verificação e continuidade de container existente.
+   * Se existir container anterior, consulta seu status antes de decidir se reaproveita ou cria outro.
+   */
   async publishInstagram(
     params: InstagramContainerParams,
-    onContainerCreated?: (containerId: string) => Promise<void> | void,
+    onContainerCreatedOrOptions?:
+      | ((containerId: string) => Promise<void> | void)
+      | {
+          existingContainerId?: string | null;
+          onContainerCreated?: (containerId: string) => Promise<void> | void;
+        },
   ): Promise<PublishResult> {
-    const { containerId } = await this.createInstagramContainer(params);
+    let existingContainerId: string | null = null;
+    let onContainerCreated:
+      ((containerId: string) => Promise<void> | void) | undefined;
 
-    if (onContainerCreated) {
-      await onContainerCreated(containerId);
+    if (typeof onContainerCreatedOrOptions === "function") {
+      onContainerCreated = onContainerCreatedOrOptions;
+    } else if (onContainerCreatedOrOptions) {
+      existingContainerId =
+        onContainerCreatedOrOptions.existingContainerId ?? null;
+      onContainerCreated = onContainerCreatedOrOptions.onContainerCreated;
+    }
+
+    let containerId = existingContainerId;
+
+    if (containerId) {
+      try {
+        const check = await this.checkInstagramContainerStatus(
+          containerId,
+          params.accessToken,
+        );
+        if (check.statusCode === "EXPIRED" || check.statusCode === "ERROR") {
+          // Container anterior inválido ou expirado, descarta para criar outro
+          containerId = null;
+        }
+      } catch {
+        containerId = null;
+      }
+    }
+
+    if (!containerId) {
+      const created = await this.createInstagramContainer(params);
+      containerId = created.containerId;
+      if (onContainerCreated) {
+        await onContainerCreated(containerId);
+      }
     }
 
     await this.pollInstagramContainer(containerId, params.accessToken);

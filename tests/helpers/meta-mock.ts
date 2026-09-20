@@ -65,6 +65,15 @@ export function startMetaMockServer(
         res.end(JSON.stringify(data));
       };
 
+      if (
+        pathname.includes("timeout") ||
+        req.headers.authorization?.includes("timeout")
+      ) {
+        return json(504, {
+          error: { message: "Gateway Timeout from upstream Meta server." },
+        });
+      }
+
       // 1. /v21.0/oauth/access_token
       if (
         pathname === "/v21.0/oauth/access_token" ||
@@ -181,7 +190,9 @@ export function startMetaMockServer(
         pathname.match(/\/v21\.0\/[^/]+\/photos$/) ||
         pathname.match(/\/[^/]+\/photos$/)
       ) {
+        const authHeader = req.headers.authorization;
         const token =
+          authHeader?.replace(/^Bearer\s+/i, "") ||
           bodyParams.get("access_token") ||
           parsedUrl.searchParams.get("access_token");
         if (token === "invalid_or_expired_token") {
@@ -215,7 +226,9 @@ export function startMetaMockServer(
         pathname.match(/\/v21\.0\/[^/]+\/media$/) ||
         pathname.match(/\/[^/]+\/media$/)
       ) {
+        const authHeader = req.headers.authorization;
         const token =
+          authHeader?.replace(/^Bearer\s+/i, "") ||
           bodyParams.get("access_token") ||
           parsedUrl.searchParams.get("access_token");
         if (token === "invalid_or_expired_token") {
@@ -234,10 +247,16 @@ export function startMetaMockServer(
       }
 
       // 6. Instagram: /{container-id} (Container Status Check)
-      if (pathname.includes("ig_container_mock_55555")) {
+      if (
+        pathname.includes("ig_container_mock_55555") ||
+        pathname.includes("ig_container_mock_resumed_777")
+      ) {
+        const containerId = pathname.includes("ig_container_mock_resumed_777")
+          ? "ig_container_mock_resumed_777"
+          : "ig_container_mock_55555";
         return json(200, {
           status_code: "FINISHED",
-          id: "ig_container_mock_55555",
+          id: containerId,
         });
       }
 

@@ -2,12 +2,14 @@ import express, { type Express, type Request, type Response } from "express";
 import { z } from "zod";
 import { randomUUID, createHash } from "node:crypto";
 import type { Prisma } from "@socialflow/db";
+import type { Redis } from "ioredis";
 import {
   MAX_IMAGE_BYTES,
   mediaStorage,
   validateImage,
 } from "./media-storage.js";
 import { verifySignedMediaToken } from "./media-token.js";
+import { getPublicMediaTicket } from "./media-ticket.js";
 
 export type Scope = <T>(
   req: Request,
@@ -53,6 +55,7 @@ export type MediaStorage = NonNullable<ReturnType<typeof mediaStorage>>;
 export interface MediaDependencies {
   storage?: MediaStorage | null;
   sessionSecret?: string;
+  redis?: Redis;
 }
 
 export function sanitizeClientCorrelationId(raw: unknown): string | null {
@@ -171,29 +174,48 @@ export function registerMedia(
   }
 
   server.get(
-    "/api/public/media/:signedToken",
+    "/api/public/media/:ticketId",
     handler(async (req, res) => {
-      const secret = deps?.sessionSecret || process.env.SESSION_SECRET || "";
-      if (!secret) {
-        throw new MediaError(503, "Assinatura de mídia indisponível.");
+      const ticketId = String(req.params.ticketId);
+      const redis = deps?.redis;
+
+      let mediaData: {
+        storageKey: string;
+        mimeType: string;
+        byteSize: number;
+        sha256: string;
+      } | null = null;
+
+      if (redis) {
+        mediaData = await getPublicMediaTicket(redis, ticketId);
       }
-      const token = String(req.params.signedToken);
-      const verified = verifySignedMediaToken(secret, token);
-      if (!verified) {
-        throw new MediaError(403, "Token de mídia inválido ou expirado.");
+
+      // Fallback legado de transição caso não esteja no Redis e seja formato assinado
+      if (!mediaData) {
+        const secret = deps?.sessionSecret || process.env.SESSION_SECRET || "";
+        if (secret) {
+          mediaData = verifySignedMediaToken(secret, ticketId);
+        }
       }
+
+      if (!mediaData) {
+        throw new MediaError(404, "Mídia indisponível ou expirada.");
+      }
+
       if (!storage) {
         throw new MediaError(503, "Armazenamento indisponível.");
       }
-      const bytes = await storage.get(verified.storageKey);
+
+      const bytes = await storage.get(mediaData.storageKey);
       if (
-        bytes.length !== verified.byteSize ||
-        createHash("sha256").update(bytes).digest("hex") !== verified.sha256
+        bytes.length !== mediaData.byteSize ||
+        createHash("sha256").update(bytes).digest("hex") !== mediaData.sha256
       ) {
         throw new Error("Integridade da imagem divergente.");
       }
-      res.setHeader("Content-Type", verified.mimeType);
-      res.setHeader("Cache-Control", "public, max-age=900, immutable");
+
+      res.setHeader("Content-Type", mediaData.mimeType);
+      res.setHeader("Cache-Control", "public, max-age=3600, immutable");
       res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
       res.send(bytes);
     }),

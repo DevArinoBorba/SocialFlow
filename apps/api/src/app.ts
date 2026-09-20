@@ -189,6 +189,7 @@ export async function createApplication(
   const closeMedia = registerMedia(server, scoped, {
     ...options?.mediaDependencies,
     sessionSecret: config.SESSION_SECRET,
+    redis,
   });
   registerContent(server, scoped);
   registerSocialAccounts(

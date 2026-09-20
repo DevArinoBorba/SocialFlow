@@ -91,9 +91,11 @@ export type ConnectSocialAccountsResponse = z.infer<
 
 export const publicationAttemptStatuses = [
   "PENDING",
+  "PROCESSING",
   "CONTAINER_CREATED",
   "PUBLISHED",
   "FAILED",
+  "UNCERTAIN",
 ] as const;
 export type PublicationAttemptStatus =
   (typeof publicationAttemptStatuses)[number];

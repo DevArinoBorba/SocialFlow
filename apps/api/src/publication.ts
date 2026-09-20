@@ -12,8 +12,12 @@ import {
   type PublicationAttemptDto,
   type Role,
 } from "@socialflow/contracts";
-import { MetaPublisherAdapter, MetaAuthError } from "./meta-publisher.js";
-import { createSignedMediaToken } from "./media-token.js";
+import {
+  MetaPublisherAdapter,
+  MetaAuthError,
+  isTimeoutError,
+} from "./meta-publisher.js";
+import { createPublicMediaTicket } from "./media-ticket.js";
 
 export type Scope = <T>(
   req: Request,
@@ -39,6 +43,36 @@ export class PublicationError extends Error {
     super(message);
     this.name = "PublicationError";
   }
+}
+
+interface TargetPrep {
+  account: {
+    id: string;
+    name: string | null;
+    platform: "FACEBOOK_PAGE" | "INSTAGRAM_BUSINESS";
+    platformAccountId: string;
+    status: string;
+  };
+  attempt: {
+    id: string;
+    organizationId: string;
+    clientId: string;
+    postId: string;
+    socialAccountId: string;
+    status: string;
+    creationContainerId: string | null;
+    remoteMediaId: string | null;
+    remotePermalink: string | null;
+    errorCode: string | null;
+    errorMessage: string | null;
+    attemptNumber: number;
+    executedAt: Date;
+    createdAt: Date;
+    updatedAt: Date;
+  };
+  accessToken?: string;
+  previousContainerId?: string | null;
+  skippedDueToError: boolean;
 }
 
 export function registerPublication(
@@ -118,6 +152,21 @@ export function registerPublication(
     });
   }
 
+  async function shortTx<T>(
+    req: Request,
+    organizationId: string,
+    clientId: string,
+    fn: (tx: Prisma.TransactionClient, userId: string) => Promise<T>,
+  ): Promise<T> {
+    return accessScope(
+      req,
+      organizationId,
+      clientId,
+      ["OWNER", "ADMIN", "APPROVER"],
+      async (tx, userId) => fn(tx, userId),
+    );
+  }
+
   const audit = (
     tx: Prisma.TransactionClient,
     req: Request,
@@ -139,6 +188,19 @@ export function registerPublication(
       try {
         await fn(req, res);
       } catch (error: unknown) {
+        if (
+          error &&
+          typeof error === "object" &&
+          "code" in error &&
+          (error as { code: string }).code === "P2002"
+        ) {
+          res.status(409).json({
+            message:
+              "Publicação concorrente em andamento ou já concluída para esta conta social.",
+          });
+          return;
+        }
+
         const status =
           error &&
           typeof error === "object" &&
@@ -188,7 +250,7 @@ export function registerPublication(
       const clientId = param(req, "clientId");
       const postId = param(req, "postId");
 
-      // Idempotência no Redis para prevenir duplo clique e execuções concorrentes
+      // Idempotência HTTP no Redis para prevenir duplo clique e repetições imediatas
       const redisKey = `meta:publish:idempotency:${organizationId}:${clientId}:${postId}:${idempotencyKey}`;
       const acquired = await redis.set(
         redisKey,
@@ -215,14 +277,30 @@ export function registerPublication(
         );
       }
 
+      let prepResult: {
+        post: {
+          id: string;
+          caption: string;
+          hashtags: string | null;
+        };
+        mediaAsset: {
+          id: string;
+          storageKey: string;
+          mimeType: string | null;
+          byteSize: number | null;
+          sha256: string | null;
+        } | null;
+        targets: TargetPrep[];
+      };
+
       try {
-        const result = await accessScope(
+        // ETAPA 1: TRANSAÇÃO CURTA (Autorização, Validação e Reserva de Tentativas no PostgreSQL)
+        // Fecha imediatamente antes de qualquer chamada externa à Meta.
+        prepResult = await shortTx(
           req,
           organizationId,
           clientId,
-          ["OWNER", "ADMIN", "APPROVER"],
           async (tx, userId) => {
-            // 1. Validação estrita do Post: deve pertencer ao cliente e estar APPROVED
             const post = await tx.post.findFirst({
               where: {
                 id: postId,
@@ -242,7 +320,6 @@ export function registerPublication(
               );
             }
 
-            // 2. Validação das Contas Sociais: devem pertencer ao mesmo cliente
             const accounts = await tx.socialAccount.findMany({
               where: {
                 id: { in: socialAccountIds },
@@ -259,7 +336,6 @@ export function registerPublication(
               );
             }
 
-            // 3. Validação de Mídia (se fornecida ou obrigatória para Instagram)
             const hasInstagram = accounts.some(
               (acc) => acc.platform === "INSTAGRAM_BUSINESS",
             );
@@ -270,9 +346,16 @@ export function registerPublication(
               );
             }
 
-            let imageUrl: string | null = null;
+            let mediaAsset: {
+              id: string;
+              storageKey: string;
+              mimeType: string | null;
+              byteSize: number | null;
+              sha256: string | null;
+            } | null = null;
+
             if (mediaAssetId) {
-              const asset = await tx.mediaAsset.findFirst({
+              mediaAsset = await tx.mediaAsset.findFirst({
                 where: {
                   id: mediaAssetId,
                   organizationId,
@@ -282,31 +365,14 @@ export function registerPublication(
                 },
               });
 
-              if (!asset) {
+              if (!mediaAsset) {
                 throw new PublicationError(
                   404,
                   "Imagem selecionada não encontrada ou não está disponível.",
                 );
               }
-
-              const signedToken = createSignedMediaToken(
-                config.SESSION_SECRET,
-                {
-                  organizationId,
-                  clientId,
-                  mediaId: asset.id,
-                  storageKey: asset.storageKey,
-                  mimeType: asset.mimeType || "image/jpeg",
-                  byteSize: asset.byteSize || 0,
-                  sha256: asset.sha256 || "",
-                  expiresAt: Date.now() + 15 * 60 * 1000,
-                },
-              );
-
-              imageUrl = `${config.APP_URL}/api/public/media/${signedToken}`;
             }
 
-            // 4. Inicializa Decriptação Segura
             if (!masterKey) {
               throw new PublicationError(
                 500,
@@ -315,48 +381,68 @@ export function registerPublication(
             }
             const credentialCrypto = createCredentialCrypto(masterKey);
 
-            if (dependencies?.onBeforePublish) {
-              await dependencies.onBeforePublish();
-            }
+            // Consulta todas as tentativas existentes para as contas selecionadas
+            const existingAttempts = await tx.publicationAttempt.findMany({
+              where: {
+                organizationId,
+                clientId,
+                postId,
+                socialAccountId: { in: socialAccountIds },
+              },
+              orderBy: { attemptNumber: "desc" },
+            });
 
-            const attemptsResult: PublicationAttemptDto[] = [];
-            const fullCaption = [post.caption, post.hashtags]
-              .filter(Boolean)
-              .join("\n\n");
+            const targets: TargetPrep[] = [];
 
-            // 5. Publicação iterativa e isolada por conta social
             for (const account of accounts) {
-              // Verifica tentativa anterior para calcular attemptNumber
-              const lastAttempt = await tx.publicationAttempt.findFirst({
-                where: {
-                  organizationId,
-                  clientId,
-                  postId,
-                  socialAccountId: account.id,
-                },
-                orderBy: { attemptNumber: "desc" },
-              });
+              const accountAttempts = existingAttempts.filter(
+                (a) => a.socialAccountId === account.id,
+              );
+
+              // 1. Bloqueio definitivo se já houver tentativa PUBLISHED
+              const published = accountAttempts.find(
+                (a) => a.status === "PUBLISHED",
+              );
+              if (published) {
+                throw new PublicationError(
+                  409,
+                  `Post já publicado com sucesso para a conta social ${account.name || account.id}.`,
+                );
+              }
+
+              // 2. Bloqueio estrito se houver tentativa em andamento ou incerta
+              const active = accountAttempts.find((a) =>
+                [
+                  "PENDING",
+                  "PROCESSING",
+                  "CONTAINER_CREATED",
+                  "UNCERTAIN",
+                ].includes(a.status),
+              );
+              if (active) {
+                throw new PublicationError(
+                  409,
+                  `Publicação em andamento ou aguardando reconciliação para a conta social ${account.name || account.id}.`,
+                );
+              }
+
+              // 3. Retomada permitida após FAILED (ou primeira tentativa)
+              const lastAttempt = accountAttempts[0];
               const attemptNumber = (lastAttempt?.attemptNumber ?? 0) + 1;
+              const previousContainerId =
+                lastAttempt?.creationContainerId ?? null;
 
-              // Cria tentativa no estado PENDING
-              let attempt = await tx.publicationAttempt.create({
-                data: {
-                  organizationId,
-                  clientId,
-                  postId,
-                  socialAccountId: account.id,
-                  status: "PENDING",
-                  attemptNumber,
-                  executedAt: new Date(),
-                },
-              });
-
-              // Valida status da conta e presença de credencial
+              // Valida status da conta e credencial
               if (account.status !== "ACTIVE" || !account.credential) {
-                attempt = await tx.publicationAttempt.update({
-                  where: { id: attempt.id },
+                const failedAttempt = await tx.publicationAttempt.create({
                   data: {
+                    organizationId,
+                    clientId,
+                    postId,
+                    socialAccountId: account.id,
                     status: "FAILED",
+                    attemptNumber,
+                    executedAt: new Date(),
                     errorCode: "ACCOUNT_INACTIVE",
                     errorMessage:
                       account.status === "ACTIVE"
@@ -364,29 +450,28 @@ export function registerPublication(
                         : `Conta social em estado ${account.status}. Reconexão necessária.`,
                   },
                 });
-                await audit(tx, req, userId, attempt.id, "post.publish_failed");
-                attemptsResult.push({
-                  id: attempt.id,
-                  organizationId: attempt.organizationId,
-                  clientId: attempt.clientId,
-                  postId: attempt.postId,
-                  socialAccountId: attempt.socialAccountId,
-                  platform: account.platform,
-                  status: attempt.status,
-                  creationContainerId: attempt.creationContainerId,
-                  remoteMediaId: attempt.remoteMediaId,
-                  remotePermalink: attempt.remotePermalink,
-                  errorCode: attempt.errorCode,
-                  errorMessage: attempt.errorMessage,
-                  attemptNumber: attempt.attemptNumber,
-                  executedAt: attempt.executedAt,
-                  createdAt: attempt.createdAt,
-                  updatedAt: attempt.updatedAt,
+                await audit(
+                  tx,
+                  req,
+                  userId,
+                  failedAttempt.id,
+                  "post.publish_failed",
+                );
+                targets.push({
+                  account: {
+                    id: account.id,
+                    name: account.name,
+                    platform: account.platform,
+                    platformAccountId: account.platformAccountId,
+                    status: account.status,
+                  },
+                  attempt: failedAttempt,
+                  skippedDueToError: true,
                 });
                 continue;
               }
 
-              // Decripta o Page Access Token em memória
+              // Decripta token OAuth em memória
               let accessToken: string;
               try {
                 const cred = account.credential;
@@ -406,106 +491,328 @@ export function registerPublication(
                   credContext,
                 );
               } catch {
-                attempt = await tx.publicationAttempt.update({
-                  where: { id: attempt.id },
+                const failedAttempt = await tx.publicationAttempt.create({
                   data: {
+                    organizationId,
+                    clientId,
+                    postId,
+                    socialAccountId: account.id,
                     status: "FAILED",
+                    attemptNumber,
+                    executedAt: new Date(),
                     errorCode: "CRYPTO_DECRYPT_FAILED",
                     errorMessage:
                       "Falha ao descriptografar token da conta social.",
                   },
                 });
-                await audit(tx, req, userId, attempt.id, "post.publish_failed");
-                attemptsResult.push({
-                  id: attempt.id,
-                  organizationId: attempt.organizationId,
-                  clientId: attempt.clientId,
-                  postId: attempt.postId,
-                  socialAccountId: attempt.socialAccountId,
-                  platform: account.platform,
-                  status: attempt.status,
-                  creationContainerId: attempt.creationContainerId,
-                  remoteMediaId: attempt.remoteMediaId,
-                  remotePermalink: attempt.remotePermalink,
-                  errorCode: attempt.errorCode,
-                  errorMessage: attempt.errorMessage,
-                  attemptNumber: attempt.attemptNumber,
-                  executedAt: attempt.executedAt,
-                  createdAt: attempt.createdAt,
-                  updatedAt: attempt.updatedAt,
+                await audit(
+                  tx,
+                  req,
+                  userId,
+                  failedAttempt.id,
+                  "post.publish_failed",
+                );
+                targets.push({
+                  account: {
+                    id: account.id,
+                    name: account.name,
+                    platform: account.platform,
+                    platformAccountId: account.platformAccountId,
+                    status: account.status,
+                  },
+                  attempt: failedAttempt,
+                  skippedDueToError: true,
                 });
                 continue;
               }
 
-              // Executa publicação via Adaptador Meta Isolado
-              try {
-                if (account.platform === "FACEBOOK_PAGE") {
-                  const pubResult = await publisher.publishFacebook({
-                    pageId: account.platformAccountId,
-                    accessToken,
-                    caption: fullCaption,
-                    imageUrl: imageUrl || undefined,
-                  });
+              // Reserva a tentativa no PostgreSQL no estado PROCESSING
+              // A restrição única parcial (PublicationAttempt_single_active_idx)
+              // impede execução concorrente mesmo entre instâncias distintas da API.
+              const reservedAttempt = await tx.publicationAttempt.create({
+                data: {
+                  organizationId,
+                  clientId,
+                  postId,
+                  socialAccountId: account.id,
+                  status: "PROCESSING",
+                  attemptNumber,
+                  creationContainerId: previousContainerId,
+                  executedAt: new Date(),
+                },
+              });
 
-                  attempt = await tx.publicationAttempt.update({
-                    where: { id: attempt.id },
-                    data: {
-                      status: "PUBLISHED",
-                      remoteMediaId: pubResult.remoteMediaId,
-                      remotePermalink: pubResult.remotePermalink,
-                    },
-                  });
-                  await audit(tx, req, userId, attempt.id, "post.published");
-                } else if (account.platform === "INSTAGRAM_BUSINESS") {
-                  const pubResult = await publisher.publishInstagram(
-                    {
-                      igUserId: account.platformAccountId,
-                      accessToken,
-                      caption: fullCaption,
-                      imageUrl: imageUrl!,
-                    },
-                    async (containerId) => {
-                      attempt = await tx.publicationAttempt.update({
-                        where: { id: attempt.id },
+              targets.push({
+                account: {
+                  id: account.id,
+                  name: account.name,
+                  platform: account.platform,
+                  platformAccountId: account.platformAccountId,
+                  status: account.status,
+                },
+                attempt: reservedAttempt,
+                accessToken,
+                previousContainerId,
+                skippedDueToError: false,
+              });
+            }
+
+            return {
+              post: {
+                id: post.id,
+                caption: post.caption,
+                hashtags: post.hashtags,
+              },
+              mediaAsset,
+              targets,
+            };
+          },
+        );
+      } catch (dbErr) {
+        await redis.del(redisKey);
+        throw dbErr;
+      }
+
+      // ETAPA 2: CHAMADAS EXTERNAS À META (TOTALMENTE FORA DE TRANSAÇÃO DE BANCO)
+      // Nenhuma transação ou lock de banco é mantido durante requisições HTTP ou polling.
+      const attemptsResult: PublicationAttemptDto[] = [];
+      const fullCaption = [prepResult.post.caption, prepResult.post.hashtags]
+        .filter(Boolean)
+        .join("\n\n");
+
+      let imageUrl: string | null = null;
+      if (prepResult.mediaAsset) {
+        // Gera identificador criptográfico opaco com TTL de 60 minutos no Redis
+        const ticketId = await createPublicMediaTicket(redis, {
+          organizationId,
+          clientId,
+          mediaId: prepResult.mediaAsset.id,
+          storageKey: prepResult.mediaAsset.storageKey,
+          mimeType: prepResult.mediaAsset.mimeType || "image/jpeg",
+          byteSize: prepResult.mediaAsset.byteSize || 0,
+          sha256: prepResult.mediaAsset.sha256 || "",
+        });
+        imageUrl = `${config.APP_URL}/api/public/media/${ticketId}`;
+      }
+
+      if (dependencies?.onBeforePublish) {
+        await dependencies.onBeforePublish();
+      }
+
+      for (const target of prepResult.targets) {
+        if (target.skippedDueToError) {
+          attemptsResult.push({
+            id: target.attempt.id,
+            organizationId: target.attempt.organizationId,
+            clientId: target.attempt.clientId,
+            postId: target.attempt.postId,
+            socialAccountId: target.attempt.socialAccountId,
+            platform: target.account.platform,
+            status: target.attempt.status as PublicationAttemptDto["status"],
+            creationContainerId: target.attempt.creationContainerId,
+            remoteMediaId: target.attempt.remoteMediaId,
+            remotePermalink: target.attempt.remotePermalink,
+            errorCode: target.attempt.errorCode,
+            errorMessage: target.attempt.errorMessage,
+            attemptNumber: target.attempt.attemptNumber,
+            executedAt: target.attempt.executedAt,
+            createdAt: target.attempt.createdAt,
+            updatedAt: target.attempt.updatedAt,
+          });
+          continue;
+        }
+
+        const accessToken = target.accessToken!;
+        let finalAttemptRecord: PublicationAttemptDto = {
+          id: target.attempt.id,
+          organizationId: target.attempt.organizationId,
+          clientId: target.attempt.clientId,
+          postId: target.attempt.postId,
+          socialAccountId: target.attempt.socialAccountId,
+          platform: target.account.platform,
+          status: "FAILED",
+          creationContainerId: target.attempt.creationContainerId,
+          remoteMediaId: null,
+          remotePermalink: null,
+          errorCode: null,
+          errorMessage: null,
+          attemptNumber: target.attempt.attemptNumber,
+          executedAt: target.attempt.executedAt,
+          createdAt: target.attempt.createdAt,
+          updatedAt: target.attempt.updatedAt,
+        };
+
+        try {
+          if (target.account.platform === "FACEBOOK_PAGE") {
+            const pubResult = await publisher.publishFacebook({
+              pageId: target.account.platformAccountId,
+              accessToken,
+              caption: fullCaption,
+              imageUrl: imageUrl || undefined,
+            });
+
+            // Transação curta de sucesso
+            const updated = await shortTx(
+              req,
+              organizationId,
+              clientId,
+              async (tx, userId) => {
+                const res = await tx.publicationAttempt.update({
+                  where: { id: target.attempt.id },
+                  data: {
+                    status: "PUBLISHED",
+                    remoteMediaId: pubResult.remoteMediaId,
+                    remotePermalink: pubResult.remotePermalink,
+                  },
+                });
+                await audit(tx, req, userId, res.id, "post.published");
+                return res;
+              },
+            );
+
+            finalAttemptRecord = {
+              ...finalAttemptRecord,
+              status: "PUBLISHED",
+              remoteMediaId: updated.remoteMediaId,
+              remotePermalink: updated.remotePermalink,
+              updatedAt: updated.updatedAt,
+            };
+          } else if (target.account.platform === "INSTAGRAM_BUSINESS") {
+            const pubResult = await publisher.publishInstagram(
+              {
+                igUserId: target.account.platformAccountId,
+                accessToken,
+                caption: fullCaption,
+                imageUrl: imageUrl!,
+              },
+              {
+                existingContainerId: target.previousContainerId,
+                onContainerCreated: async (containerId) => {
+                  // Transação curta para persistir container antes do polling
+                  await shortTx(
+                    req,
+                    organizationId,
+                    clientId,
+                    async (tx, userId) => {
+                      await tx.publicationAttempt.update({
+                        where: { id: target.attempt.id },
                         data: {
                           status: "CONTAINER_CREATED",
                           creationContainerId: containerId,
                         },
                       });
+                      await audit(
+                        tx,
+                        req,
+                        userId,
+                        target.attempt.id,
+                        "post.container_created",
+                      );
                     },
                   );
+                },
+              },
+            );
 
-                  attempt = await tx.publicationAttempt.update({
-                    where: { id: attempt.id },
-                    data: {
-                      status: "PUBLISHED",
-                      creationContainerId: pubResult.creationContainerId,
-                      remoteMediaId: pubResult.remoteMediaId,
-                      remotePermalink: pubResult.remotePermalink,
-                    },
-                  });
-                  await audit(tx, req, userId, attempt.id, "post.published");
-                }
-              } catch (metaErr: unknown) {
-                const isAuthError =
-                  (metaErr &&
-                    typeof metaErr === "object" &&
-                    "code" in metaErr &&
-                    Number((metaErr as { code?: unknown }).code) === 190) ||
-                  metaErr instanceof MetaAuthError ||
-                  (metaErr instanceof Error &&
-                    metaErr.name === "MetaAuthError");
+            // Transação curta de sucesso
+            const updated = await shortTx(
+              req,
+              organizationId,
+              clientId,
+              async (tx, userId) => {
+                const res = await tx.publicationAttempt.update({
+                  where: { id: target.attempt.id },
+                  data: {
+                    status: "PUBLISHED",
+                    creationContainerId: pubResult.creationContainerId,
+                    remoteMediaId: pubResult.remoteMediaId,
+                    remotePermalink: pubResult.remotePermalink,
+                  },
+                });
+                await audit(tx, req, userId, res.id, "post.published");
+                return res;
+              },
+            );
 
+            finalAttemptRecord = {
+              ...finalAttemptRecord,
+              status: "PUBLISHED",
+              creationContainerId: updated.creationContainerId,
+              remoteMediaId: updated.remoteMediaId,
+              remotePermalink: updated.remotePermalink,
+              updatedAt: updated.updatedAt,
+            };
+          }
+        } catch (metaErr: unknown) {
+          const timeout = isTimeoutError(metaErr);
+          const isAuthError =
+            (metaErr &&
+              typeof metaErr === "object" &&
+              "code" in metaErr &&
+              Number((metaErr as { code?: unknown }).code) === 190) ||
+            metaErr instanceof MetaAuthError ||
+            (metaErr instanceof Error && metaErr.name === "MetaAuthError");
+
+          if (timeout) {
+            // Resultado remoto incerto: estado UNCERTAIN impede nova publicação acidental
+            // e retém o bloqueio para reconciliação
+            const updated = await shortTx(
+              req,
+              organizationId,
+              clientId,
+              async (tx, userId) => {
+                const res = await tx.publicationAttempt.update({
+                  where: { id: target.attempt.id },
+                  data: {
+                    status: "UNCERTAIN",
+                    errorCode: "REMOTE_TIMEOUT",
+                    errorMessage:
+                      metaErr instanceof Error
+                        ? metaErr.message
+                        : "Tempo limite esgotado. Resultado remoto incerto.",
+                  },
+                });
+                await audit(tx, req, userId, res.id, "post.publish_uncertain");
+                return res;
+              },
+            );
+
+            finalAttemptRecord = {
+              ...finalAttemptRecord,
+              status: "UNCERTAIN",
+              errorCode: updated.errorCode,
+              errorMessage: updated.errorMessage,
+              updatedAt: updated.updatedAt,
+            };
+          } else {
+            // Falha com erro conhecido da Meta
+            const errorCode =
+              metaErr &&
+              typeof metaErr === "object" &&
+              "code" in metaErr &&
+              (metaErr as { code?: unknown }).code
+                ? String((metaErr as { code?: unknown }).code)
+                : metaErr instanceof Error
+                  ? metaErr.name
+                  : "META_PUBLISH_ERROR";
+
+            const errorMessage =
+              metaErr instanceof Error
+                ? metaErr.message
+                : "Falha na comunicação com a Meta.";
+
+            const updated = await shortTx(
+              req,
+              organizationId,
+              clientId,
+              async (tx, userId) => {
                 if (isAuthError) {
-                  // Marca conta social como EXPIRED para exigir reconexão
                   await tx.socialAccount.update({
-                    where: { id: account.id },
-                    data: {
-                      status: "EXPIRED",
-                    },
+                    where: { id: target.account.id },
+                    data: { status: "EXPIRED" },
                   });
                   await tx.oAuthCredential.update({
-                    where: { socialAccountId: account.id },
+                    where: { socialAccountId: target.account.id },
                     data: {
                       reconnectReason:
                         "Token da Meta expirado ou revogado. Reconexão necessária.",
@@ -513,75 +820,47 @@ export function registerPublication(
                   });
                 }
 
-                const errorCode =
-                  metaErr &&
-                  typeof metaErr === "object" &&
-                  "code" in metaErr &&
-                  (metaErr as { code?: unknown }).code
-                    ? String((metaErr as { code?: unknown }).code)
-                    : metaErr instanceof Error
-                      ? metaErr.name
-                      : "META_PUBLISH_ERROR";
-
-                const errorMessage =
-                  metaErr instanceof Error
-                    ? metaErr.message
-                    : "Falha na comunicação com a Meta.";
-
-                attempt = await tx.publicationAttempt.update({
-                  where: { id: attempt.id },
+                const res = await tx.publicationAttempt.update({
+                  where: { id: target.attempt.id },
                   data: {
                     status: "FAILED",
                     errorCode,
                     errorMessage,
                   },
                 });
-                await audit(tx, req, userId, attempt.id, "post.publish_failed");
-              }
+                await audit(tx, req, userId, res.id, "post.publish_failed");
+                return res;
+              },
+            );
 
-              attemptsResult.push({
-                id: attempt.id,
-                organizationId: attempt.organizationId,
-                clientId: attempt.clientId,
-                postId: attempt.postId,
-                socialAccountId: attempt.socialAccountId,
-                platform: account.platform,
-                status: attempt.status,
-                creationContainerId: attempt.creationContainerId,
-                remoteMediaId: attempt.remoteMediaId,
-                remotePermalink: attempt.remotePermalink,
-                errorCode: attempt.errorCode,
-                errorMessage: attempt.errorMessage,
-                attemptNumber: attempt.attemptNumber,
-                executedAt: attempt.executedAt,
-                createdAt: attempt.createdAt,
-                updatedAt: attempt.updatedAt,
-              });
-            }
+            finalAttemptRecord = {
+              ...finalAttemptRecord,
+              status: "FAILED",
+              errorCode: updated.errorCode,
+              errorMessage: updated.errorMessage,
+              updatedAt: updated.updatedAt,
+            };
+          }
+        }
 
-            const allSuccess =
-              attemptsResult.length > 0 &&
-              attemptsResult.every((att) => att.status === "PUBLISHED");
-
-            const finalResponse = publishPostResponse.parse({
-              postId,
-              success: allSuccess,
-              attempts: attemptsResult,
-            });
-
-            return finalResponse;
-          },
-        );
-
-        // Salva resultado concluído no Redis com TTL de 24h
-        await redis.set(redisKey, JSON.stringify(result), "EX", 86400);
-
-        res.status(200).json(result);
-      } catch (err) {
-        // Se ocorreu um erro antes de concluir, remove a chave para permitir nova tentativa
-        await redis.del(redisKey);
-        throw err;
+        attemptsResult.push(finalAttemptRecord);
       }
+
+      // ETAPA 3: FINALIZAÇÃO E RESPOSTA
+      const allSuccess =
+        attemptsResult.length > 0 &&
+        attemptsResult.every((att) => att.status === "PUBLISHED");
+
+      const finalResponse = publishPostResponse.parse({
+        postId,
+        success: allSuccess,
+        attempts: attemptsResult,
+      });
+
+      // Salva resultado concluído no Redis com TTL de 24h
+      await redis.set(redisKey, JSON.stringify(finalResponse), "EX", 86400);
+
+      res.status(200).json(finalResponse);
     }),
   );
 }

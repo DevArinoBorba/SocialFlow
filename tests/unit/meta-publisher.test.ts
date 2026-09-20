@@ -322,4 +322,204 @@ describe("MetaPublisherAdapter Unit Tests", () => {
       }),
     ).rejects.toThrow(MetaRateLimitError);
   });
+
+  it("garante ausência total de tokens em URLs, parâmetros de busca ou corpos, e envia Authorization: Bearer", async () => {
+    const mockFetch = vi
+      .fn()
+      .mockImplementation(async (url: string, init?: RequestInit) => {
+        // Valida URL
+        expect(url).not.toContain(secretToken);
+        expect(url).not.toContain("access_token");
+
+        // Valida Cabeçalho
+        const headers = init?.headers as Record<string, string>;
+        expect(headers).toBeDefined();
+        expect(headers["Authorization"]).toBe(`Bearer ${secretToken}`);
+
+        // Valida Corpo (se houver)
+        if (init?.body) {
+          const bodyStr = String(init.body);
+          expect(bodyStr).not.toContain(secretToken);
+          expect(bodyStr).not.toContain("access_token");
+        }
+
+        if (url.includes("/photos")) {
+          return {
+            ok: true,
+            json: async () => ({ id: "p1", post_id: "p1_post" }),
+          };
+        }
+        if (url.includes("/media") && !url.includes("media_publish")) {
+          return {
+            ok: true,
+            json: async () => ({ id: "c1" }),
+          };
+        }
+        if (url.includes("status_code")) {
+          return {
+            ok: true,
+            json: async () => ({ status_code: "FINISHED" }),
+          };
+        }
+        if (url.includes("/media_publish")) {
+          return {
+            ok: true,
+            json: async () => ({ id: "ig_pub1" }),
+          };
+        }
+        if (url.includes("permalink")) {
+          return {
+            ok: true,
+            json: async () => ({ permalink: "https://ig.me/p/1" }),
+          };
+        }
+        return { ok: true, json: async () => ({ id: "fb_feed1" }) };
+      });
+
+    const publisher = new MetaPublisherAdapter({
+      fetchFn: mockFetch as unknown as typeof fetch,
+      pollDelayMs: 5,
+    });
+
+    // 1. Facebook com foto
+    await publisher.publishFacebook({
+      pageId: "fb_p1",
+      accessToken: secretToken,
+      caption: "Foto",
+      imageUrl: "https://example.com/img.jpg",
+    });
+
+    // 2. Facebook texto
+    await publisher.publishFacebook({
+      pageId: "fb_p1",
+      accessToken: secretToken,
+      caption: "Texto",
+    });
+
+    // 3. Instagram completo
+    await publisher.publishInstagram({
+      igUserId: "ig_u1",
+      accessToken: secretToken,
+      imageUrl: "https://example.com/img.jpg",
+      caption: "IG",
+    });
+
+    // Todas as chamadas foram inspecionadas nas asserções acima
+    expect(mockFetch).toHaveBeenCalledTimes(6);
+  });
+
+  it("retoma publicação no Instagram com container existente FINISHED sem criar outro", async () => {
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      // Não deve chamar a criação (/media)
+      if (url.includes("/ig_user_1/media") && !url.includes("media_publish")) {
+        throw new Error("Não deveria ter chamado createInstagramContainer!");
+      }
+      // Consulta status do container anterior
+      if (url.includes("existing_container_777")) {
+        return {
+          ok: true,
+          json: async () => ({ status_code: "FINISHED" }),
+        };
+      }
+      // Publicação do container
+      if (url.includes("/media_publish")) {
+        return {
+          ok: true,
+          json: async () => ({ id: "ig_resumed_media_999" }),
+        };
+      }
+      // Permalink
+      return {
+        ok: true,
+        json: async () => ({ permalink: "https://instagram.com/p/resumed" }),
+      };
+    });
+
+    const publisher = new MetaPublisherAdapter({
+      fetchFn: mockFetch as unknown as typeof fetch,
+      pollDelayMs: 5,
+    });
+
+    const containerCreatedSpy = vi.fn();
+
+    const result = await publisher.publishInstagram(
+      {
+        igUserId: "ig_user_1",
+        accessToken: secretToken,
+        imageUrl: "https://example.com/img.jpg",
+        caption: "Resumed",
+      },
+      {
+        existingContainerId: "existing_container_777",
+        onContainerCreated: containerCreatedSpy,
+      },
+    );
+
+    // Não deve ter criado outro container
+    expect(containerCreatedSpy).not.toHaveBeenCalled();
+    expect(result.creationContainerId).toBe("existing_container_777");
+    expect(result.remoteMediaId).toBe("ig_resumed_media_999");
+    expect(result.remotePermalink).toBe("https://instagram.com/p/resumed");
+  });
+
+  it("recria container no Instagram se o container anterior estiver EXPIRED ou com ERROR", async () => {
+    const mockFetch = vi.fn().mockImplementation(async (url: string) => {
+      // Consulta status do container anterior -> expirado
+      if (url.includes("expired_container_111")) {
+        return {
+          ok: true,
+          json: async () => ({ status_code: "EXPIRED" }),
+        };
+      }
+      // Criação de novo container
+      if (url.includes("/ig_user_1/media") && !url.includes("media_publish")) {
+        return {
+          ok: true,
+          json: async () => ({ id: "brand_new_container_222" }),
+        };
+      }
+      // Consulta status do novo container
+      if (url.includes("brand_new_container_222")) {
+        return {
+          ok: true,
+          json: async () => ({ status_code: "FINISHED" }),
+        };
+      }
+      // Publicação
+      if (url.includes("/media_publish")) {
+        return {
+          ok: true,
+          json: async () => ({ id: "ig_new_published_333" }),
+        };
+      }
+      return {
+        ok: true,
+        json: async () => ({ permalink: "https://instagram.com/p/new" }),
+      };
+    });
+
+    const publisher = new MetaPublisherAdapter({
+      fetchFn: mockFetch as unknown as typeof fetch,
+      pollDelayMs: 5,
+    });
+
+    const containerCreatedSpy = vi.fn();
+
+    const result = await publisher.publishInstagram(
+      {
+        igUserId: "ig_user_1",
+        accessToken: secretToken,
+        imageUrl: "https://example.com/img.jpg",
+        caption: "New after expired",
+      },
+      {
+        existingContainerId: "expired_container_111",
+        onContainerCreated: containerCreatedSpy,
+      },
+    );
+
+    expect(containerCreatedSpy).toHaveBeenCalledWith("brand_new_container_222");
+    expect(result.creationContainerId).toBe("brand_new_container_222");
+    expect(result.remoteMediaId).toBe("ig_new_published_333");
+  });
 });

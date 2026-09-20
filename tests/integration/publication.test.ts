@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import {
@@ -16,6 +16,8 @@ import {
 } from "../helpers/meta-mock.js";
 // @ts-expect-error dist output does not emit d.ts
 import { MetaPublisherAdapter } from "../../apps/api/dist/meta-publisher.js";
+// @ts-expect-error dist output does not emit d.ts
+import { createPublicMediaTicket } from "../../apps/api/dist/media-ticket.js";
 
 const db = createDatabase(process.env.DATABASE_URL!);
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
@@ -74,6 +76,23 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
       .join("; ");
   }
 
+  let onBeforePublishHook: (() => Promise<void>) | undefined;
+  const mockStorageMap = new Map<string, Buffer>();
+  const mockStorage = {
+    put: async (key: string, data: Buffer) => {
+      mockStorageMap.set(key, data);
+    },
+    get: async (key: string) => {
+      const found = mockStorageMap.get(key);
+      if (!found) throw new Error("Object not found in mock storage");
+      return found;
+    },
+    delete: async (key: string) => {
+      mockStorageMap.delete(key);
+    },
+    close: async () => {},
+  };
+
   beforeAll(async () => {
     metaMock = await startMetaMockServer();
     redis = new Redis(process.env.REDIS_URL!, { maxRetriesPerRequest: 1 });
@@ -96,6 +115,14 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
       publicationDependencies: {
         publisher: mockPublisher,
         masterKey: TEST_KEY_32,
+        onBeforePublish: async () => {
+          if (onBeforePublishHook) {
+            await onBeforePublishHook();
+          }
+        },
+      },
+      mediaDependencies: {
+        storage: mockStorage,
       },
     });
 
@@ -119,6 +146,8 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
 
   beforeEach(async () => {
     await migration.rateLimit.deleteMany();
+    onBeforePublishHook = undefined;
+    mockStorageMap.clear();
   });
 
   it("bloqueia publicação de post com status diferente de APPROVED (DRAFT, IN_REVIEW, REJECTED) com 422", async () => {
@@ -459,5 +488,536 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
       where: { entityId: igAttempt.id, action: "post.publish_failed" },
     });
     expect(failedAudit).not.toBeNull();
+  });
+
+  it("trata duas requisições simultâneas com a mesma chave de idempotência sem duplicar tentativas", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_conc_1",
+        name: "Página Concorrente",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "fb_page_conc_1",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste de concorrência com mesma chave",
+        status: "APPROVED",
+      },
+    });
+
+    const idempotencyKey = "idem_concurrent_same_key_" + randomUUID();
+
+    const [res1, res2] = await Promise.all([
+      request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [fbAccount.id],
+          idempotencyKey,
+        },
+      ),
+      request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        cookie,
+        "POST",
+        {
+          socialAccountIds: [fbAccount.id],
+          idempotencyKey,
+        },
+      ),
+    ]);
+
+    const statuses = [res1.status, res2.status];
+    expect(statuses).toContain(200);
+    expect(statuses.some((s) => s === 200 || s === 409)).toBe(true);
+
+    const attempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.status).toBe("PUBLISHED");
+  });
+
+  it("impede nova publicação (409) do mesmo post e conta mesmo com chave de idempotência diferente", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_dup_2",
+        name: "Página Anti-Duplicação",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "fb_page_dup_2",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Teste anti-duplicação persistente no PostgreSQL",
+        status: "APPROVED",
+      },
+    });
+
+    // 1ª publicação com chave A
+    const res1 = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_key_AAA_" + randomUUID(),
+      },
+    );
+    expect(res1.status).toBe(200);
+
+    // 2ª publicação com chave B (diferente) para a mesma conta e post
+    const res2 = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_key_BBB_" + randomUUID(),
+      },
+    );
+    expect(res2.status).toBe(409);
+    const body2 = await res2.json();
+    expect(body2.message).toContain("já publicado com sucesso");
+
+    // Permanece com apenas 1 tentativa no banco
+    const attempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+    });
+    expect(attempts).toHaveLength(1);
+    expect(attempts[0]!.status).toBe("PUBLISHED");
+  });
+
+  it("permite retomada controlada após falha, incrementando attemptNumber para 2 e concluindo", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_resume_3",
+        name: "Página Retomada",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "fb_page_resume_3",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Post que falhou anteriormente",
+        status: "APPROVED",
+      },
+    });
+
+    // Insere tentativa prévia com falha (status = FAILED, attemptNumber = 1)
+    await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post.id,
+        socialAccountId: fbAccount.id,
+        status: "FAILED",
+        attemptNumber: 1,
+        errorCode: "PREVIOUS_NETWORK_ERROR",
+        errorMessage: "Falha transitória simulada",
+        executedAt: new Date(Date.now() - 60000),
+      },
+    });
+
+    // Executa retomada explícita
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_resume_after_fail_" + randomUUID(),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.attempts[0].attemptNumber).toBe(2);
+    expect(body.attempts[0].status).toBe("PUBLISHED");
+
+    const allAttempts = await migration.publicationAttempt.findMany({
+      where: { postId: post.id, socialAccountId: fbAccount.id },
+      orderBy: { attemptNumber: "asc" },
+    });
+    expect(allAttempts).toHaveLength(2);
+    expect(allAttempts[0]!.status).toBe("FAILED");
+    expect(allAttempts[0]!.attemptNumber).toBe(1);
+    expect(allAttempts[1]!.status).toBe("PUBLISHED");
+    expect(allAttempts[1]!.attemptNumber).toBe(2);
+  });
+
+  it("no Instagram, se já existir creationContainerId de tentativa anterior, a retomada reaproveita o container", async () => {
+    const cookie = await login("admin-a");
+
+    const igAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "INSTAGRAM_BUSINESS",
+        platformAccountId: "ig_page_resume_cont_4",
+        name: "IG Retomada Container",
+        status: "ACTIVE",
+      },
+    });
+    const igEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "ig_page_resume_cont_4",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: igAccount.id,
+        encryptedAccessToken: igEnc.encryptedAccessToken,
+        iv: igEnc.iv,
+        authTag: igEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const mediaId = randomUUID();
+    const media = await migration.mediaAsset.create({
+      data: {
+        id: mediaId,
+        organizationId: "org-a",
+        clientId: "client-a",
+        name: "Foto IG Container",
+        storageKey: `media/org-a/client-a/${mediaId}`,
+        status: "ready",
+        mimeType: "image/jpeg",
+        byteSize: 4096,
+        width: 1080,
+        height: 1080,
+        sha256:
+          "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Post IG com container anterior",
+        status: "APPROVED",
+      },
+    });
+
+    // Insere tentativa anterior FAILED com creationContainerId registrado
+    await migration.publicationAttempt.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        postId: post.id,
+        socialAccountId: igAccount.id,
+        status: "FAILED",
+        attemptNumber: 1,
+        creationContainerId: "ig_container_mock_resumed_777",
+        errorCode: "PREV_ERROR",
+        errorMessage: "Falha após criar container",
+        executedAt: new Date(Date.now() - 30000),
+      },
+    });
+
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [igAccount.id],
+        mediaAssetId: media.id,
+        idempotencyKey: "idem_ig_resume_cont_" + randomUUID(),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.attempts[0].status).toBe("PUBLISHED");
+    // Confirmou e continuou o container existente
+    expect(body.attempts[0].creationContainerId).toBe(
+      "ig_container_mock_resumed_777",
+    );
+    expect(body.attempts[0].attemptNumber).toBe(2);
+  });
+
+  it("registra estado UNCERTAIN e bloqueia nova publicação concorrente após timeout remoto na Meta", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_timeout_5",
+        name: "Página Timeout",
+        status: "ACTIVE",
+      },
+    });
+    // Token contendo "timeout" faz o mock retornar 504 Gateway Timeout
+    const fbEnc = cryptoHelper.encrypt("timeout_token_simulated", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "fb_page_timeout_5",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Post que sofrerá timeout remoto",
+        status: "APPROVED",
+      },
+    });
+
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_timeout_test_" + randomUUID(),
+      },
+    );
+
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(false);
+    expect(body.attempts[0].status).toBe("UNCERTAIN");
+    expect(body.attempts[0].errorCode).toBe("REMOTE_TIMEOUT");
+
+    // Verifica que foi registrado no AuditLog como incerto
+    const auditEntry = await migration.auditLog.findFirst({
+      where: {
+        entityId: body.attempts[0].id,
+        action: "post.publish_uncertain",
+      },
+    });
+    expect(auditEntry).not.toBeNull();
+
+    // Uma nova tentativa com outra chave deve ser rejeitada com 409 devido ao estado UNCERTAIN
+    const resRetry = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_timeout_retry_" + randomUUID(),
+      },
+    );
+    expect(resRetry.status).toBe(409);
+    const retryBody = await resRetry.json();
+    expect(retryBody.message).toContain("aguardando reconciliação");
+  });
+
+  it("garante que chamadas externas à Meta ocorrem fora de transação longa (transação curta liberada antes da Meta)", async () => {
+    const cookie = await login("admin-a");
+
+    const fbAccount = await migration.socialAccount.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platform: "FACEBOOK_PAGE",
+        platformAccountId: "fb_page_no_tx_6",
+        name: "Página Sem Lock Longo",
+        status: "ACTIVE",
+      },
+    });
+    const fbEnc = cryptoHelper.encrypt("valid_token", {
+      organizationId: "org-a",
+      clientId: "client-a",
+      platformAccountId: "fb_page_no_tx_6",
+      keyVersion: 1,
+    });
+    await migration.oAuthCredential.create({
+      data: {
+        socialAccountId: fbAccount.id,
+        encryptedAccessToken: fbEnc.encryptedAccessToken,
+        iv: fbEnc.iv,
+        authTag: fbEnc.authTag,
+        keyVersion: 1,
+      },
+    });
+
+    const post = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Post teste isolamento transacional",
+        status: "APPROVED",
+      },
+    });
+
+    let hookExecuted = false;
+    onBeforePublishHook = async () => {
+      hookExecuted = true;
+      // Prova 1: A tentativa de publicação já foi commitada no banco no estado PROCESSING
+      const attemptDuringPublish = await migration.publicationAttempt.findFirst(
+        {
+          where: { postId: post.id, socialAccountId: fbAccount.id },
+        },
+      );
+      expect(attemptDuringPublish).not.toBeNull();
+      expect(attemptDuringPublish?.status).toBe("PROCESSING");
+
+      // Prova 2: Executar escrita e leitura concorrentes no banco sem nenhum bloqueio ou lock
+      const clientRecord = await migration.client.findFirst({
+        where: { id: "client-a" },
+      });
+      expect(clientRecord).not.toBeNull();
+
+      const testRecord = await migration.rateLimit.create({
+        data: {
+          id: randomUUID(),
+          key: "concurrent_write_during_meta_call_" + randomUUID(),
+          count: 1,
+          lastRequest: BigInt(Date.now()),
+        },
+      });
+      expect(testRecord).not.toBeNull();
+    };
+
+    const res = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+      cookie,
+      "POST",
+      {
+        socialAccountIds: [fbAccount.id],
+        idempotencyKey: "idem_no_long_tx_" + randomUUID(),
+      },
+    );
+
+    expect(hookExecuted).toBe(true);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.attempts[0].status).toBe("PUBLISHED");
+  });
+
+  it("valida o endpoint de mídia pública: identificador opaco, múltiplos downloads no TTL e 404 para inválido/expirado", async () => {
+    const testBytes = Buffer.from("imagem-binaria-de-teste-1234567890", "utf8");
+    const sha256 = createHash("sha256").update(testBytes).digest("hex");
+    const storageKey = `media/org-a/client-a/${randomUUID()}`;
+    await mockStorage.put(storageKey, testBytes);
+
+    // 1. Gera ticket opaco com TTL de 3600s
+    const ticketId = await createPublicMediaTicket(redis, {
+      organizationId: "org-a",
+      clientId: "client-a",
+      mediaId: randomUUID(),
+      storageKey,
+      mimeType: "image/jpeg",
+      byteSize: testBytes.length,
+      sha256,
+    });
+
+    // 2. Primeiro download pela Meta
+    const res1 = await fetch(`${apiBase}/api/public/media/${ticketId}`);
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get("content-type")).toBe("image/jpeg");
+    expect(res1.headers.get("cache-control")).toContain("max-age=3600");
+    const body1 = Buffer.from(await res1.arrayBuffer());
+    expect(body1).toEqual(testBytes);
+
+    // 3. Segundo download da mesma mídia (comprova que o ticket NÃO é consumido/deletado no primeiro acesso)
+    const res2 = await fetch(`${apiBase}/api/public/media/${ticketId}`);
+    expect(res2.status).toBe(200);
+    const body2 = Buffer.from(await res2.arrayBuffer());
+    expect(body2).toEqual(testBytes);
+
+    // 4. Ticket adulterado ou inválido retorna 404 sem vazar detalhes internos
+    const resTampered = await fetch(
+      `${apiBase}/api/public/media/invalid_tampered_ticket_12345`,
+    );
+    expect(resTampered.status).toBe(404);
+    const errTampered = await resTampered.json();
+    expect(errTampered.message).toBe("Mídia indisponível ou expirada.");
+
+    // 5. Ticket com formato 64 hex válido mas expirado/inexistente no Redis retorna 404
+    const nonExistentTicket = "f".repeat(64);
+    const resExpired = await fetch(
+      `${apiBase}/api/public/media/${nonExistentTicket}`,
+    );
+    expect(resExpired.status).toBe(404);
+    const errExpired = await resExpired.json();
+    expect(errExpired.message).toBe("Mídia indisponível ou expirada.");
   });
 });
