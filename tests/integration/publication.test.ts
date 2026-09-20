@@ -1901,4 +1901,156 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
       expect(cached).toBeNull();
     });
   });
+
+  describe("Controle de Acesso RBAC ao Endpoint de Publicação (/publish)", () => {
+    async function createTestAccount(name: string) {
+      const account = await migration.socialAccount.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          platform: "FACEBOOK_PAGE",
+          platformAccountId: `rbac_${name}_${randomUUID().slice(0, 8)}`,
+          name: `Conta FB ${name}`,
+          status: "ACTIVE",
+        },
+      });
+      const enc = cryptoHelper.encrypt("valid_token", {
+        organizationId: "org-a",
+        clientId: "client-a",
+        platformAccountId: account.platformAccountId,
+        keyVersion: 1,
+      });
+      await migration.oAuthCredential.create({
+        data: {
+          socialAccountId: account.id,
+          encryptedAccessToken: enc.encryptedAccessToken,
+          iv: enc.iv,
+          authTag: enc.authTag,
+          keyVersion: 1,
+        },
+      });
+      return account;
+    }
+
+    it("tentativa direta de EDITOR no endpoint retorna 403 Forbidden e libera chave Redis", async () => {
+      const editorCookie = await login("editor-a");
+      const account = await createTestAccount("editor_denied");
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Post para teste de RBAC com editor",
+          status: "APPROVED",
+        },
+      });
+
+      const idempotencyKey = "idem_rbac_editor_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        editorCookie,
+        "POST",
+        {
+          socialAccountIds: [account.id],
+          idempotencyKey,
+        },
+      );
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.message).toContain("Acesso não autorizado para o seu perfil");
+
+      // Chave Redis liberada
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+
+      // Nenhuma tentativa criada
+      const attempts = await migration.publicationAttempt.findMany({
+        where: { postId: post.id },
+      });
+      expect(attempts).toHaveLength(0);
+    });
+
+    it("tentativa direta de CLIENT_VIEWER no endpoint retorna 403 Forbidden e libera chave Redis", async () => {
+      const viewerCookie = await login("viewer-a");
+      const account = await createTestAccount("viewer_denied");
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Post para teste de RBAC com viewer",
+          status: "APPROVED",
+        },
+      });
+
+      const idempotencyKey = "idem_rbac_viewer_" + randomUUID();
+      const res = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        viewerCookie,
+        "POST",
+        {
+          socialAccountIds: [account.id],
+          idempotencyKey,
+        },
+      );
+
+      expect(res.status).toBe(403);
+      const body = await res.json();
+      expect(body.message).toContain("Acesso não autorizado para o seu perfil");
+
+      const redisKey = `meta:publish:idempotency:org-a:client-a:${post.id}:${idempotencyKey}`;
+      const cached = await redis.get(redisKey);
+      expect(cached).toBeNull();
+    });
+
+    it("usuários autorizados (APPROVER, ADMIN, OWNER) são autorizados no endpoint", async () => {
+      const account = await createTestAccount("authorized_roles");
+      const post = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Post para teste de RBAC com perfis autorizados",
+          status: "APPROVED",
+        },
+      });
+
+      // Testar com APPROVER
+      const approverCookie = await login("approver-a");
+      const idemApprover = "idem_rbac_approver_" + randomUUID();
+      const resApprover = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${post.id}/publish`,
+        approverCookie,
+        "POST",
+        {
+          socialAccountIds: [account.id],
+          idempotencyKey: idemApprover,
+        },
+      );
+      // Não deve retornar 403
+      expect(resApprover.status).not.toBe(403);
+
+      // Testar com OWNER em outro post
+      const postOwner = await migration.post.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          caption: "Post para teste de RBAC com owner",
+          status: "APPROVED",
+        },
+      });
+      const ownerCookie = await login("owner-a");
+      const idemOwner = "idem_rbac_owner_" + randomUUID();
+      const resOwner = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${postOwner.id}/publish`,
+        ownerCookie,
+        "POST",
+        {
+          socialAccountIds: [account.id],
+          idempotencyKey: idemOwner,
+        },
+      );
+      // Não deve retornar 403
+      expect(resOwner.status).not.toBe(403);
+    });
+  });
 });

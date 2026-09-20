@@ -142,6 +142,7 @@ export function ContentManager({
   }, [batchBase, showBatches, revision]);
 
   const handleOpenPublishModal = async (post: Post) => {
+    if (!canApprove || post.status !== "APPROVED") return;
     setPublishingPost(post);
     setPublishResult(null);
     setPublishModalError("");
@@ -199,7 +200,8 @@ export function ContentManager({
   };
 
   const handleConfirmPublish = async () => {
-    if (!publishingPost) return;
+    if (!canApprove) return;
+    if (!publishingPost || publishingPost.status !== "APPROVED") return;
     if (selectedAccountIds.length === 0) {
       setPublishModalError(
         "Selecione ao menos uma conta social para publicação.",
@@ -930,7 +932,7 @@ export function ContentManager({
                   )}
 
                   {/* Aprovado -> Publicar Agora */}
-                  {post.status === "APPROVED" && (canApprove || canWrite) && (
+                  {post.status === "APPROVED" && canApprove && (
                     <button
                       type="button"
                       className="publish-btn"

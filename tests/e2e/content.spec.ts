@@ -279,3 +279,252 @@ test("approver logs in and approves a post, while viewer has read-only access", 
   await expect(postCardViewer).toBeVisible();
   await expect(postCardViewer.locator("span.badge-approved")).toBeVisible();
 });
+
+test("publish button visibility strictly requires APPROVED status and canApprove role (OWNER, ADMIN, APPROVER), never EDITOR or CLIENT_VIEWER, and never non-APPROVED statuses", async ({
+  page,
+}) => {
+  test.setTimeout(60000);
+  const runId = Date.now();
+  const approvedTitle = `Post Approved ${runId}`;
+  const draftTitle = `Post Draft ${runId}`;
+  const inReviewTitle = `Post In Review ${runId}`;
+  const rejectedTitle = `Post Rejected ${runId}`;
+
+  // Criar posts cobrindo todos os status
+  const approvedPost = await db.post.create({
+    data: {
+      organizationId: "org-a",
+      clientId: "client-a",
+      title: approvedTitle,
+      caption: "Legenda de post aprovado para teste de publicação.",
+      status: "APPROVED",
+    },
+  });
+
+  await db.post.createMany({
+    data: [
+      {
+        organizationId: "org-a",
+        clientId: "client-a",
+        title: draftTitle,
+        caption: "Legenda de rascunho.",
+        status: "DRAFT",
+      },
+      {
+        organizationId: "org-a",
+        clientId: "client-a",
+        title: inReviewTitle,
+        caption: "Legenda em revisão.",
+        status: "IN_REVIEW",
+      },
+      {
+        organizationId: "org-a",
+        clientId: "client-a",
+        title: rejectedTitle,
+        caption: "Legenda rejeitada.",
+        rejectionReason: "Precisa de ajustes.",
+        status: "REJECTED",
+      },
+    ],
+  });
+
+  async function loginAndNavigate(email: string) {
+    await page.goto("/");
+    const logoutBtn = page.getByRole("button", { name: "Sair" });
+    if (await logoutBtn.isVisible().catch(() => false)) {
+      await logoutBtn.click();
+    }
+    await expect(page.getByLabel("E-mail")).toBeVisible();
+    await page.getByLabel("E-mail").fill(email);
+    await page
+      .getByLabel("Senha", { exact: true })
+      .fill(process.env.DEV_SEED_PASSWORD!);
+    await page.getByRole("button", { name: "Entrar", exact: true }).click();
+    await expect(
+      page.getByRole("heading", { name: "Clientes", exact: true }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+    const region = page.getByRole("region", {
+      name: "Conteúdo e Publicações",
+    });
+    await expect(region).toBeVisible();
+    return region;
+  }
+
+  // 1. OWNER: vê o botão no post APPROVED, mas NUNCA em DRAFT, IN_REVIEW ou REJECTED
+  {
+    const region = await loginAndNavigate("owner-a@socialflow.test");
+    const approvedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: approvedTitle, exact: true }),
+    });
+    await expect(
+      approvedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toBeVisible();
+
+    const draftCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: draftTitle, exact: true }),
+    });
+    await expect(
+      draftCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const inReviewCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: inReviewTitle, exact: true }),
+    });
+    await expect(
+      inReviewCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const rejectedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: rejectedTitle, exact: true }),
+    });
+    await expect(
+      rejectedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+  }
+
+  // 2. ADMIN: vê o botão no post APPROVED, mas NUNCA em DRAFT, IN_REVIEW ou REJECTED
+  {
+    const region = await loginAndNavigate("admin-a@socialflow.test");
+    const approvedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: approvedTitle, exact: true }),
+    });
+    await expect(
+      approvedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toBeVisible();
+
+    const draftCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: draftTitle, exact: true }),
+    });
+    await expect(
+      draftCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const inReviewCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: inReviewTitle, exact: true }),
+    });
+    await expect(
+      inReviewCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const rejectedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: rejectedTitle, exact: true }),
+    });
+    await expect(
+      rejectedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+  }
+
+  // 3. APPROVER: vê o botão no post APPROVED, mas NUNCA em DRAFT, IN_REVIEW ou REJECTED
+  {
+    const region = await loginAndNavigate("approver-a@socialflow.test");
+    const approvedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: approvedTitle, exact: true }),
+    });
+    await expect(
+      approvedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toBeVisible();
+
+    const draftCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: draftTitle, exact: true }),
+    });
+    await expect(
+      draftCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const inReviewCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: inReviewTitle, exact: true }),
+    });
+    await expect(
+      inReviewCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const rejectedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: rejectedTitle, exact: true }),
+    });
+    await expect(
+      rejectedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+  }
+
+  // 4. EDITOR: NÃO vê o botão em post APPROVED (mesmo com canWrite=true), nem em nenhum outro
+  {
+    const region = await loginAndNavigate("editor-a@socialflow.test");
+    // Confirma que canWrite está preservado para criação/edição
+    await expect(
+      region.getByRole("button", { name: "Novo post" }),
+    ).toBeVisible();
+
+    const approvedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: approvedTitle, exact: true }),
+    });
+    await expect(
+      approvedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const draftCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: draftTitle, exact: true }),
+    });
+    await expect(
+      draftCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const inReviewCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: inReviewTitle, exact: true }),
+    });
+    await expect(
+      inReviewCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const rejectedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: rejectedTitle, exact: true }),
+    });
+    await expect(
+      rejectedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    // Confirma que tentativa direta de EDITOR no endpoint continua retornando 403
+    const directRes = await page.request.post(
+      `/api/organizations/org-a/clients/client-a/posts/${approvedPost.id}/publish`,
+      {
+        data: {
+          socialAccountIds: ["00000000-0000-0000-0000-000000000000"],
+          idempotencyKey: `e2e_editor_forbidden_${runId}`,
+        },
+      },
+    );
+    expect(directRes.status()).toBe(403);
+  }
+
+  // 5. CLIENT_VIEWER: NÃO vê o botão em post APPROVED nem em nenhum outro
+  {
+    const region = await loginAndNavigate("viewer-a@socialflow.test");
+    const approvedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: approvedTitle, exact: true }),
+    });
+    await expect(
+      approvedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const draftCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: draftTitle, exact: true }),
+    });
+    await expect(
+      draftCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const inReviewCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: inReviewTitle, exact: true }),
+    });
+    await expect(
+      inReviewCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+
+    const rejectedCard = region.locator("article.post-card").filter({
+      has: page.getByRole("heading", { name: rejectedTitle, exact: true }),
+    });
+    await expect(
+      rejectedCard.getByRole("button", { name: "Publicar agora…" }),
+    ).toHaveCount(0);
+  }
+});
