@@ -21,6 +21,10 @@ import {
 
 const db = createDatabase(process.env.DATABASE_URL!);
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
+const migrationClient = migration as unknown as Parameters<
+  typeof processScheduleJob
+>[1];
+
 const TEST_KEY_32 = Buffer.from("0123456789abcdef0123456789abcdef", "utf8");
 const cryptoHelper = createCredentialCrypto(TEST_KEY_32);
 
@@ -662,7 +666,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -730,7 +734,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1, // versão antiga
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -786,7 +790,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -832,7 +836,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -902,7 +906,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
               version: 1,
             },
           },
-          migration as any,
+          migrationClient,
           redis,
           appConfig,
           {
@@ -920,7 +924,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
               version: 1,
             },
           },
-          migration as any,
+          migrationClient,
           redis,
           appConfig,
           {
@@ -943,6 +947,631 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         where: { id: sched.id },
       });
       expect(finalSched?.status).toBe("PUBLISHED");
+    });
+
+    it("dois workers concorrentes com barreira determinística pré-aquisição: exatamente um adquire via CAS e perdedor não altera estado final", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:cas_barrier_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let w1ReachedBarrier = false;
+      let w2ReachedBarrier = false;
+      let releaseW1!: () => void;
+      let releaseW2!: () => void;
+      const w1ProceedPromise = new Promise<void>((r) => {
+        releaseW1 = r;
+      });
+      const w2ProceedPromise = new Promise<void>((r) => {
+        releaseW2 = r;
+      });
+
+      let metaFeedCalls = 0;
+      const trackedPublisher = new MetaPublisherAdapter({
+        graphBaseUrl: metaMock.url,
+        pollDelayMs: 10,
+        pollMaxAttempts: 5,
+        fetchFn: async (url, init) => {
+          if (
+            String(url).includes("/feed") ||
+            String(url).includes("/photos")
+          ) {
+            metaFeedCalls++;
+          }
+          return fetch(url, init);
+        },
+      });
+
+      const worker1Promise = processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: trackedPublisher,
+          onBeforeAcquisition: async () => {
+            w1ReachedBarrier = true;
+            while (!w2ReachedBarrier) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            await w1ProceedPromise;
+          },
+        },
+      );
+
+      const worker2Promise = processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: trackedPublisher,
+          onBeforeAcquisition: async () => {
+            w2ReachedBarrier = true;
+            while (!w1ReachedBarrier) {
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            await w2ProceedPromise;
+          },
+        },
+      );
+
+      // Espera ambos os workers atingirem a barreira simultaneamente
+      while (!w1ReachedBarrier || !w2ReachedBarrier) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      // Libera ambos os workers
+      releaseW1();
+      releaseW2();
+
+      const [res1, res2] = await Promise.all([worker1Promise, worker2Promise]);
+
+      const statuses = [res1.status, res2.status].sort();
+      expect(statuses).toEqual(["published", "skipped_not_acquired"]);
+
+      // Exatamente uma chamada remota à Meta
+      expect(metaFeedCalls).toBe(1);
+
+      // Exatamente um PublicationAttempt criado
+      const attempts = await migration.publicationAttempt.findMany({
+        where: {
+          postId: approvedPost.id,
+          socialAccountId: facebookAccount.id,
+        },
+      });
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]?.status).toBe("PUBLISHED");
+
+      // Apenas um schedule.started registrado, pelo ator técnico do sistema
+      const startedLogs = await migration.auditLog.findMany({
+        where: {
+          entityId: sched.id,
+          action: "schedule.started",
+        },
+      });
+      expect(startedLogs).toHaveLength(1);
+      expect(startedLogs[0]?.actorUserId).toBe("system:scheduler");
+
+      // Perdedor não alterou o estado final PUBLISHED
+      const finalSched = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(finalSched?.status).toBe("PUBLISHED");
+    });
+
+    it("cancelamento vence imediatamente antes da aquisição: worker é impedido e não publica", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:cancel_race_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let reachedAcquisition = false;
+      let releaseWorker!: () => void;
+      const workerProceed = new Promise<void>((r) => {
+        releaseWorker = r;
+      });
+
+      const workerPromise = processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: mockPublisher,
+          onBeforeAcquisition: async () => {
+            reachedAcquisition = true;
+            await workerProceed;
+          },
+        },
+      );
+
+      while (!reachedAcquisition) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // Executa cancelamento concorrente
+      const adminCookie = await login("admin-a");
+      const cancelRes = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${approvedPost.id}/schedules/${sched.id}/cancel`,
+        adminCookie,
+        "POST",
+        { reason: "Cancelamento prioritário" },
+      );
+      expect(cancelRes.status).toBe(200);
+
+      // Libera worker para tentar CAS
+      releaseWorker();
+      const workerResult = await workerPromise;
+
+      expect(["skipped_cancelled", "skipped_not_acquired"]).toContain(
+        workerResult.status,
+      );
+
+      const finalSched = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(finalSched?.status).toBe("CANCELLED");
+
+      const attempts = await migration.publicationAttempt.findMany({
+        where: { postId: approvedPost.id },
+      });
+      expect(attempts).toHaveLength(0);
+    });
+
+    it("worker vence imediatamente antes do cancelamento: cancelamento retorna 409", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:worker_race_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let reachedPublish = false;
+      let releaseWorker!: () => void;
+      const workerProceed = new Promise<void>((r) => {
+        releaseWorker = r;
+      });
+
+      const workerPromise = processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: mockPublisher,
+          onBeforePublish: async () => {
+            reachedPublish = true;
+            await workerProceed;
+          },
+        },
+      );
+
+      while (!reachedPublish) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // Tenta cancelar enquanto worker está em PROCESSING
+      const adminCookie = await login("admin-a");
+      const cancelRes = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${approvedPost.id}/schedules/${sched.id}/cancel`,
+        adminCookie,
+        "POST",
+        { reason: "Tentativa concorrente" },
+      );
+      expect(cancelRes.status).toBe(409);
+      const cancelBody = await cancelRes.json();
+      expect(cancelBody.message).toContain("já está em processamento");
+
+      // Libera worker para finalizar publicação
+      releaseWorker();
+      const workerResult = await workerPromise;
+      expect(workerResult.status).toBe("published");
+
+      const finalSched = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(finalSched?.status).toBe("PUBLISHED");
+    });
+
+    it("reprogramação vence antes da aquisição da versão antiga: versão antiga é ignorada e não sobrescreve nova versão", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "ENQUEUED",
+          jobId: `sched:resched_race_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      let reachedAcquisition = false;
+      let releaseWorker!: () => void;
+      const workerProceed = new Promise<void>((r) => {
+        releaseWorker = r;
+      });
+
+      const workerPromise = processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: mockPublisher,
+          onBeforeAcquisition: async () => {
+            reachedAcquisition = true;
+            await workerProceed;
+          },
+        },
+      );
+
+      while (!reachedAcquisition) {
+        await new Promise((r) => setTimeout(r, 10));
+      }
+
+      // Reprograma via endpoint autenticado para nova versão v2
+      const adminCookie = await login("admin-a");
+      const reschedRes = await request(
+        `/api/organizations/org-a/clients/client-a/posts/${approvedPost.id}/schedules/${sched.id}/reschedule`,
+        adminCookie,
+        "POST",
+        {
+          scheduledTimezone: "America/Cuiaba",
+          scheduledLocalTime: "2030-01-01T15:00",
+          confirmed: true,
+        },
+      );
+      expect(reschedRes.status).toBe(200);
+      const reschedBody = await reschedRes.json();
+      expect(reschedBody.version).toBe(2);
+
+      // Libera worker antigo (v1)
+      releaseWorker();
+      const workerResult = await workerPromise;
+
+      expect(["skipped_obsolete_version", "skipped_not_acquired"]).toContain(
+        workerResult.status,
+      );
+
+      const finalSched = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(finalSched?.version).toBe(2);
+      expect(finalSched?.status).toBe("ENQUEUED");
+
+      const attempts = await migration.publicationAttempt.findMany({
+        where: { postId: approvedPost.id },
+      });
+      expect(attempts).toHaveLength(0);
+    });
+
+    it("retry antigo não sobrescreve estado terminal protegido", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const sched = await migration.publicationSchedule.create({
+        data: {
+          organizationId: "org-a",
+          clientId: "client-a",
+          postId: approvedPost.id,
+          mediaAssetId: media.id,
+          targetAccountIds: [facebookAccount.id],
+          scheduledLocalTime: "2026-09-20T10:00",
+          scheduledTimezone: "America/Cuiaba",
+          scheduledForUtc: new Date(),
+          status: "PUBLISHED",
+          jobId: `sched:terminal_prot_${randomUUID()}:v1`,
+          createdById: "admin-a",
+          version: 1,
+        },
+      });
+
+      const res = await processScheduleJob(
+        {
+          id: sched.jobId,
+          data: {
+            scheduleId: sched.id,
+            postId: approvedPost.id,
+            organizationId: "org-a",
+            clientId: "client-a",
+            version: 1,
+          },
+        },
+        migrationClient,
+        redis,
+        appConfig,
+        {
+          publisher: mockPublisher,
+        },
+      );
+
+      expect(res.status).toBe("skipped_already_terminal");
+
+      const check = await migration.publicationSchedule.findUnique({
+        where: { id: sched.id },
+      });
+      expect(check?.status).toBe("PUBLISHED");
+    });
+
+    it("usuário criador desativado antes da execução: worker conclui com sucesso via ator técnico do sistema", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      await migration.user.update({
+        where: { id: "admin-a" },
+        data: { active: false },
+      });
+
+      try {
+        const sched = await migration.publicationSchedule.create({
+          data: {
+            organizationId: "org-a",
+            clientId: "client-a",
+            postId: approvedPost.id,
+            mediaAssetId: media.id,
+            targetAccountIds: [facebookAccount.id],
+            scheduledLocalTime: "2026-09-20T10:00",
+            scheduledTimezone: "America/Cuiaba",
+            scheduledForUtc: new Date(),
+            status: "ENQUEUED",
+            jobId: `sched:inactive_creator_${randomUUID()}:v1`,
+            createdById: "admin-a",
+            version: 1,
+          },
+        });
+
+        const res = await processScheduleJob(
+          {
+            id: sched.jobId,
+            data: {
+              scheduleId: sched.id,
+              postId: approvedPost.id,
+              organizationId: "org-a",
+              clientId: "client-a",
+              version: 1,
+            },
+          },
+          migrationClient,
+          redis,
+          appConfig,
+          {
+            publisher: mockPublisher,
+          },
+        );
+
+        expect(res.status).toBe("published");
+
+        const updatedSched = await migration.publicationSchedule.findUnique({
+          where: { id: sched.id },
+        });
+        expect(updatedSched?.status).toBe("PUBLISHED");
+        expect(updatedSched?.createdById).toBe("admin-a"); // Autor original preservado
+
+        const attempt = await migration.publicationAttempt.findFirst({
+          where: {
+            postId: approvedPost.id,
+            socialAccountId: facebookAccount.id,
+          },
+        });
+        expect(attempt?.status).toBe("PUBLISHED");
+
+        const startedLog = await migration.auditLog.findFirst({
+          where: { entityId: sched.id, action: "schedule.started" },
+        });
+        expect(startedLog?.actorUserId).toBe("system:scheduler"); // Identidade técnica registrada
+      } finally {
+        await migration.user.update({
+          where: { id: "admin-a" },
+          data: { active: true },
+        });
+      }
+    });
+
+    it("associação do criador removida antes da execução: worker conclui com sucesso", async () => {
+      const { facebookAccount, approvedPost, media } =
+        await setupAccountsAndPost();
+
+      const savedMemberships = await migration.membership.findMany({
+        where: { userId: "admin-a" },
+      });
+      await migration.membership.deleteMany({
+        where: { userId: "admin-a" },
+      });
+
+      try {
+        const sched = await migration.publicationSchedule.create({
+          data: {
+            organizationId: "org-a",
+            clientId: "client-a",
+            postId: approvedPost.id,
+            mediaAssetId: media.id,
+            targetAccountIds: [facebookAccount.id],
+            scheduledLocalTime: "2026-09-20T10:00",
+            scheduledTimezone: "America/Cuiaba",
+            scheduledForUtc: new Date(),
+            status: "ENQUEUED",
+            jobId: `sched:no_membership_${randomUUID()}:v1`,
+            createdById: "admin-a",
+            version: 1,
+          },
+        });
+
+        const res = await processScheduleJob(
+          {
+            id: sched.jobId,
+            data: {
+              scheduleId: sched.id,
+              postId: approvedPost.id,
+              organizationId: "org-a",
+              clientId: "client-a",
+              version: 1,
+            },
+          },
+          migrationClient,
+          redis,
+          appConfig,
+          {
+            publisher: mockPublisher,
+          },
+        );
+
+        expect(res.status).toBe("published");
+
+        const updatedSched = await migration.publicationSchedule.findUnique({
+          where: { id: sched.id },
+        });
+        expect(updatedSched?.status).toBe("PUBLISHED");
+      } finally {
+        for (const m of savedMemberships) {
+          await migration.membership.create({
+            data: {
+              id: m.id,
+              userId: m.userId,
+              organizationId: m.organizationId,
+              clientId: m.clientId,
+              role: m.role,
+              active: m.active,
+            },
+          });
+        }
+      }
+    });
+
+    it("isolamento estrito entre tenants: identidade técnica do Tenant A não acessa registros do Tenant B", async () => {
+      const { asSchedulerActor } =
+        await import("../../packages/db/src/index.js");
+
+      await asSchedulerActor(
+        db,
+        { organizationId: "org-a", clientId: "client-a" },
+        async (tx) => {
+          const crossPosts = await tx.post.findMany({
+            where: { organizationId: "org-b" },
+          });
+          expect(crossPosts).toHaveLength(0); // RLS garante isolamento multitenant
+
+          const crossSchedules = await tx.publicationSchedule.findMany({
+            where: { organizationId: "org-b" },
+          });
+          expect(crossSchedules).toHaveLength(0);
+        },
+      );
+    });
+
+    it("ciclo de vida explícito da fila BullMQ sem singleton global", async () => {
+      const { createScheduleQueue, closeScheduleQueue } =
+        (await import("../../apps/api/dist/scheduler-queue.js")) as unknown as typeof import("../../apps/api/src/scheduler-queue.js");
+
+      const customRedis = new Redis(process.env.REDIS_URL!, {
+        maxRetriesPerRequest: 1,
+      });
+
+      const q1 = createScheduleQueue(customRedis);
+      const q2 = createScheduleQueue(customRedis);
+
+      expect(q1).not.toBe(q2); // Instâncias isoladas sem singleton global
+
+      await closeScheduleQueue(q1);
+      await closeScheduleQueue(q2);
+      customRedis.disconnect();
     });
 
     it("reentrega do mesmo job (replay) é segura e ignora destinos já publicados", async () => {
@@ -978,7 +1607,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -998,7 +1627,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -1072,7 +1701,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -1146,7 +1775,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
             version: 1,
           },
         },
-        migration as any,
+        migrationClient,
         redis,
         appConfig,
         {
@@ -1209,7 +1838,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         },
       });
 
-      const res = await runStartupReconciliation(migration as any, redis);
+      const res = await runStartupReconciliation(migrationClient, redis);
       expect(res.recoveredJobs).toBeGreaterThanOrEqual(1);
 
       const updated = await migration.publicationSchedule.findUnique({
@@ -1240,7 +1869,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         },
       });
 
-      const res = await runStartupReconciliation(migration as any, redis);
+      const res = await runStartupReconciliation(migrationClient, redis);
       expect(res.flaggedOrphan).toBeGreaterThanOrEqual(1);
 
       const updated = await migration.publicationSchedule.findUnique({

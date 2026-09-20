@@ -38,4 +38,38 @@ export function asActor<T>(
   });
 }
 
+export interface SchedulerActorScope {
+  organizationId: string;
+  clientId: string;
+}
+
+// Scoped system execution actor: strictly isolated to organizationId and clientId, independent of creator user status.
+export function asSchedulerActor<T>(
+  db: PrismaClient,
+  scope: SchedulerActorScope,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT set_config('app.user_id', 'system:scheduler', true),
+             set_config('app.scheduler_org_id', ${scope.organizationId}, true),
+             set_config('app.scheduler_client_id', ${scope.clientId}, true)
+    `;
+    const client = await tx.client.findFirst({
+      where: {
+        id: scope.clientId,
+        organizationId: scope.organizationId,
+        active: true,
+      },
+      select: { id: true },
+    });
+    if (!client) {
+      throw new Error(
+        "Invalid or inactive tenant scope for scheduler execution",
+      );
+    }
+    return action(tx);
+  });
+}
+
 export * from "./crypto.js";

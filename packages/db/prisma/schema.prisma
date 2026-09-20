@@ -383,6 +383,8 @@ model PublicationSchedule {
   jobId              String
   createdById        String
   createdBy          User                      @relation(fields: [createdById], references: [id])
+  executionToken     String?
+  leaseExpiresAt     DateTime?
   cancellationReason String?
   failureReason      String?
   createdAt          DateTime                  @default(now())
@@ -394,5 +396,6 @@ model PublicationSchedule {
   @@index([organizationId, clientId, status, scheduledForUtc])
   @@index([postId, status])
   @@index([jobId])
+  @@index([status, leaseExpiresAt])
 }
 

@@ -1,11 +1,17 @@
 import { Worker, type Job } from "bullmq";
 import type { Redis } from "ioredis";
-import { asActor, type PrismaClient, type Prisma } from "@socialflow/db";
+import { randomUUID } from "node:crypto";
+import {
+  asSchedulerActor,
+  type PrismaClient,
+  type Prisma,
+} from "@socialflow/db";
 import type { Config } from "@socialflow/config";
 import {
   SCHEDULE_QUEUE_NAME,
   type ScheduleJobData,
-  getScheduleQueue,
+  createScheduleQueue,
+  closeScheduleQueue,
 } from "@socialflow/api/scheduler-queue.js";
 import {
   preparePublication,
@@ -15,10 +21,14 @@ import {
 import { MetaPublisherAdapter } from "@socialflow/api/meta-publisher.js";
 
 export const LATE_TOLERANCE_MS = 15 * 60 * 1000; // 15 minutos
+export const SCHEDULE_LEASE_MS = 5 * 60 * 1000; // 5 minutos de lease
 
 export interface SchedulerWorkerDependencies {
   publisher?: MetaPublisherAdapter;
   onBeforePublish?: () => Promise<void>;
+  onBeforeAcquisition?: () => Promise<void>;
+  onAfterAcquisition?: (acquired: boolean) => Promise<void>;
+  onBeforeStateUpdate?: () => Promise<void>;
   concurrency?: number;
 }
 
@@ -35,138 +45,179 @@ export async function runStartupReconciliation(
   let flaggedOrphan = 0;
 
   const now = new Date();
-  const queue = getScheduleQueue(redis);
+  const queue = createScheduleQueue(redis);
 
-  // 1. Agendamentos em SCHEDULED ou ENQUEUED
-  const pendingSchedules = await db.publicationSchedule.findMany({
-    where: {
-      status: { in: ["SCHEDULED", "ENQUEUED"] },
-    },
-  });
+  try {
+    // 1. Agendamentos em SCHEDULED ou ENQUEUED
+    const pendingSchedules = await db.publicationSchedule.findMany({
+      where: {
+        status: { in: ["SCHEDULED", "ENQUEUED"] },
+      },
+    });
 
-  for (const schedule of pendingSchedules) {
-    const delayMs = now.getTime() - schedule.scheduledForUtc.getTime();
+    for (const schedule of pendingSchedules) {
+      const delayMs = now.getTime() - schedule.scheduledForUtc.getTime();
 
-    // Política de atraso: atraso > 15 minutos vai para revisão manual sem publicar
-    if (delayMs > LATE_TOLERANCE_MS) {
-      await asActor(db, schedule.createdById, async (tx) => {
-        await tx.publicationSchedule.update({
-          where: { id: schedule.id },
-          data: {
-            status: "REQUIRES_RECONCILIATION",
-            failureReason:
-              "Atraso de execução superior a 15 minutos detectado na inicialização. Requer verificação manual.",
-          },
-        });
-        await tx.auditLog.create({
-          data: {
-            organizationId: schedule.organizationId,
-            actorUserId: schedule.createdById,
-            entityId: schedule.id,
-            action: "schedule.reconciliation_required",
-          },
-        });
-      });
-      flaggedLate++;
-      continue;
-    }
-
-    // Verifica se o job correspondente existe no BullMQ
-    try {
-      const job = await queue.getJob(schedule.jobId);
-      if (!job) {
-        // Recria job ausente no Redis
-        const remainingDelay = Math.max(
-          0,
-          schedule.scheduledForUtc.getTime() - Date.now(),
-        );
-        await queue.add(
-          "publish-scheduled-post",
+      // Política de atraso: atraso > 15 minutos vai para revisão manual sem publicar
+      if (delayMs > LATE_TOLERANCE_MS) {
+        await asSchedulerActor(
+          db,
           {
-            scheduleId: schedule.id,
-            version: schedule.version,
             organizationId: schedule.organizationId,
             clientId: schedule.clientId,
-            postId: schedule.postId,
           },
-          {
-            jobId: schedule.jobId,
-            delay: remainingDelay,
-            removeOnComplete: 100,
-            removeOnFail: 500,
-          },
-        );
-
-        if (schedule.status !== "ENQUEUED") {
-          await asActor(db, schedule.createdById, async (tx) => {
-            await tx.publicationSchedule.update({
-              where: { id: schedule.id },
-              data: { status: "ENQUEUED" },
-            });
-            await tx.auditLog.create({
-              data: {
+          async (tx) => {
+            const updated = await tx.publicationSchedule.updateMany({
+              where: {
+                id: schedule.id,
                 organizationId: schedule.organizationId,
-                actorUserId: schedule.createdById,
-                entityId: schedule.id,
-                action: "schedule.enqueued",
+                clientId: schedule.clientId,
+                status: { in: ["SCHEDULED", "ENQUEUED"] },
+              },
+              data: {
+                status: "REQUIRES_RECONCILIATION",
+                failureReason:
+                  "Atraso de execução superior a 15 minutos detectado na inicialização. Requer verificação manual.",
+                leaseExpiresAt: null,
               },
             });
-          });
-        }
-        recoveredJobs++;
+            if (updated.count === 1) {
+              await tx.auditLog.create({
+                data: {
+                  organizationId: schedule.organizationId,
+                  actorUserId: "system:scheduler",
+                  entityId: schedule.id,
+                  action: "schedule.reconciliation_required",
+                },
+              });
+              flaggedLate++;
+            }
+          },
+        );
+        continue;
       }
-    } catch (jobErr) {
-      console.error(
-        JSON.stringify({
-          event: "reconciliation_job_check_error",
-          scheduleId: schedule.id,
-          error: jobErr instanceof Error ? jobErr.message : String(jobErr),
-        }),
+
+      // Verifica se o job correspondente existe no BullMQ
+      try {
+        const job = await queue.getJob(schedule.jobId);
+        if (!job) {
+          // Recria job ausente no Redis
+          const remainingDelay = Math.max(
+            0,
+            schedule.scheduledForUtc.getTime() - Date.now(),
+          );
+          await queue.add(
+            "publish-scheduled-post",
+            {
+              scheduleId: schedule.id,
+              version: schedule.version,
+              organizationId: schedule.organizationId,
+              clientId: schedule.clientId,
+              postId: schedule.postId,
+            },
+            {
+              jobId: schedule.jobId,
+              delay: remainingDelay,
+              removeOnComplete: 100,
+              removeOnFail: 500,
+            },
+          );
+
+          if (schedule.status !== "ENQUEUED") {
+            await asSchedulerActor(
+              db,
+              {
+                organizationId: schedule.organizationId,
+                clientId: schedule.clientId,
+              },
+              async (tx) => {
+                await tx.publicationSchedule.updateMany({
+                  where: { id: schedule.id, status: "SCHEDULED" },
+                  data: { status: "ENQUEUED" },
+                });
+                await tx.auditLog.create({
+                  data: {
+                    organizationId: schedule.organizationId,
+                    actorUserId: "system:scheduler",
+                    entityId: schedule.id,
+                    action: "schedule.enqueued",
+                  },
+                });
+              },
+            );
+          }
+          recoveredJobs++;
+        }
+      } catch (jobErr) {
+        console.error(
+          JSON.stringify({
+            event: "reconciliation_job_check_error",
+            scheduleId: schedule.id,
+            error: jobErr instanceof Error ? jobErr.message : String(jobErr),
+          }),
+        );
+      }
+    }
+
+    // 2. Agendamentos presos em PROCESSING com lease expirada
+    const processingSchedules = await db.publicationSchedule.findMany({
+      where: { status: "PROCESSING" },
+      include: { publicationAttempts: true },
+    });
+
+    for (const schedule of processingSchedules) {
+      const activeAttempts = schedule.publicationAttempts.filter((a) =>
+        ["PROCESSING", "CONTAINER_CREATED"].includes(a.status),
       );
-    }
-  }
 
-  // 2. Agendamentos presos em PROCESSING com lease expirada
-  const processingSchedules = await db.publicationSchedule.findMany({
-    where: { status: "PROCESSING" },
-    include: { publicationAttempts: true },
-  });
+      const hasActiveAttemptLease = activeAttempts.some(
+        (a) => a.leaseExpiresAt && a.leaseExpiresAt > now,
+      );
 
-  for (const schedule of processingSchedules) {
-    const activeAttempts = schedule.publicationAttempts.filter((a) =>
-      ["PROCESSING", "CONTAINER_CREATED"].includes(a.status),
-    );
+      const hasActiveScheduleLease = Boolean(
+        schedule.leaseExpiresAt && schedule.leaseExpiresAt > now,
+      );
 
-    const hasActiveLease = activeAttempts.some(
-      (a) => a.leaseExpiresAt && a.leaseExpiresAt > now,
-    );
-
-    if (
-      !hasActiveLease &&
-      (activeAttempts.length > 0 ||
-        now.getTime() - schedule.updatedAt.getTime() > 5 * 60 * 1000)
-    ) {
-      // Lease expirada ou processo abandonado sem tentativas ativas. Envia para reconciliação manual
-      await asActor(db, schedule.createdById, async (tx) => {
-        await tx.publicationSchedule.update({
-          where: { id: schedule.id },
-          data: {
-            status: "REQUIRES_RECONCILIATION",
-            failureReason:
-              "Execução anterior abandonada com lease expirada. Requer reconciliação manual.",
-          },
-        });
-        await tx.auditLog.create({
-          data: {
+      if (
+        !hasActiveAttemptLease &&
+        !hasActiveScheduleLease &&
+        (activeAttempts.length > 0 ||
+          now.getTime() - schedule.updatedAt.getTime() > 5 * 60 * 1000)
+      ) {
+        // Lease expirada ou processo abandonado sem tentativas ativas. Envia para reconciliação manual
+        await asSchedulerActor(
+          db,
+          {
             organizationId: schedule.organizationId,
-            actorUserId: schedule.createdById,
-            entityId: schedule.id,
-            action: "schedule.reconciliation_required",
+            clientId: schedule.clientId,
           },
-        });
-      });
-      flaggedOrphan++;
+          async (tx) => {
+            const updated = await tx.publicationSchedule.updateMany({
+              where: { id: schedule.id, status: "PROCESSING" },
+              data: {
+                status: "REQUIRES_RECONCILIATION",
+                failureReason:
+                  "Execução anterior abandonada com lease expirada. Requer reconciliação manual.",
+                leaseExpiresAt: null,
+              },
+            });
+            if (updated.count === 1) {
+              await tx.auditLog.create({
+                data: {
+                  organizationId: schedule.organizationId,
+                  actorUserId: "system:scheduler",
+                  entityId: schedule.id,
+                  action: "schedule.reconciliation_required",
+                },
+              });
+              flaggedOrphan++;
+            }
+          },
+        );
+      }
     }
+  } finally {
+    await closeScheduleQueue(queue);
   }
 
   return { recoveredJobs, flaggedLate, flaggedOrphan };
@@ -190,74 +241,163 @@ export async function processScheduleJob(
 
   const { scheduleId, version, organizationId, clientId, postId } = job.data;
 
-  const schedule = await db.publicationSchedule.findFirst({
-    where: { id: scheduleId, organizationId, clientId, postId },
-  });
-
-  if (!schedule) {
-    return { status: "skipped_not_found" };
+  // Hook determinístico pré-aquisição (para testes de corrida e barreiras)
+  if (dependencies?.onBeforeAcquisition) {
+    await dependencies.onBeforeAcquisition();
   }
 
-  // 1. Verificação de versão obsoleta (ex: reprogramação recente)
-  if (schedule.version !== version) {
-    return { status: "skipped_obsolete_version" };
-  }
+  const executionToken = randomUUID();
+  const leaseExpiresAt = new Date(Date.now() + SCHEDULE_LEASE_MS);
 
-  // 2. Verificação de status
-  if (schedule.status === "CANCELLED") {
-    return { status: "skipped_cancelled" };
-  }
+  // Aquisição compare-and-set atômica via PostgreSQL sob identidade técnica restrita ao tenant
+  let acquisitionResult: {
+    acquired: boolean;
+    status: string;
+    schedule?: {
+      id: string;
+      organizationId: string;
+      clientId: string;
+      postId: string;
+      targetAccountIds: string[];
+      mediaAssetId: string | null;
+      version: number;
+    };
+  };
 
-  if (
-    [
-      "PUBLISHED",
-      "PARTIALLY_PUBLISHED",
-      "DEAD_LETTER",
-      "REQUIRES_RECONCILIATION",
-    ].includes(schedule.status)
-  ) {
-    return { status: "skipped_already_terminal" };
-  }
+  try {
+    acquisitionResult = await asSchedulerActor(
+      db,
+      { organizationId, clientId },
+      async (tx) => {
+        const schedule = await tx.publicationSchedule.findFirst({
+          where: { id: scheduleId, organizationId, clientId, postId },
+        });
 
-  // 3. Política de atraso de jobs: tolerância de até 15 minutos
-  const now = new Date();
-  const delayMs = now.getTime() - schedule.scheduledForUtc.getTime();
-  if (delayMs > LATE_TOLERANCE_MS) {
-    await asActor(db, schedule.createdById, async (tx) => {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "REQUIRES_RECONCILIATION",
-          failureReason: `Atraso de execução superior a 15 minutos (${Math.round(delayMs / 60000)} minutos de atraso). Requer revisão manual.`,
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.reconciliation_required",
-        },
-      });
-    });
-    return { status: "requires_reconciliation_late" };
-  }
+        if (!schedule) {
+          return { acquired: false, status: "skipped_not_found" };
+        }
 
-  // 4. Marcação atômica de PROCESSING no PostgreSQL
-  await asActor(db, schedule.createdById, async (tx) => {
-    await tx.publicationSchedule.update({
-      where: { id: schedule.id },
-      data: { status: "PROCESSING" },
-    });
-    await tx.auditLog.create({
-      data: {
-        organizationId: schedule.organizationId,
-        actorUserId: schedule.createdById,
-        entityId: schedule.id,
-        action: "schedule.started",
+        // 1. Verificação de versão obsoleta (ex: reprogramação recente)
+        if (schedule.version !== version) {
+          return { acquired: false, status: "skipped_obsolete_version" };
+        }
+
+        // 2. Verificação de status
+        if (schedule.status === "CANCELLED") {
+          return { acquired: false, status: "skipped_cancelled" };
+        }
+
+        if (
+          [
+            "PUBLISHED",
+            "PARTIALLY_PUBLISHED",
+            "DEAD_LETTER",
+            "REQUIRES_RECONCILIATION",
+          ].includes(schedule.status)
+        ) {
+          return { acquired: false, status: "skipped_already_terminal" };
+        }
+
+        // 3. Política de atraso de jobs: tolerância de até 15 minutos
+        const now = new Date();
+        const delayMs = now.getTime() - schedule.scheduledForUtc.getTime();
+        if (delayMs > LATE_TOLERANCE_MS) {
+          const lateUpdate = await tx.publicationSchedule.updateMany({
+            where: {
+              id: schedule.id,
+              organizationId,
+              clientId,
+              postId,
+              version,
+              status: { in: ["SCHEDULED", "ENQUEUED"] },
+            },
+            data: {
+              status: "REQUIRES_RECONCILIATION",
+              failureReason: `Atraso de execução superior a 15 minutos (${Math.round(delayMs / 60000)} minutos de atraso). Requer revisão manual.`,
+              leaseExpiresAt: null,
+            },
+          });
+          if (lateUpdate.count === 1) {
+            await tx.auditLog.create({
+              data: {
+                organizationId,
+                actorUserId: "system:scheduler",
+                entityId: schedule.id,
+                action: "schedule.reconciliation_required",
+              },
+            });
+            return { acquired: false, status: "requires_reconciliation_late" };
+          }
+          return { acquired: false, status: "skipped_not_acquired" };
+        }
+
+        // 4. Aquisição compare-and-set atômica no PostgreSQL
+        const acquired = await tx.publicationSchedule.updateMany({
+          where: {
+            id: schedule.id,
+            organizationId,
+            clientId,
+            postId,
+            version,
+            status: { in: ["SCHEDULED", "ENQUEUED"] },
+          },
+          data: {
+            status: "PROCESSING",
+            executionToken,
+            leaseExpiresAt,
+          },
+        });
+
+        if (acquired.count !== 1) {
+          return { acquired: false, status: "skipped_not_acquired" };
+        }
+
+        // Gravado SOMENTE para o worker vencedor da aquisição
+        await tx.auditLog.create({
+          data: {
+            organizationId,
+            actorUserId: "system:scheduler",
+            entityId: schedule.id,
+            action: "schedule.started",
+          },
+        });
+
+        return {
+          acquired: true,
+          status: "acquired",
+          schedule: {
+            id: schedule.id,
+            organizationId: schedule.organizationId,
+            clientId: schedule.clientId,
+            postId: schedule.postId,
+            targetAccountIds: schedule.targetAccountIds,
+            mediaAssetId: schedule.mediaAssetId,
+            version: schedule.version,
+          },
+        };
       },
-    });
-  });
+    );
+  } catch (acqErr) {
+    console.error(
+      JSON.stringify({
+        event: "scheduler_acquisition_error",
+        scheduleId,
+        error: acqErr instanceof Error ? acqErr.message : String(acqErr),
+      }),
+    );
+    return { status: "skipped_acquisition_error" };
+  }
+
+  // Hook determinístico pós-aquisição (informa ao teste se este worker adquiriu a execução)
+  if (dependencies?.onAfterAcquisition) {
+    await dependencies.onAfterAcquisition(acquisitionResult.acquired);
+  }
+
+  if (!acquisitionResult.acquired || !acquisitionResult.schedule) {
+    return { status: acquisitionResult.status };
+  }
+
+  const schedule = acquisitionResult.schedule;
 
   if (!config.CREDENTIAL_MASTER_KEY) {
     throw new Error("CREDENTIAL_MASTER_KEY não configurada no ambiente.");
@@ -266,74 +406,115 @@ export async function processScheduleJob(
   // 5. Preparação dos alvos utilizando o serviço comum
   let prepResult;
   try {
-    prepResult = await asActor(db, schedule.createdById, async (tx) => {
-      return preparePublication({
-        tx,
+    prepResult = await asSchedulerActor(
+      db,
+      {
         organizationId: schedule.organizationId,
         clientId: schedule.clientId,
-        postId: schedule.postId,
-        socialAccountIds: schedule.targetAccountIds,
-        mediaAssetId: schedule.mediaAssetId,
-        masterKey: config.CREDENTIAL_MASTER_KEY!,
-        scheduleId: schedule.id,
-        allowSkippingPublished: true,
-        auditCallback: (
-          txScope: Prisma.TransactionClient,
-          entityId: string,
-          action: string,
-        ) =>
-          txScope.auditLog.create({
-            data: {
-              organizationId: schedule.organizationId,
-              actorUserId: schedule.createdById,
-              entityId,
-              action,
-            },
-          }),
-      });
-    });
+      },
+      async (tx) => {
+        return preparePublication({
+          tx,
+          organizationId: schedule.organizationId,
+          clientId: schedule.clientId,
+          postId: schedule.postId,
+          socialAccountIds: schedule.targetAccountIds,
+          mediaAssetId: schedule.mediaAssetId,
+          masterKey: config.CREDENTIAL_MASTER_KEY!,
+          scheduleId: schedule.id,
+          allowSkippingPublished: true,
+          auditCallback: (
+            txScope: Prisma.TransactionClient,
+            entityId: string,
+            action: string,
+          ) =>
+            txScope.auditLog.create({
+              data: {
+                organizationId: schedule.organizationId,
+                actorUserId: "system:scheduler",
+                entityId,
+                action,
+              },
+            }),
+        });
+      },
+    );
   } catch (prepErr) {
     // Falha permanente na preparação (ex: post rejeitado, conta excluída)
-    await asActor(db, schedule.createdById, async (tx) => {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "FAILED",
-          failureReason:
-            prepErr instanceof Error ? prepErr.message : String(prepErr),
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.failed",
-        },
-      });
-    });
+    await asSchedulerActor(
+      db,
+      {
+        organizationId: schedule.organizationId,
+        clientId: schedule.clientId,
+      },
+      async (tx) => {
+        const updated = await tx.publicationSchedule.updateMany({
+          where: {
+            id: schedule.id,
+            organizationId: schedule.organizationId,
+            clientId: schedule.clientId,
+            version,
+            executionToken,
+            status: "PROCESSING",
+          },
+          data: {
+            status: "FAILED",
+            failureReason:
+              prepErr instanceof Error ? prepErr.message : String(prepErr),
+            leaseExpiresAt: null,
+          },
+        });
+        if (updated.count === 1) {
+          await tx.auditLog.create({
+            data: {
+              organizationId: schedule.organizationId,
+              actorUserId: "system:scheduler",
+              entityId: schedule.id,
+              action: "schedule.failed",
+            },
+          });
+        }
+      },
+    );
     return { status: "failed_preparation" };
   }
 
   if ("uncertainAccount" in prepResult && prepResult.uncertainAccount) {
-    await asActor(db, schedule.createdById, async (tx) => {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "REQUIRES_RECONCILIATION",
-          failureReason:
-            "Conta com resultado remoto incerto anterior aguardando reconciliação manual.",
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.reconciliation_required",
-        },
-      });
-    });
+    await asSchedulerActor(
+      db,
+      {
+        organizationId: schedule.organizationId,
+        clientId: schedule.clientId,
+      },
+      async (tx) => {
+        const updated = await tx.publicationSchedule.updateMany({
+          where: {
+            id: schedule.id,
+            organizationId: schedule.organizationId,
+            clientId: schedule.clientId,
+            version,
+            executionToken,
+            status: "PROCESSING",
+          },
+          data: {
+            status: "REQUIRES_RECONCILIATION",
+            failureReason:
+              "Conta com resultado remoto incerto anterior aguardando reconciliação manual.",
+            leaseExpiresAt: null,
+          },
+        });
+        if (updated.count === 1) {
+          await tx.auditLog.create({
+            data: {
+              organizationId: schedule.organizationId,
+              actorUserId: "system:scheduler",
+              entityId: schedule.id,
+              action: "schedule.reconciliation_required",
+            },
+          });
+        }
+      },
+    );
     return { status: "requires_reconciliation_uncertain" };
   }
 
@@ -342,7 +523,14 @@ export async function processScheduleJob(
   try {
     execResult = await executePublication({
       txRunner: <T>(fn: (tx: Prisma.TransactionClient) => Promise<T>) =>
-        asActor(db, schedule.createdById, fn),
+        asSchedulerActor(
+          db,
+          {
+            organizationId: schedule.organizationId,
+            clientId: schedule.clientId,
+          },
+          fn,
+        ),
       auditCallback: (
         txScope: Prisma.TransactionClient,
         entityId: string,
@@ -351,7 +539,7 @@ export async function processScheduleJob(
         txScope.auditLog.create({
           data: {
             organizationId: schedule.organizationId,
-            actorUserId: schedule.createdById,
+            actorUserId: "system:scheduler",
             entityId,
             action,
           },
@@ -372,107 +560,132 @@ export async function processScheduleJob(
       throw execErr; // Permite retry BullMQ com backoff exponencial
     }
 
-    await asActor(db, schedule.createdById, async (tx) => {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "DEAD_LETTER",
-          failureReason:
-            execErr instanceof Error ? execErr.message : String(execErr),
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.dead_letter",
-        },
-      });
-    });
+    await asSchedulerActor(
+      db,
+      {
+        organizationId: schedule.organizationId,
+        clientId: schedule.clientId,
+      },
+      async (tx) => {
+        const updated = await tx.publicationSchedule.updateMany({
+          where: {
+            id: schedule.id,
+            organizationId: schedule.organizationId,
+            clientId: schedule.clientId,
+            version,
+            executionToken,
+            status: "PROCESSING",
+          },
+          data: {
+            status: "DEAD_LETTER",
+            failureReason:
+              execErr instanceof Error ? execErr.message : String(execErr),
+            leaseExpiresAt: null,
+          },
+        });
+        if (updated.count === 1) {
+          await tx.auditLog.create({
+            data: {
+              organizationId: schedule.organizationId,
+              actorUserId: "system:scheduler",
+              entityId: schedule.id,
+              action: "schedule.dead_letter",
+            },
+          });
+        }
+      },
+    );
     return { status: "dead_letter" };
   }
 
-  // 7. Avaliação e transição de estado final
-  await asActor(db, schedule.createdById, async (tx) => {
-    if (execResult.allSuccess) {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: { status: "PUBLISHED", failureReason: null },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.published",
-        },
-      });
-    } else if (execResult.hasSuccess) {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "PARTIALLY_PUBLISHED",
-          failureReason:
-            "Sucesso parcial: ao menos um destino foi publicado e outros falharam.",
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.partially_published",
-        },
-      });
-    } else if (execResult.hasUncertain) {
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "REQUIRES_RECONCILIATION",
-          failureReason:
-            "Resultado remoto incerto em uma ou mais contas. Requer revisão manual.",
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.reconciliation_required",
-        },
-      });
-    } else {
-      // Todas as tentativas falharam
-      const anyTransient = execResult.attempts.some(
-        (a: { errorMessage?: string | null; errorCode?: string | null }) =>
-          isTransientError(new Error(a.errorMessage || a.errorCode || "")),
-      );
+  // Hook determinístico pré-atualização de estado final
+  if (dependencies?.onBeforeStateUpdate) {
+    await dependencies.onBeforeStateUpdate();
+  }
 
-      const attemptsMade = job.attemptsMade ?? 0;
-      const maxAttempts = job.opts?.attempts ?? 4;
-      if (anyTransient && attemptsMade < maxAttempts - 1) {
-        throw new Error("Falha transitória na publicação agendada.");
-      }
+  // 7. Avaliação e transição de estado final exigindo a identidade de execução (executionToken)
+  let terminalStatus:
+    | "PUBLISHED"
+    | "PARTIALLY_PUBLISHED"
+    | "REQUIRES_RECONCILIATION"
+    | "DEAD_LETTER";
+  let terminalReason: string | null = null;
+  let terminalAuditAction: string;
 
-      await tx.publicationSchedule.update({
-        where: { id: schedule.id },
-        data: {
-          status: "DEAD_LETTER",
-          failureReason:
-            "Todas as tentativas de publicação falharam definitivamente.",
-        },
-      });
-      await tx.auditLog.create({
-        data: {
-          organizationId: schedule.organizationId,
-          actorUserId: schedule.createdById,
-          entityId: schedule.id,
-          action: "schedule.dead_letter",
-        },
-      });
+  if (execResult.allSuccess) {
+    terminalStatus = "PUBLISHED";
+    terminalReason = null;
+    terminalAuditAction = "schedule.published";
+  } else if (execResult.hasSuccess) {
+    terminalStatus = "PARTIALLY_PUBLISHED";
+    terminalReason =
+      "Sucesso parcial: ao menos um destino foi publicado e outros falharam.";
+    terminalAuditAction = "schedule.partially_published";
+  } else if (execResult.hasUncertain) {
+    terminalStatus = "REQUIRES_RECONCILIATION";
+    terminalReason =
+      "Resultado remoto incerto em uma ou mais contas. Requer revisão manual.";
+    terminalAuditAction = "schedule.reconciliation_required";
+  } else {
+    // Todas as tentativas falharam
+    const anyTransient = execResult.attempts.some(
+      (a: { errorMessage?: string | null; errorCode?: string | null }) =>
+        isTransientError(new Error(a.errorMessage || a.errorCode || "")),
+    );
+
+    const attemptsMade = job.attemptsMade ?? 0;
+    const maxAttempts = job.opts?.attempts ?? 4;
+    if (anyTransient && attemptsMade < maxAttempts - 1) {
+      throw new Error("Falha transitória na publicação agendada.");
     }
-  });
+
+    terminalStatus = "DEAD_LETTER";
+    terminalReason =
+      "Todas as tentativas de publicação falharam definitivamente.";
+    terminalAuditAction = "schedule.dead_letter";
+  }
+
+  let finalUpdated = false;
+  await asSchedulerActor(
+    db,
+    {
+      organizationId: schedule.organizationId,
+      clientId: schedule.clientId,
+    },
+    async (tx) => {
+      const updated = await tx.publicationSchedule.updateMany({
+        where: {
+          id: schedule.id,
+          organizationId: schedule.organizationId,
+          clientId: schedule.clientId,
+          version,
+          executionToken,
+          status: "PROCESSING",
+        },
+        data: {
+          status: terminalStatus,
+          failureReason: terminalReason,
+          leaseExpiresAt: null,
+        },
+      });
+
+      if (updated.count === 1) {
+        finalUpdated = true;
+        await tx.auditLog.create({
+          data: {
+            organizationId: schedule.organizationId,
+            actorUserId: "system:scheduler",
+            entityId: schedule.id,
+            action: terminalAuditAction,
+          },
+        });
+      }
+    },
+  );
+
+  if (!finalUpdated) {
+    return { status: "skipped_lost_execution_identity" };
+  }
 
   return {
     status: execResult.allSuccess
@@ -519,37 +732,33 @@ export function createSchedulerWorker(
     // Se as tentativas se esgotaram, garante estado persistente DEAD_LETTER
     if (job && job.attemptsMade >= (job.opts.attempts ?? 4)) {
       try {
-        const { scheduleId, organizationId } = job.data;
-        const schedule = await db.publicationSchedule.findUnique({
-          where: { id: scheduleId },
-        });
-        if (
-          schedule &&
-          ![
-            "PUBLISHED",
-            "PARTIALLY_PUBLISHED",
-            "CANCELLED",
-            "DEAD_LETTER",
-          ].includes(schedule.status)
-        ) {
-          await asActor(db, schedule.createdById, async (tx) => {
-            await tx.publicationSchedule.update({
-              where: { id: schedule.id },
-              data: {
-                status: "DEAD_LETTER",
-                failureReason: `Tentativas esgotadas: ${err.message}`,
-              },
-            });
+        const { scheduleId, organizationId, clientId, version } = job.data;
+        await asSchedulerActor(db, { organizationId, clientId }, async (tx) => {
+          const updated = await tx.publicationSchedule.updateMany({
+            where: {
+              id: scheduleId,
+              organizationId,
+              clientId,
+              version,
+              status: "PROCESSING",
+            },
+            data: {
+              status: "DEAD_LETTER",
+              failureReason: `Tentativas esgotadas: ${err.message}`,
+              leaseExpiresAt: null,
+            },
+          });
+          if (updated.count === 1) {
             await tx.auditLog.create({
               data: {
                 organizationId,
-                actorUserId: schedule.createdById,
-                entityId: schedule.id,
+                actorUserId: "system:scheduler",
+                entityId: scheduleId,
                 action: "schedule.dead_letter",
               },
             });
-          });
-        }
+          }
+        });
       } catch (dlErr) {
         console.error(
           JSON.stringify({

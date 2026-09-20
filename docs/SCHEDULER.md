@@ -7,9 +7,12 @@ O subsistema de agendamento do SocialFlow permite programar publicações de pos
 ### Princípios Fundamentais
 
 1. **PostgreSQL como Fonte Única da Verdade**: O estado da publicação, as tentativas e os agendamentos são persistidos no PostgreSQL antes de qualquer interação com filas assíncronas. O Redis/BullMQ atua como mecanismo de temporização e distribuição de jobs, nunca como repositório primário.
-2. **Idempotência e Prevenção de Duplicidades**: Garantida por restrições de unicidade no banco (`PublicationAttempt`), mecanismo de _lease_ com expiração atômica (`leaseExpiresAt`) e jobs BullMQ com IDs determinísticos.
-3. **Desacoplamento de Transações**: A reserva de publicação (fase 1) ocorre em transação curta de banco de dados (`preparePublication`). As chamadas à Meta Graph API (fase 2 - `executePublication`) ocorrem estritamente fora de transações de banco de dados, evitando segurar locks e exaurir conexões.
-4. **Resiliência a Falhas e Reconciliação**: Recuperação automática de jobs ausentes, cancelamento seguro, detecção de versões obsoletas e quarentena para reconciliação manual (`REQUIRES_RECONCILIATION`) quando o atraso ultrapassar a janela de segurança operacional (15 minutos).
+2. **Aquisição Atômica por Compare-and-Set (CAS)**: A transição de `ENQUEUED`/`SCHEDULED` para `PROCESSING` ocorre via CAS no PostgreSQL exigindo simultaneamente `id`, `version` e `status` elegível. Apenas o worker que afetar exatamente 1 linha adquire o agendamento; competidores recebem `skipped_not_acquired`.
+3. **Lease de Execução Própria**: O agendamento possui `executionToken` (UUID gerado para cada tentativa de execução) e `leaseExpiresAt` (10 minutos). Todas as transições de finalização exigem casamento exato de `executionToken`, `version` e `status: PROCESSING`.
+4. **Ator Técnico do Sistema (`system:scheduler`)**: A execução do worker não depende da vigência da conta do usuário que criou o agendamento (`createdById` é preservado). O worker opera sob a identidade técnica limitada `system:scheduler` vinculada estritamente aos parâmetros de tenant `app.scheduler_org_id` e `app.scheduler_client_id`, respeitando RLS sem superusuário ou bypass irrestrito.
+5. **Ciclo de Vida Explícito de Recursos**: A fila BullMQ não utiliza singletons globais sem vínculo de conexão. Instâncias são criadas por conexão (`createScheduleQueue`) e fechadas graciosamente (`closeScheduleQueue`) na ordem correta junto à API e worker.
+6. **Desacoplamento de Transações**: A reserva de publicação ocorre em transação curta de banco de dados (`preparePublication`). As chamadas à Meta Graph API ocorrem estritamente fora de transações de banco de dados, evitando segurar locks e exaurir conexões.
+7. **Resiliência a Falhas e Reconciliação**: Recuperação automática de jobs ausentes, cancelamento seguro, detecção de versões obsoletas e quarentena para reconciliação manual (`REQUIRES_RECONCILIATION`) quando o atraso ultrapassar a janela de segurança operacional (15 minutos).
 
 ---
 
@@ -21,14 +24,14 @@ O ciclo de vida do agendamento é representado pelo enum `PublicationScheduleSta
 stateDiagram-v2
     [*] --> SCHEDULED: Criado no PostgreSQL
     SCHEDULED --> ENQUEUED: Job BullMQ enfileirado com delay
-    ENQUEUED --> PROCESSING: Worker adquire o job no instante previsto
-    ENQUEUED --> CANCELLED: Usuário cancela antes do processamento
-    ENQUEUED --> ENQUEUED: Reprogramação (versão incrementada, novo job)
+    ENQUEUED --> PROCESSING: CAS atômico no PostgreSQL (winner com lease)
+    ENQUEUED --> CANCELLED: Usuário cancela antes da aquisição (CAS condicional)
+    ENQUEUED --> ENQUEUED: Reprogramação (CAS condicional, versão incrementada)
 
-    PROCESSING --> PUBLISHED: Todas as contas publicadas com sucesso
-    PROCESSING --> PARTIALLY_PUBLISHED: Sucesso em ao menos 1 conta e falha em outra
-    PROCESSING --> DEAD_LETTER: Falhas definitivas ou esgotamento de retries
-    PROCESSING --> REQUIRES_RECONCILIATION: Timeout/incerteza ou lease expirada
+    PROCESSING --> PUBLISHED: Todas as contas publicadas (CAS com executionToken)
+    PROCESSING --> PARTIALLY_PUBLISHED: Sucesso em ao menos 1 conta e falha em outra (CAS com executionToken)
+    PROCESSING --> DEAD_LETTER: Falhas definitivas ou esgotamento de retries (CAS com executionToken)
+    PROCESSING --> REQUIRES_RECONCILIATION: Timeout/incerteza ou lease expirada (CAS com executionToken)
 
     ENQUEUED --> REQUIRES_RECONCILIATION: Atraso superior a 15 minutos (tolerância excedida)
 ```
@@ -37,7 +40,7 @@ stateDiagram-v2
 
 - **`SCHEDULED`**: Agendamento persistido no PostgreSQL; transição intermediária antes do enfileiramento no Redis.
 - **`ENQUEUED`**: Job registrado no BullMQ com atraso (`delay`) correspondente ao intervalo até o instante UTC.
-- **`PROCESSING`**: Worker assumiu a execução do agendamento e iniciou a reserva de tentativas no PostgreSQL.
+- **`PROCESSING`**: Worker venceu o CAS atômico, adquiriu a lease de execução (`executionToken`) e iniciou o processamento.
 - **`PUBLISHED`**: Todas as contas selecionadas foram publicadas com confirmação e IDs remotos na Meta.
 - **`PARTIALLY_PUBLISHED`**: Ao menos uma conta foi publicada e outra(s) sofreram falha definitiva. Sucessos são preservados e nunca republicados.
 - **`FAILED`**: Falha na fase de validação ou preparação do agendamento.
@@ -47,7 +50,66 @@ stateDiagram-v2
 
 ---
 
-## 3. Gestão de Timezones
+## 3. Aquisição Atômica e Proteção de Estados Finais
+
+### Compare-And-Set (CAS) de Aquisição
+
+Dois workers que tentarem processar o mesmo agendamento simultaneamente competem no PostgreSQL:
+
+```typescript
+const acquiredCount = await prisma.publicationSchedule.updateMany({
+  where: {
+    id: scheduleId,
+    version: expectedVersion,
+    status: { in: ["SCHEDULED", "ENQUEUED"] },
+  },
+  data: {
+    status: "PROCESSING",
+    executionToken,
+    leaseExpiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  },
+});
+
+if (acquiredCount.count !== 1) {
+  return { status: "skipped_not_acquired" };
+}
+```
+
+- Apenas o worker que alterar exatamente 1 linha adquire o agendamento e registra o evento de auditoria `schedule.started`.
+- O worker derrotado descarta o job imediatamente com `skipped_not_acquired`, sem invocar a Meta e sem gerar auditoria duplicada.
+
+### Proteção de Estados Terminais
+
+Todas as atualizações subsequentes do worker utilizam cláusulas `where` estritas contendo `id`, `version`, `executionToken` e `status: "PROCESSING"`.
+
+Um worker com atraso ou retry obsoleto:
+
+- Não pode sobrescrever agendamento já `CANCELLED`.
+- Não pode sobrescrever agendamento já `PUBLISHED` ou `PARTIALLY_PUBLISHED`.
+- Não pode sobrescrever agendamento reprogramado com versão superior.
+- Não pode sobrescrever agendamento em `DEAD_LETTER` ou `REQUIRES_RECONCILIATION`.
+
+---
+
+## 4. Ator Técnico de Execução (`system:scheduler`) e Isolamento Multi-Tenant
+
+Para evitar que o agendamento falhe porque o usuário criador foi desativado, removido do cliente ou teve seu papel rebaixado após o agendamento:
+
+1. **Separação de Identidades**:
+   - `createdById`: Preserva imutável o usuário autor do agendamento para fins de auditoria e conformidade.
+   - `system:scheduler`: Ator técnico atribuído às operações de execução do worker.
+2. **Isolamento de Tenant por RLS (Row Level Security)**:
+   - A função `asSchedulerActor(db, { organizationId, clientId }, action)` executa sob transação configurando as variáveis de sessão:
+     - `app.actor_id = 'system:scheduler'`
+     - `app.actor_role = 'SYSTEM'`
+     - `app.scheduler_org_id = organizationId`
+     - `app.scheduler_client_id = clientId`
+   - Políticas RLS no PostgreSQL autorizam leitura de contas sociais, clientes, organizações e posts condicionados estritamente à coincidência com `app.scheduler_org_id` e `app.scheduler_client_id`.
+   - **Garantia de Isolamento**: O ator técnico não possui acesso de superusuário e não pode ler dados de outros clientes ou organizações.
+
+---
+
+## 5. Gestão de Timezones
 
 ### Decisão Técnica
 
@@ -67,7 +129,15 @@ O sistema utiliza a API nativa ECMAScript `Intl.DateTimeFormat` com o banco IANA
 
 ---
 
-## 4. BullMQ e Configuração de Filas
+## 6. BullMQ e Gerenciamento de Filas
+
+### Ciclo de Vida Explícito da Fila
+
+O gerenciamento da fila não utiliza singleton global:
+
+- `createScheduleQueue(redis: Redis)`: Cria uma instância dedicada da fila BullMQ vinculada à conexão fornecida.
+- `closeScheduleQueue(queue)`: Fecha a fila graciosamente liberando event listeners e conexões.
+- A API cria uma instância na inicialização da aplicação e a fecha no encerramento do servidor (`app.close()`).
 
 ### Identificador Determinístico de Job
 
@@ -79,7 +149,7 @@ sched:{scheduleId}:v{version}
 
 - Exemplo: `sched:3c23d537-8898-4c12-ba2e-fc5aaec02ad5:v1`
 - Ao reprogramar, a versão é incrementada para `v2`, o job antigo `v1` é removido e um novo job `v2` é enfileirado.
-- Caso um worker receba tardiamente um job com versão defasada (`job.data.version !== schedule.version`), o job é descartado silenciosamente sem qualquer publicação.
+- Caso um worker receba tardiamente um job com versão defasada (`job.data.version !== schedule.version`), o CAS de aquisição falha (0 linhas afetadas) e o job é descartado.
 
 ### Política de Retries e Backoff
 
@@ -98,39 +168,53 @@ sched:{scheduleId}:v{version}
 
 ---
 
-## 5. Idempotência e Execução Concorrente
-
-1. **Proteção em Duas Fases**:
-   - **Fase 1 (`preparePublication`)**: Executada em transação PostgreSQL isolada com locks nos registros de post e tentativas. Marca cada `PublicationAttempt` como `PROCESSING` com `leaseExpiresAt = now + 10 minutos`. Se outra transação já tiver reservado a conta, aborta imediatamente.
-   - **Fase 2 (`executePublication`)**: Executada fora de transação. Realiza chamadas à Meta Graph API com o token decriptografado em memória.
-2. **Sucesso Parcial e Reentrância**:
-   - O worker processa cada conta individualmente. Se uma conta já se encontra com status `PUBLISHED`, ela é ignorada sem duplicação.
-   - Contas que falharem definitivamente são gravadas com status `FAILED`.
-3. **Resolução de Incerteza**:
-   - Se ocorrer timeout ou falha de rede durante o upload ou publicação do contêiner, a tentativa é marcada como `UNCERTAIN` e o agendamento como `REQUIRES_RECONCILIATION`. O worker nunca tenta publicar novamente um contêiner ou post em estado incerto.
-
----
-
-## 6. Cancelamento e Reprogramação
+## 7. Cancelamento e Reprogramação Atômicos
 
 ### Cancelamento (`POST .../schedules/:scheduleId/cancel`)
 
-- Permitido para agendamentos nos status `SCHEDULED` ou `ENQUEUED`.
-- Atualiza atomicamente o agendamento para `CANCELLED`, grava o motivo e emite `AuditLog` (`schedule.cancelled`).
-- Remove o job correspondente do BullMQ.
-- Se o agendamento já estiver em `PROCESSING`, a API recusa com código `409 Conflict`, informando que a publicação já está em andamento.
+- Executa CAS no PostgreSQL:
+  ```typescript
+  const updated = await prisma.publicationSchedule.updateMany({
+    where: {
+      id: scheduleId,
+      status: { in: ["SCHEDULED", "ENQUEUED"] },
+    },
+    data: {
+      status: "CANCELLED",
+      failureReason: "Cancelado pelo usuário",
+    },
+  });
+  ```
+- Se `updated.count === 0`, retorna `409 Conflict` (ex.: se o worker já adquiriu e está em `PROCESSING`).
+- Se vencedor, remove o job correspondente do BullMQ e grava `AuditLog` (`schedule.cancelled`).
 
 ### Reprogramação (`POST .../schedules/:scheduleId/reschedule`)
 
-- Permitido apenas antes do início do processamento.
-- Valida que a nova data/hora informada é futura em relação ao momento atual.
-- Incrementa `version` de 1 para 2.
-- Remove o job antigo (`sched:{id}:v1`) do Redis e cria um novo job (`sched:{id}:v2`) com o novo delay em UTC.
-- Registra evento de auditoria `schedule.rescheduled`.
+- Valida data futura.
+- Executa CAS no PostgreSQL exigindo `status IN ('SCHEDULED', 'ENQUEUED')` e versão correspondente:
+  ```typescript
+  const updated = await prisma.publicationSchedule.updateMany({
+    where: {
+      id: scheduleId,
+      version: currentVersion,
+      status: { in: ["SCHEDULED", "ENQUEUED"] },
+    },
+    data: {
+      scheduledLocalTime: newLocalTime,
+      scheduledTimezone: newTimezone,
+      scheduledForUtc: newUtcDate,
+      version: { increment: 1 },
+      jobId: newJobId,
+      status: "ENQUEUED",
+    },
+  });
+  ```
+- Se `updated.count === 0`, retorna `409 Conflict`.
+- Se vencedor, remove o job antigo do BullMQ, enfileira o novo job com o novo delay e grava `AuditLog` (`schedule.rescheduled`).
 
 ---
 
-## 7. Política de Jobs Atrasados e Reconciliação na Inicialização
+## 8. Política de Jobs Atrasados e Reconciliação na Inicialização
 
 ### Janela de Tolerância a Atrasos
 
@@ -142,11 +226,11 @@ sched:{scheduleId}:v{version}
 Executada sempre que o processo do worker é inicializado (e disponível para disparo operacional manual):
 
 1. **Agendamentos sem job BullMQ**: Localiza registros no PostgreSQL em status `SCHEDULED` ou `ENQUEUED` cujo job não exista no Redis (ex: queda do Redis antes da inserção) e reinjeta o job na fila.
-2. **Execuções abandonadas**: Localiza agendamentos em `PROCESSING` cujas tentativas de publicação estejam com `leaseExpiresAt` expirada. Marca o agendamento como `REQUIRES_RECONCILIATION`.
+2. **Execuções abandonadas**: Localiza agendamentos em `PROCESSING` com `leaseExpiresAt` expirada (ou tentativas com `leaseExpiresAt` expirada). Transiciona atomicamente para `REQUIRES_RECONCILIATION`.
 
 ---
 
-## 8. Runbook Operacional
+## 9. Runbook Operacional
 
 ### Monitoramento e Métricas
 
@@ -178,7 +262,7 @@ Executada sempre que o processo do worker é inicializado (e disponível para di
 # Executar suíte de testes de timezone
 pnpm test tests/unit/timezone.test.ts
 
-# Executar suíte de testes de integração do scheduler (23 cenários com mocks)
+# Executar suíte de testes de integração do scheduler (32 cenários com mocks e concorrência)
 node scripts/run-tests.mjs integration tests/integration/scheduler.test.ts
 
 # Executar todos os testes de integração

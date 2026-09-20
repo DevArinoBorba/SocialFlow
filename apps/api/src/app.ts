@@ -47,6 +47,7 @@ import {
   type PublicationDependencies,
 } from "./publication.js";
 import { registerScheduler } from "./scheduler.js";
+import { createScheduleQueue, closeScheduleQueue } from "./scheduler-queue.js";
 
 class HttpError extends Error {
   constructor(
@@ -78,6 +79,7 @@ export async function createApplication(
     console.error(JSON.stringify({ event: "redis_unavailable" })),
   );
   const queue = new Queue("diagnostics", { connection: redis });
+  const schedulerQueue = createScheduleQueue(redis);
   const auth = createAuth(db, config);
   const server = express();
   server.disable("x-powered-by");
@@ -207,7 +209,7 @@ export async function createApplication(
     config,
     options?.publicationDependencies,
   );
-  registerScheduler(server, scoped, redis);
+  registerScheduler(server, scoped, schedulerQueue);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {
@@ -611,11 +613,13 @@ export async function createApplication(
     db,
     redis,
     queue,
+    schedulerQueue,
     auth,
     close: async () => {
       closeMedia();
       await app.close();
       await queue.close();
+      await closeScheduleQueue(schedulerQueue);
       redis.disconnect();
       await db.$disconnect();
     },

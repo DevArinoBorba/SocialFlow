@@ -9,8 +9,13 @@ import {
   parseLocalDateTimeToUtc,
   type Role,
 } from "@socialflow/contracts";
+import { Queue } from "bullmq";
 import { PublicationError } from "./publication-service.js";
-import { getScheduleQueue, getScheduleJobId } from "./scheduler-queue.js";
+import {
+  createScheduleQueue,
+  getScheduleJobId,
+  type ScheduleJobData,
+} from "./scheduler-queue.js";
 
 export type Scope = <T>(
   req: Request,
@@ -25,8 +30,11 @@ export type Scope = <T>(
 export function registerScheduler(
   server: Express,
   scoped: Scope,
-  redis: Redis,
+  queueOrRedis: Queue<ScheduleJobData> | Redis,
 ) {
+  const queue: Queue<ScheduleJobData> =
+    "add" in queueOrRedis ? queueOrRedis : createScheduleQueue(queueOrRedis);
+
   const param = (req: Request, name: string): string => {
     const val = req.params[name];
     if (val !== undefined) return String(val);
@@ -310,7 +318,6 @@ export function registerScheduler(
 
       // Enfileira job BullMQ com atraso (delay) baseado no instante UTC
       const delay = Math.max(0, scheduledForUtc.getTime() - Date.now());
-      const queue = getScheduleQueue(redis);
       await queue.add(
         "publish-scheduled-post",
         {
@@ -423,8 +430,16 @@ export function registerScheduler(
           const nextVersion = schedule.version + 1;
           const nextJobId = getScheduleJobId(schedule.id, nextVersion);
 
-          const updated = await tx.publicationSchedule.update({
-            where: { id: schedule.id },
+          // Atomic CAS: ensure status is still SCHEDULED/ENQUEUED and version is unchanged
+          const updateRes = await tx.publicationSchedule.updateMany({
+            where: {
+              id: schedule.id,
+              organizationId,
+              clientId,
+              postId,
+              version: schedule.version,
+              status: { in: ["SCHEDULED", "ENQUEUED"] },
+            },
             data: {
               scheduledTimezone,
               scheduledLocalTime,
@@ -432,16 +447,36 @@ export function registerScheduler(
               version: nextVersion,
               jobId: nextJobId,
               status: "SCHEDULED",
+              executionToken: null,
+              leaseExpiresAt: null,
             },
           });
 
+          if (updateRes.count === 0) {
+            const current = await tx.publicationSchedule.findFirst({
+              where: { id: schedule.id, organizationId, clientId, postId },
+            });
+            if (current?.status === "PROCESSING") {
+              throw new PublicationError(
+                409,
+                "A publicação agendada já está em processamento e não pode ser reprogramada.",
+              );
+            }
+            throw new PublicationError(
+              409,
+              "Conflito de concorrência ao reprogramar o agendamento.",
+            );
+          }
+
           await audit(tx, req, userId, schedule.id, "schedule.rescheduled");
+          const updated = await tx.publicationSchedule.findUniqueOrThrow({
+            where: { id: schedule.id },
+          });
           return { oldJobId: schedule.jobId, updatedSchedule: updated };
         },
       );
 
       // Remove job antigo determinístico do BullMQ
-      const queue = getScheduleQueue(redis);
       try {
         const oldJob = await queue.getJob(oldJobId);
         if (oldJob) {
@@ -476,12 +511,20 @@ export function registerScheduler(
         organizationId,
         clientId,
         async (tx, userId) => {
-          const updated = await tx.publicationSchedule.update({
-            where: { id: updatedSchedule.id },
+          await tx.publicationSchedule.updateMany({
+            where: {
+              id: updatedSchedule.id,
+              organizationId,
+              clientId,
+              version: updatedSchedule.version,
+              status: "SCHEDULED",
+            },
             data: { status: "ENQUEUED" },
           });
-          await audit(tx, req, userId, updated.id, "schedule.enqueued");
-          return updated;
+          await audit(tx, req, userId, updatedSchedule.id, "schedule.enqueued");
+          return tx.publicationSchedule.findUniqueOrThrow({
+            where: { id: updatedSchedule.id },
+          });
         },
       );
 
@@ -521,28 +564,63 @@ export function registerScheduler(
             );
           }
 
-          if (["PUBLISHED", "CANCELLED"].includes(existing.status)) {
+          if (
+            [
+              "PUBLISHED",
+              "PARTIALLY_PUBLISHED",
+              "CANCELLED",
+              "DEAD_LETTER",
+            ].includes(existing.status)
+          ) {
             throw new PublicationError(
               409,
               `Agendamento já se encontra em estado ${existing.status}.`,
             );
           }
 
-          const updated = await tx.publicationSchedule.update({
-            where: { id: existing.id },
+          // Atomic CAS: cancel only if still in cancellable status
+          const updateRes = await tx.publicationSchedule.updateMany({
+            where: {
+              id: existing.id,
+              organizationId,
+              clientId,
+              postId,
+              status: { in: ["SCHEDULED", "ENQUEUED"] },
+            },
             data: {
               status: "CANCELLED",
               cancellationReason: reason || "Cancelado pelo usuário",
+              executionToken: null,
+              leaseExpiresAt: null,
             },
           });
 
+          if (updateRes.count === 0) {
+            const current = await tx.publicationSchedule.findFirst({
+              where: { id: existing.id, organizationId, clientId, postId },
+            });
+            if (current?.status === "PROCESSING") {
+              throw new PublicationError(
+                409,
+                "A publicação agendada já está em processamento e não pode ser cancelada.",
+              );
+            }
+            throw new PublicationError(
+              409,
+              `Agendamento em estado ${current?.status ?? "desconhecido"} não pode ser cancelado.`,
+            );
+          }
+
           await audit(tx, req, userId, existing.id, "schedule.cancelled");
-          return { schedule: existing, cancelled: updated };
+          const cancelledRecord =
+            await tx.publicationSchedule.findUniqueOrThrow({
+              where: { id: existing.id },
+            });
+          return { schedule: existing, cancelled: cancelledRecord };
         },
       );
 
       // Remove job do BullMQ
-      const queue = getScheduleQueue(redis);
       try {
         const job = await queue.getJob(schedule.jobId);
         if (job) {

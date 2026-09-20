@@ -13,6 +13,10 @@ declare module "@socialflow/api/scheduler-queue.js" {
   }
 
   export function getScheduleJobId(scheduleId: string, version: number): string;
+  export function createScheduleQueue(redis: Redis): Queue<ScheduleJobData>;
+  export function closeScheduleQueue(
+    queue: Queue<ScheduleJobData>,
+  ): Promise<void>;
   export function getScheduleQueue(redis: Redis): Queue<ScheduleJobData>;
 }
 
