@@ -6,9 +6,9 @@ import {
 } from "../../apps/api/src/render-queue.js";
 
 describe("render queue", () => {
-  it("uses a dedicated queue and deterministic job id", () => {
+  it("uses a dedicated queue and deterministic job id without colons", () => {
     expect(RENDER_QUEUE_NAME).toBe("artwork-render");
-    expect(getRenderQueueJobId("job-123")).toBe("render:job-123");
+    expect(getRenderQueueJobId("job-123")).toBe("render-job-123");
   });
 
   it("tolerates Redis already being unavailable during shutdown", async () => {

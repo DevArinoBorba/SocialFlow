@@ -6,6 +6,8 @@ import { mediaStorage } from "@socialflow/api/media-storage.js";
 import {
   createRendererWorker,
   runRendererStartupReconciliation,
+  RendererReconciler,
+  sanitizeErrorMessage,
 } from "./renderer-worker.js";
 
 const config = readConfig(process.env);
@@ -44,12 +46,22 @@ try {
   console.error(
     JSON.stringify({
       event: "renderer_startup_reconciliation_failed",
-      error: reconErr instanceof Error ? reconErr.message : String(reconErr),
+      error: sanitizeErrorMessage(
+        reconErr instanceof Error ? reconErr.message : String(reconErr),
+      ),
     }),
   );
 }
 
-// 2. Inicia o worker com concorrência inicial de 1 consumindo exclusivamente artwork-render
+// 2. Inicia reconciliação periódica segura
+const reconcileIntervalMs =
+  Number(process.env.RENDERER_RECONCILE_INTERVAL_MS) || 60_000;
+const reconciler = new RendererReconciler(db, redis, {
+  intervalMs: reconcileIntervalMs,
+});
+reconciler.start();
+
+// 3. Inicia o worker com concorrência inicial de 1 consumindo exclusivamente artwork-render
 const renderWorker = createRendererWorker(db, redis, storage, {
   concurrency: 1,
 });
@@ -64,6 +76,10 @@ const server = createServer(async (req, res) => {
     if (stopping) throw new Error("Stopping");
     if (req.url === "/health/ready") {
       if (!storage) throw new Error("Storage unavailable");
+      const storageReady = storage.checkReadiness
+        ? await storage.checkReadiness()
+        : true;
+      if (!storageReady) throw new Error("Storage unreachable");
       await bounded(
         Promise.all([
           db.$queryRaw`SELECT 1`,
@@ -94,6 +110,7 @@ server.listen(PORT, "0.0.0.0", () => {
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.once(signal, () => {
     stopping = true;
+    reconciler.stop();
     const deadline = setTimeout(() => process.exit(1), 25000);
     deadline.unref();
     server.close();

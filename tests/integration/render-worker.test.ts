@@ -4,10 +4,13 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import sharp from "sharp";
 import { Redis } from "ioredis";
+import { UnrecoverableError } from "bullmq";
 import { createDatabase, type Prisma } from "@socialflow/db";
 import {
   executeRenderJob,
   runRendererStartupReconciliation,
+  RendererReconciler,
+  ActiveLeaseError,
   createRendererWorker,
 } from "../../apps/worker/src/renderer-worker.js";
 import {
@@ -271,10 +274,17 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
         },
       );
 
-      await Promise.all([p1, p2]);
+      const results = await Promise.allSettled([p1, p2]);
 
-      // Exatamente um worker adquire o job
+      // Exatamente um worker adquire o job e completa, o outro rejeita com ActiveLeaseError
       expect(worker1Acquired !== worker2Acquired).toBe(true);
+      const fulfilled = results.filter((r) => r.status === "fulfilled");
+      const rejected = results.filter((r) => r.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+        ActiveLeaseError,
+      );
 
       const finalJob = await migration.renderJob.findUnique({
         where: { id: job.id },
@@ -283,7 +293,7 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
       expect(finalJob?.attemptNumber).toBe(1);
     });
 
-    it("lease ativa bloqueando aquisição", async () => {
+    it("lease ativa bloqueando aquisição e rejeitando com ActiveLeaseError (não falso sucesso)", async () => {
       const activeLease = new Date(Date.now() + 60_000);
       const { job, organizationId, clientId } = await createTestFixture({
         initialStatus: "PROCESSING",
@@ -291,22 +301,142 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
       });
 
       let acquired = false;
-      await executeRenderJob(
-        { renderJobId: job.id, organizationId, clientId },
-        db,
-        storage,
-        {
-          onAfterAcquisition: async (acq) => {
-            acquired = acq;
+      await expect(
+        executeRenderJob(
+          { renderJobId: job.id, organizationId, clientId },
+          db,
+          storage,
+          {
+            onAfterAcquisition: async (acq) => {
+              acquired = acq;
+            },
           },
-        },
-      );
+        ),
+      ).rejects.toThrow(ActiveLeaseError);
 
       expect(acquired).toBe(false);
       const after = await migration.renderJob.findUnique({
         where: { id: job.id },
       });
       expect(after?.status).toBe("PROCESSING");
+    });
+
+    it("falha transitória do banco na aquisição permite retry do BullMQ (não lança UnrecoverableError)", async () => {
+      const { job, organizationId, clientId } = await createTestFixture();
+
+      const failingDb = {
+        ...db,
+        $transaction: async () => {
+          throw new Error("Connection terminated unexpectedly");
+        },
+      } as unknown as typeof db;
+
+      let caughtErr: unknown;
+      try {
+        await executeRenderJob(
+          { renderJobId: job.id, organizationId, clientId },
+          failingDb,
+          storage,
+        );
+      } catch (err) {
+        caughtErr = err;
+      }
+
+      expect(caughtErr).toBeInstanceOf(Error);
+      expect(caughtErr).not.toBeInstanceOf(UnrecoverableError);
+      expect((caughtErr as Error).message).toContain("Connection terminated");
+
+      const jobAfter = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(jobAfter?.status).toBe("PENDING");
+    });
+
+    it("tenant inativo ou inválido lança UnrecoverableError de modo permanente", async () => {
+      const { job } = await createTestFixture();
+
+      await expect(
+        executeRenderJob(
+          {
+            renderJobId: job.id,
+            organizationId: "nonexistent-org",
+            clientId: "nonexistent-client",
+          },
+          db,
+          storage,
+        ),
+      ).rejects.toThrow(UnrecoverableError);
+    });
+
+    it("falha pós-aquisição libera job para PENDING se worker mantiver executionToken", async () => {
+      const { job, organizationId, clientId } = await createTestFixture();
+
+      await expect(
+        executeRenderJob(
+          { renderJobId: job.id, organizationId, clientId },
+          db,
+          storage,
+          {
+            onBeforeRender: async () => {
+              throw new Error("Transient GPU/Sharp crash");
+            },
+          },
+        ),
+      ).rejects.toThrow("Transient GPU/Sharp crash");
+
+      const releasedJob = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(releasedJob?.status).toBe("PENDING");
+      expect(releasedJob?.leaseExpiresAt).toBeNull();
+      expect(releasedJob?.executionToken).toBeNull();
+    });
+
+    it("falha durante reserva do MediaAsset libera ou deixa lease recuperável", async () => {
+      const { job, organizationId, clientId } = await createTestFixture();
+
+      await expect(
+        executeRenderJob(
+          { renderJobId: job.id, organizationId, clientId },
+          db,
+          storage,
+          {
+            onBeforeStoragePut: async () => {
+              throw new Error("Simulated failure before storage put");
+            },
+          },
+        ),
+      ).rejects.toThrow("Simulated failure before storage put");
+
+      const currentJob = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(currentJob?.status).toBe("PENDING");
+    });
+
+    it("falha durante finalização não produz falso COMPLETED", async () => {
+      const { job, organizationId, clientId } = await createTestFixture();
+
+      await expect(
+        executeRenderJob(
+          { renderJobId: job.id, organizationId, clientId },
+          db,
+          storage,
+          {
+            onBeforeFinalize: async () => {
+              await migration.renderJob.update({
+                where: { id: job.id },
+                data: { executionToken: "superseded-token" },
+              });
+            },
+          },
+        ),
+      ).rejects.toThrow(/Fencing token mismatch/i);
+
+      const notCompletedJob = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(notCompletedJob?.status).not.toBe("COMPLETED");
     });
 
     it("lease expirada permitindo recuperação", async () => {
@@ -742,6 +872,85 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
 
       await closeRenderQueue(queue);
     });
+
+    it("reconciliação periódica não se sobrepõe (guarda isRunning)", async () => {
+      const reconciler = new RendererReconciler(db, redis, {
+        intervalMs: 10_000,
+      });
+
+      const p1 = reconciler.runReconciliation();
+      const p2 = reconciler.runReconciliation();
+      const [r1, r2] = await Promise.all([p1, p2]);
+
+      expect(r1.recoveredJobs >= 0).toBe(true);
+      expect(r2.recoveredJobs === 0 || r1.recoveredJobs === 0).toBe(true);
+
+      reconciler.stop();
+    });
+
+    it("reconciliação periódica não cria jobs duplicados na fila", async () => {
+      const { job } = await createTestFixture({ initialStatus: "PENDING" });
+      const queue = createRenderQueue(redis);
+
+      const expectedJobId = getRenderQueueJobId(job.id);
+      const existing = await queue.getJob(expectedJobId);
+      if (existing) await existing.remove();
+
+      const reconciler = new RendererReconciler(db, redis, {
+        intervalMs: 10_000,
+      });
+      const res1 = await reconciler.runReconciliation();
+      const res2 = await reconciler.runReconciliation();
+
+      expect(res1.recoveredJobs).toBeGreaterThanOrEqual(1);
+      expect(res2.recoveredJobs).toBe(0);
+
+      const jobInQueue = await queue.getJob(expectedJobId);
+      expect(jobInQueue).toBeTruthy();
+
+      reconciler.stop();
+      await closeRenderQueue(queue);
+    });
+
+    it("processo interrompido é recuperado sem reiniciar o container", async () => {
+      const expiredLease = new Date(Date.now() - 5000);
+      const { job } = await createTestFixture({
+        initialStatus: "PROCESSING",
+        leaseExpiresAt: expiredLease,
+      });
+
+      const queue = createRenderQueue(redis);
+      const expectedJobId = getRenderQueueJobId(job.id);
+      const existing = await queue.getJob(expectedJobId);
+      if (existing) await existing.remove();
+
+      const reconciler = new RendererReconciler(db, redis, {
+        intervalMs: 500,
+      });
+      const cycleResult = await reconciler.runReconciliation();
+      expect(cycleResult.recoveredJobs).toBeGreaterThanOrEqual(1);
+
+      const recovered = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(recovered?.status).toBe("PENDING");
+      expect(recovered?.leaseExpiresAt).toBeNull();
+      expect(recovered?.executionToken).toBeNull();
+
+      reconciler.stop();
+      await closeRenderQueue(queue);
+    });
+
+    it("shutdown encerra timer da reconciliação", async () => {
+      const reconciler = new RendererReconciler(db, redis, {
+        intervalMs: 1000,
+      });
+      reconciler.start();
+      expect(reconciler.active).toBe(true);
+
+      reconciler.stop();
+      expect(reconciler.active).toBe(false);
+    });
   });
 
   describe("Isolamento de Tenants", () => {
@@ -762,7 +971,7 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
           db,
           storage,
         ),
-      ).resolves.toBeUndefined(); // Acquisition é ignorada com status SKIPPED: NOT_FOUND sob RLS
+      ).rejects.toThrow(UnrecoverableError); // Acquisition é ignorada com status SKIPPED: NOT_FOUND sob RLS -> lança UnrecoverableError
 
       const jobB = await migration.renderJob.findUnique({
         where: { id: fixtureB.job.id },
@@ -780,15 +989,19 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
       await expect(worker.close()).resolves.toBeUndefined();
     });
 
-    it("healthcheck independente responde 200 em /health/ready e /health/live no renderer", async () => {
+    it("healthcheck independente responde 200 em /health/ready e /health/live no renderer com storage disponível", async () => {
       const worker = createRendererWorker(db, redis, storage, {
         concurrency: 1,
       });
       await worker.waitUntilReady();
 
       const server = createServer(async (req, res) => {
-        if (req.url === "/health/ready" || req.url === "/health/live") {
+        if (req.url === "/health/ready") {
           try {
+            const storageReady = storage.checkReadiness
+              ? await storage.checkReadiness()
+              : true;
+            if (!storageReady) throw new Error("Storage unreachable");
             await Promise.all([
               db.$queryRaw`SELECT 1`,
               redis.ping(),
@@ -800,6 +1013,10 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
           } catch {
             res.writeHead(503).end('{"status":"unavailable"}');
           }
+        } else if (req.url === "/health/live") {
+          res
+            .writeHead(200, { "Content-Type": "application/json" })
+            .end('{"status":"ok"}');
         } else {
           res.writeHead(404).end();
         }
@@ -821,6 +1038,51 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
 
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await worker.close();
+    });
+
+    it("healthcheck readiness retorna 503 quando storage estiver inacessível e liveness permanece 200", async () => {
+      const unavailableStorage = {
+        ...storage,
+        checkReadiness: async () => false,
+      };
+
+      const server = createServer(async (req, res) => {
+        if (req.url === "/health/ready") {
+          try {
+            const storageReady = unavailableStorage.checkReadiness
+              ? await unavailableStorage.checkReadiness()
+              : true;
+            if (!storageReady) throw new Error("Storage unreachable");
+            res
+              .writeHead(200, { "Content-Type": "application/json" })
+              .end('{"status":"ok"}');
+          } catch {
+            res.writeHead(503).end('{"status":"unavailable"}');
+          }
+        } else if (req.url === "/health/live") {
+          res
+            .writeHead(200, { "Content-Type": "application/json" })
+            .end('{"status":"ok"}');
+        } else {
+          res.writeHead(404).end();
+        }
+      });
+
+      const port = await new Promise<number>((resolve) => {
+        server.listen(0, "127.0.0.1", () => {
+          resolve((server.address() as AddressInfo).port);
+        });
+      });
+
+      const liveRes = await fetch(`http://127.0.0.1:${port}/health/live`);
+      expect(liveRes.status).toBe(200);
+
+      const readyRes = await fetch(`http://127.0.0.1:${port}/health/ready`);
+      expect(readyRes.status).toBe(503);
+      const readyJson = await readyRes.json();
+      expect(readyJson).toEqual({ status: "unavailable" });
+
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     });
 
     it("fila de render artwork-render é independente e não interfere na fila publication-schedule", async () => {

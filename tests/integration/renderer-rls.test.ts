@@ -304,7 +304,7 @@ describe("renderer system actor RLS", () => {
         asActor(runtime, "editor-a", (tx) =>
           tx.renderJob.update({
             where: { id: fixture.jobId },
-            data: { queueJobId: `render:${fixture.jobId}` },
+            data: { queueJobId: `render-${fixture.jobId}` },
           }),
         ),
       ).rejects.toThrow();
@@ -327,14 +327,14 @@ describe("renderer system actor RLS", () => {
             where: { id: fixture.jobId },
             data: {
               status: "PROCESSING",
-              queueJobId: `render:${fixture.jobId}`,
+              queueJobId: `render-${fixture.jobId}`,
               executionToken: randomUUID(),
               attemptNumber: { increment: 1 },
               leaseExpiresAt: new Date(Date.now() + 60_000),
             },
           });
           expect(updated.status).toBe("PROCESSING");
-          expect(updated.queueJobId).toBe(`render:${fixture.jobId}`);
+          expect(updated.queueJobId).toBe(`render-${fixture.jobId}`);
           expect(updated.attemptNumber).toBe(1);
         },
       );

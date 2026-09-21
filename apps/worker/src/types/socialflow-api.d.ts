@@ -54,6 +54,7 @@ declare module "@socialflow/api/media-storage.js" {
   export interface MediaStorage {
     put(key: string, data: Buffer, mimeType: string): Promise<void>;
     get(key: string): Promise<Buffer>;
+    checkReadiness?(): Promise<boolean>;
     close(): void;
   }
 

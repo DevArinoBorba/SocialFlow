@@ -69,26 +69,44 @@ Para cada job entregue via BullMQ (`RenderJobData`):
 
 ---
 
-## 4. Reconciliação de Inicialização
+## 4. Reconciliação e ID Determinístico no BullMQ
 
-Ao iniciar o worker:
-1. Executa `discover_reconcilable_render_jobs()` (função `SECURITY DEFINER` mínima no PostgreSQL).
-2. Descobre jobs em `PENDING` ou `PROCESSING` com lease expirada.
-3. Verifica existência no BullMQ usando ID determinístico `render:<renderJobId>`.
-4. Reenfileira caso o job não exista ou esteja em estado terminal no BullMQ enquanto pendente no banco.
-5. Atualiza `queueJobId` e reseta leases expiradas para `PENDING` de forma segura sob `asRendererActor`.
-6. Nunca reenfileira jobs `COMPLETED`, `FAILED` ou com lease ativa.
+1. **ID Determinístico Padrão**: Uso de `render-<renderJobId>` sem caractere `:` (dois-pontos). IDs customizados no BullMQ não podem conter `:` de acordo com a validação nativa da biblioteca, eliminando a necessidade de qualquer subclasse ou monkey-patching interno (`RenderBullJob`/`RenderBullQueue`).
+2. **Reconciliação de Inicialização e Periódica**:
+   - `RendererReconciler` roda a cada intervalo configurável (padrão 60s) com guarda de concorrência (`isRunning`) para evitar sobreposição.
+   - Busca no banco via `discover_reconcilable_render_jobs()` apenas jobs em `PENDING` ou `PROCESSING` com lease expirada.
+   - Enfileira no BullMQ apenas se o job não existir ou estiver em estado terminal (`completed`/`failed`).
+   - Se a lease estiver ativa, lança `ActiveLeaseError` (erro transitório) para que o BullMQ não considere a tarefa concluída com falso sucesso.
+   - Em caso de shutdown (`SIGINT`/`SIGTERM`), o timer do reconciler é limpo imediatamente.
 
 ---
 
-## 5. Resultados das Verificações e Testes
+## 5. Prontidão de Armazenamento (Storage Readiness)
+
+- Adicionado `checkReadiness(): Promise<boolean>` na abstração `mediaStorage` usando `HeadBucketCommand` do AWS SDK S3 com timeout seguro de 3s (sem listar, criar ou apagar objetos).
+- Endpoint `/health/ready` do renderer retorna status `503 Unavailable` caso o bucket/storage S3 esteja inacessível, enquanto `/health/live` permanece `200 OK`.
+- Interface `MediaStorage` preserva compatibilidade com doubles de testes existentes.
+
+---
+
+## 6. Sanitização de Logs e Limite Central de Exceções
+
+- **Sanitização Universal**: Logs não contêm URLs assinadas, tokens Bearer ou Meta, endpoints privados ou strings de conexão de banco de dados (`sanitizeErrorMessage`). Identificadores do domínio (`renderJobId`, `mediaAssetId`) são preferidos.
+- **Limite Central de Tratamento**: Todas as operações pós-aquisição (leitura, template, download, render, reserva de mídia, upload e finalização) são protegidas por um bloco central:
+  - Falhas permanentes conhecidas gravam `FAILED` com código seguro e lançam `UnrecoverableError`.
+  - Falhas transitórias liberam o job de volta para `PENDING` somente se o worker ainda mantiver o `executionToken`.
+  - Workers antigos com token substituído por fencing nunca alteram o estado do job.
+
+---
+
+## 7. Resultados das Verificações e Testes
 
 Todos os passos de validação foram executados localmente no ambiente isolado de teste:
 
 1. **`pnpm db:generate`**: Prisma Client 7.10.0 gerado com sucesso.
 2. **`node scripts/run-tests.mjs migrate`**: 18 migrations verificadas sem pendências.
 3. **`pnpm test` (Unitário)**: 149 testes passaram (13 suítes).
-4. **`node scripts/run-tests.mjs integration` (Integração)**: 205 testes passaram (10 suítes), incluindo 24 testes novos e completos de renderização e storage.
+4. **`node scripts/run-tests.mjs integration` (Integração)**: 215 testes passaram (10 suítes), incluindo todos os 34 testes de render-worker, reconciliação periódica, storage readiness e fencing tokens.
 5. **`node scripts/run-tests.mjs e2e` (Playwright E2E)**: 36 testes passaram (desktop e mobile).
 6. **`pnpm typecheck`**: Compilação TypeScript de todos os 7 pacotes do workspace e `tsconfig.tools.json` com zero erros.
 7. **`pnpm lint`**: ESLint executado com zero warnings e zero erros.

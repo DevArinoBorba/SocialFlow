@@ -7,6 +7,7 @@ import {
   MAX_IMAGE_BYTES,
   mediaStorage,
   validateImage,
+  type MediaStorage,
 } from "./media-storage.js";
 import { verifySignedMediaToken } from "./media-token.js";
 import { getPublicMediaTicket } from "./media-ticket.js";
@@ -50,7 +51,7 @@ const publicFields = {
   createdAt: true,
 } as const;
 
-export type MediaStorage = NonNullable<ReturnType<typeof mediaStorage>>;
+export type { MediaStorage };
 
 export interface MediaDependencies {
   storage?: MediaStorage | null;

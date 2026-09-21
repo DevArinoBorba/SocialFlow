@@ -2,6 +2,7 @@ import {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
+  HeadBucketCommand,
 } from "@aws-sdk/client-s3";
 import sharp from "sharp";
 import { createHash } from "node:crypto";
@@ -156,6 +157,16 @@ export function mediaStorage(env: NodeJS.ProcessEnv) {
         }
         return Buffer.concat(parts);
       },
+      async checkReadiness(): Promise<boolean> {
+        try {
+          await client.send(new HeadBucketCommand({ Bucket: bucket }), {
+            abortSignal: AbortSignal.timeout(3000),
+          });
+          return true;
+        } catch {
+          return false;
+        }
+      },
       close() {
         client.destroy();
       },
@@ -171,4 +182,9 @@ export function mediaStorage(env: NodeJS.ProcessEnv) {
   }
 }
 
-export type MediaStorage = NonNullable<ReturnType<typeof mediaStorage>>;
+export interface MediaStorage {
+  put(key: string, data: Buffer, mimeType: string): Promise<void>;
+  get(key: string): Promise<Buffer>;
+  checkReadiness?(): Promise<boolean>;
+  close(): void;
+}
