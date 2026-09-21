@@ -23,6 +23,7 @@ import {
   startMetaMockServer,
   type MetaMockServer,
 } from "../helpers/meta-mock.js";
+// @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
 import { MetaPublisherAdapter } from "../../apps/api/dist/meta-publisher.js";
 import {
   processScheduleJob,
@@ -997,7 +998,10 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
         graphBaseUrl: metaMock.url,
         pollDelayMs: 10,
         pollMaxAttempts: 5,
-        fetchFn: async (url, init) => {
+        fetchFn: async (
+          url: Parameters<typeof fetch>[0],
+          init?: Parameters<typeof fetch>[1],
+        ) => {
           if (
             String(url).includes("/feed") ||
             String(url).includes("/photos")
@@ -1568,8 +1572,10 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
     });
 
     it("ciclo de vida explícito da fila BullMQ sem singleton global", async () => {
-      const { createScheduleQueue, closeScheduleQueue } =
-        (await import("../../apps/api/dist/scheduler-queue.js")) as unknown as typeof import("../../apps/api/src/scheduler-queue.js");
+      const schedulerQueueModule =
+        // @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
+        await import("../../apps/api/dist/scheduler-queue.js");
+      const { createScheduleQueue, closeScheduleQueue } = schedulerQueueModule;
 
       const customRedis = new Redis(process.env.REDIS_URL!, {
         maxRetriesPerRequest: 1,

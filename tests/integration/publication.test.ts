@@ -23,7 +23,9 @@ import {
   startMetaMockServer,
   type MetaMockServer,
 } from "../helpers/meta-mock.js";
+// @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
 import { MetaPublisherAdapter } from "../../apps/api/dist/meta-publisher.js";
+// @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
 import { createPublicMediaTicket } from "../../apps/api/dist/media-ticket.js";
 
 const db = createDatabase(process.env.DATABASE_URL!);
