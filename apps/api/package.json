@@ -7,6 +7,7 @@
     "./publication-service.js": "./dist/publication-service.js",
     "./meta-publisher.js": "./dist/meta-publisher.js",
     "./media-ticket.js": "./dist/media-ticket.js",
+    "./render-queue.js": "./dist/render-queue.js",
     "./scheduler-queue.js": "./dist/scheduler-queue.js"
   },
   "scripts": {

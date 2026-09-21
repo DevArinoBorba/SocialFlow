@@ -167,9 +167,11 @@ model MediaAsset {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   publicationSchedules PublicationSchedule[]
-  sourceRenderJobs RenderJob[] @relation("RenderSourceMedia")
-  outputRenderJobs RenderJob[] @relation("RenderOutputMedia")
+  backgroundRenderJobs RenderJob[] @relation("RenderBackgroundMedia")
+  logoRenderJobs       RenderJob[] @relation("RenderLogoMedia")
+  outputRenderJobs     RenderJob[] @relation("RenderOutputMedia")
   @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
   @@index([organizationId, clientId, createdAt, id])
 }
 
@@ -477,16 +479,20 @@ model RenderJob {
   templateVersion    DesignTemplateVersion @relation(fields: [organizationId, clientId, templateVersionId], references: [organizationId, clientId, id], onDelete: Restrict)
   postId             String?
   post               Post?                 @relation(fields: [organizationId, clientId, postId], references: [organizationId, clientId, id], onDelete: Restrict)
-  sourceMediaAssetId String?
-  sourceMediaAsset   MediaAsset?           @relation("RenderSourceMedia", fields: [organizationId, sourceMediaAssetId], references: [organizationId, id], onDelete: Restrict)
+  backgroundMediaAssetId String?
+  backgroundMediaAsset   MediaAsset?           @relation("RenderBackgroundMedia", fields: [organizationId, clientId, backgroundMediaAssetId], references: [organizationId, clientId, id], onDelete: Restrict)
+  logoMediaAssetId       String?
+  logoMediaAsset         MediaAsset?           @relation("RenderLogoMedia", fields: [organizationId, clientId, logoMediaAssetId], references: [organizationId, clientId, id], onDelete: Restrict)
   outputMediaAssetId String?               @unique
-  outputMediaAsset   MediaAsset?           @relation("RenderOutputMedia", fields: [organizationId, outputMediaAssetId], references: [organizationId, id], onDelete: Restrict)
+  outputMediaAsset   MediaAsset?           @relation("RenderOutputMedia", fields: [organizationId, clientId, outputMediaAssetId], references: [organizationId, clientId, id], onDelete: Restrict)
   status             RenderJobStatus       @default(PENDING)
   input              Json
   inputHash          String
   idempotencyKey     String
   createdById        String
   createdBy          User                  @relation(fields: [createdById], references: [id])
+  queueJobId         String?               @unique
+  executionToken     String?
   attemptNumber      Int                   @default(0)
   leaseExpiresAt     DateTime?
   errorCode          String?
@@ -502,5 +508,7 @@ model RenderJob {
   @@index([status, leaseExpiresAt])
   @@index([templateVersionId])
   @@index([postId])
+  @@index([backgroundMediaAssetId])
+  @@index([logoMediaAssetId])
 }
 

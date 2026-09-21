@@ -43,6 +43,41 @@ export interface SchedulerActorScope {
   clientId: string;
 }
 
+export interface RendererActorScope {
+  organizationId: string;
+  clientId: string;
+}
+
+// Scoped renderer actor. It intentionally has no membership and receives only
+// the table-specific RLS capabilities granted to system:renderer.
+export function asRendererActor<T>(
+  db: PrismaClient,
+  scope: RendererActorScope,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRaw`
+      SELECT set_config('app.user_id', 'system:renderer', true),
+             set_config('app.renderer_org_id', ${scope.organizationId}, true),
+             set_config('app.renderer_client_id', ${scope.clientId}, true)
+    `;
+    const client = await tx.client.findFirst({
+      where: {
+        id: scope.clientId,
+        organizationId: scope.organizationId,
+        active: true,
+      },
+      select: { id: true },
+    });
+    if (!client) {
+      throw new Error(
+        "Invalid or inactive tenant scope for renderer execution",
+      );
+    }
+    return action(tx);
+  });
+}
+
 // Scoped system execution actor: strictly isolated to organizationId and clientId, independent of creator user status.
 export function asSchedulerActor<T>(
   db: PrismaClient,
