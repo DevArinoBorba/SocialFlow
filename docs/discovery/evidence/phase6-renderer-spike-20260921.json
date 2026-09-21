@@ -1,0 +1,55 @@
+{
+  "date": "2026-09-21",
+  "environment": {
+    "node": "v24.19.0",
+    "os": "Windows development workstation",
+    "font": "Arial TTF supplied as bytes",
+    "iterationsPerFormat": 3,
+    "note": "maxRssKb measures the Node process. Chromium child-process memory is not included. Results are comparative local evidence, not production capacity guarantees."
+  },
+  "versions": {
+    "satori": "0.33.4",
+    "sharp": "0.35.4",
+    "playwright": "1.63.0"
+  },
+  "formats": ["1080x1080", "1080x1350", "1080x1920"],
+  "candidates": [
+    {
+      "name": "svg-sharp",
+      "averageMs": [84.77, 71.66, 85.61],
+      "outputBytes": [84029, 93999, 113114],
+      "deterministic": true,
+      "maxRssKb": 135540,
+      "result": "rejected",
+      "reason": "Typography and line layout depend on the underlying SVG/font renderer and would require custom layout logic."
+    },
+    {
+      "name": "satori-sharp",
+      "averageMs": [77.29, 63.03, 80.0],
+      "outputBytes": [81841, 88705, 100697],
+      "deterministic": true,
+      "maxRssKb": 126576,
+      "result": "selected",
+      "reason": "Controlled declarative layout, font bytes embedded in generated SVG, low local cost, no browser runtime, and existing Sharp reuse."
+    },
+    {
+      "name": "browser",
+      "averageMs": [388.72, 384.54, 432.76],
+      "outputBytes": [409888, 480670, 606715],
+      "deterministic": true,
+      "maxRssKb": 226612,
+      "result": "rejected",
+      "reason": "Higher latency and artifact size plus Chromium runtime, sandbox, shared-memory and operating-system dependency costs."
+    }
+  ],
+  "batch100": {
+    "candidate": "satori-sharp",
+    "format": "1080x1350",
+    "sequential": true,
+    "durationMs": 5770.67,
+    "averageMs": 57.71,
+    "deterministic": true,
+    "maxRssKb": 131876
+  },
+  "decision": "Use pinned Satori plus pinned Sharp for the first static renderer increment. Keep Chromium outside the production renderer image."
+}

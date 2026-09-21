@@ -109,8 +109,9 @@ continua reservado para a Fase 7, após a revisão de licença e capacidade.
 
 ## Sequência de trabalho
 
-1. Spike técnico isolado e ADR do renderer.
-2. Contratos e schema do Incremento 1.
+1. Spike técnico isolado e ADR do renderer. **Concluído:** Satori + Sharp foi
+   selecionado no [ADR-012](ADR.md#adr-012--renderer-estático-da-fase-6-21092026).
+2. Contratos e schema do Incremento 1. **Próximo passo.**
 3. Renderer puro com testes de hash e casos de overflow.
 4. Armazenamento e fila idempotente.
 5. API com RBAC/RLS e auditoria.

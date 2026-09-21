@@ -1,5 +1,52 @@
 # Architecture Decision Records
 
+## ADR-012 — renderer estático da Fase 6 (21/09/2026)
+
+**Decisão:** adotar Satori `0.33.4` para transformar a árvore declarativa de
+layout em SVG e Sharp `0.35.4` para rasterizar o SVG em PNG/JPEG. O renderer será
+um pacote puro, sem HTML/CSS arbitrário, rede ou navegador. Fontes aprovadas e
+mídias autorizadas serão fornecidas como bytes; a versão do renderer e o hash da
+especificação farão parte da identidade idempotente do resultado.
+
+O spike comparou SVG manual + Sharp, Satori + Sharp e Chromium/Playwright com o
+mesmo layout, fonte e formatos 1080×1080, 1080×1350 e 1080×1920. Todos produziram
+hash estável em três repetições. Satori + Sharp foi o caminho mais rápido após o
+aquecimento (51–84 ms por arte no protótipo) e gerou arquivos menores que o
+navegador. Um lote sequencial de 100 artes 1080×1350 terminou em 5,77 s, média de
+57,71 ms, hash único e pico de RSS do processo Node de aproximadamente 129 MiB.
+Os números são referência local, não promessa de capacidade da VPS.
+
+SVG manual + Sharp foi tecnicamente rápido, mas a tipografia dependeu do
+renderizador de fontes e ficou visualmente inconsistente. Corrigir isso exigiria
+implementar layout, quebra de linha, fallback e conversão de texto para paths,
+duplicando responsabilidades já cobertas pelo Satori. Chromium apresentou a
+maior latência (aproximadamente 389–433 ms por arte no teste quente), arquivos de
+409–607 KB e exige navegador e dependências de sistema. A documentação oficial
+do Playwright também alerta para configuração própria de memória compartilhada e
+sandbox em Docker; esse custo não se justifica para templates estáticos.
+
+Satori usa um subconjunto de HTML/CSS baseado em Flexbox e não garante igualdade
+total com o navegador. Essa limitação é aceita porque os templates serão
+declarativos e controlados pelo produto. O contrato permitirá apenas propriedades
+explicitamente suportadas e testadas. Textos longos, acentos, emojis, fallback de
+fonte e safe areas terão testes visuais e de overflow antes do aceite.
+
+**Licenças e manutenção observadas:** Satori `0.33.4`, MPL-2.0, publicação npm em
+24/08/2026; Sharp `0.35.4`, Apache-2.0, publicação npm em 26/08/2026;
+Playwright `1.63.0`, Apache-2.0, avaliado e rejeitado para o renderer. As versões
+devem permanecer fixadas no lockfile. Distribuições devem preservar os avisos de
+licença aplicáveis; qualquer alteração em arquivos cobertos pela MPL deve ser
+reavaliada antes da distribuição.
+
+Fontes e evidências:
+
+- [Satori — documentação e limitações](https://github.com/vercel/satori)
+- [Licença MPL-2.0 do Satori](https://github.com/vercel/satori/blob/main/LICENSE)
+- [Sharp — composição](https://sharp.pixelplumbing.com/api-composite/)
+- [Sharp — cache, concorrência e bloqueio de operações](https://sharp.pixelplumbing.com/api-utility/)
+- [Playwright em Docker](https://playwright.dev/docs/docker)
+- [Resultado reproduzível do spike](discovery/evidence/phase6-renderer-spike-20260921.json)
+
 ## ADR-011 — biblioteca privada de imagens (15/09/2026)
 
 Selecionados @aws-sdk/client-s3 3.1132.0 (Apache-2.0, publicação npm observada
