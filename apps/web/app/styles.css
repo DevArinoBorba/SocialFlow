@@ -1608,3 +1608,644 @@ button.secondary:hover {
   background: #fef3c7;
   color: #b45309;
 }
+
+/* ==========================================================================
+   Gerador de Artes (Fase 6)
+   ========================================================================== */
+
+.artwork-generator-section {
+  margin-top: 40px;
+  padding-top: 28px;
+  border-top: 2px solid var(--line);
+}
+
+.empty-templates-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 28px;
+  margin-top: 18px;
+}
+
+.format-explainer-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  margin: 20px 0 24px;
+}
+
+@media (max-width: 768px) {
+  .format-explainer-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.format-explainer-item {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.format-explainer-item strong {
+  display: block;
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+  color: var(--ink);
+}
+
+.format-explainer-item p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+  line-height: 1.4;
+}
+
+.template-catalog-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+
+.template-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  gap: 14px;
+  margin-bottom: 24px;
+}
+
+.template-select-card {
+  background: white;
+  border: 2px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background-color 0.15s ease;
+  display: flex;
+  flex-direction: column;
+}
+
+.template-select-card:hover {
+  border-color: var(--accent);
+}
+
+.template-select-card.selected {
+  border-color: var(--accent);
+  background: #f0f7f4;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.template-select-card:focus-visible {
+  outline: 3px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.template-card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.format-tag {
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 3px 8px;
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.format-tag.format-square {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+
+.format-tag.format-portrait {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.format-tag.format-story {
+  background: #ede9fe;
+  color: #6d28d9;
+}
+
+.version-tag {
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.template-name {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+  color: var(--ink);
+}
+
+.template-dimensions {
+  margin: 0 0 14px;
+  font-size: 0.85rem;
+}
+
+.format-indicator-box {
+  margin-top: auto;
+  border: 1px dashed var(--line);
+  background: #fafafa;
+  border-radius: 4px;
+  align-self: center;
+}
+
+.format-indicator-box.ratio-square {
+  width: 44px;
+  height: 44px;
+}
+
+.format-indicator-box.ratio-portrait {
+  width: 38px;
+  height: 48px;
+}
+
+.format-indicator-box.ratio-story {
+  width: 30px;
+  height: 54px;
+}
+
+.artwork-workspace-grid {
+  display: grid;
+  grid-template-columns: 1.15fr 0.85fr;
+  gap: 32px;
+  align-items: start;
+  margin-top: 18px;
+}
+
+@media (max-width: 900px) {
+  .artwork-workspace-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.artwork-compose-form {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+.form-legend h3 {
+  margin: 0 0 4px;
+  font-size: 1.2rem;
+}
+
+.form-legend p {
+  margin-bottom: 20px;
+}
+
+.field-group {
+  margin-bottom: 18px;
+}
+
+.field-group .label-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.field-group label {
+  margin: 0 0 6px;
+}
+
+.char-count {
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.media-selector-box {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding: 8px 4px 12px;
+  margin-top: 6px;
+}
+
+.media-option-card {
+  flex: 0 0 120px;
+  background: white;
+  border: 2px solid var(--line);
+  border-radius: 4px;
+  padding: 6px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  color: var(--ink);
+  min-height: auto;
+}
+
+.media-option-card:hover {
+  border-color: var(--accent);
+}
+
+.media-option-card.active {
+  border-color: var(--accent);
+  background: #f0f7f4;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.media-thumbnail {
+  width: 100%;
+  height: 68px;
+  object-fit: cover;
+  border-radius: 3px;
+  margin-bottom: 6px;
+}
+
+.no-media-icon {
+  width: 100%;
+  height: 68px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f1f5f9;
+  color: var(--muted);
+  font-size: 1.6rem;
+  border-radius: 3px;
+  margin-bottom: 6px;
+}
+
+.media-name {
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 108px;
+  display: block;
+}
+
+.media-dim {
+  font-size: 0.7rem;
+}
+
+.submission-box {
+  margin-top: 24px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.summary-details {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.85rem;
+  margin-bottom: 18px;
+  padding: 12px;
+  background: var(--paper);
+  border-radius: 4px;
+}
+
+.summary-details strong {
+  margin-bottom: 4px;
+  color: var(--ink);
+}
+
+/* Coluna da Prévia */
+.artwork-preview-column {
+  position: sticky;
+  top: 20px;
+}
+
+.preview-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 12px;
+}
+
+.preview-heading h3 {
+  margin: 0;
+  font-size: 1.15rem;
+}
+
+.preview-viewport-wrapper {
+  width: 100%;
+  max-width: 360px;
+  margin: 0 auto;
+  border-radius: 8px;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.15);
+  overflow: hidden;
+  position: relative;
+  background: #111;
+}
+
+.preview-artboard {
+  width: 100%;
+  height: 100%;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.preview-bg-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 1;
+}
+
+.preview-overlay-layer {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+}
+
+.preview-content-layer {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+}
+
+.preview-eyebrow {
+  font-size: 0.72rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+
+.preview-title {
+  margin: 0 0 10px;
+  font-size: 1.25rem;
+  font-weight: 800;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.preview-subtitle {
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
+
+.preview-cta-badge {
+  display: inline-block;
+  align-self: flex-start;
+  font-size: 0.72rem;
+  font-weight: 750;
+  padding: 6px 12px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-top: 4px;
+}
+
+.preview-logo-container {
+  margin-top: auto;
+  padding-top: 12px;
+}
+
+.preview-logo-image {
+  max-height: 36px;
+  max-width: 120px;
+}
+
+/* Card de Status da Renderização */
+.render-job-status-card {
+  margin-top: 20px;
+  padding: 18px;
+  border-radius: var(--radius);
+  background: white;
+  border: 1px solid var(--line);
+}
+
+.render-job-status-card.status-completed {
+  border-left: 4px solid #16a34a;
+}
+
+.render-job-status-card.status-failed {
+  border-left: 4px solid var(--error);
+}
+
+.render-job-status-card.status-processing,
+.render-job-status-card.status-pending {
+  border-left: 4px solid #d97706;
+}
+
+.job-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.job-status-msg {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 550;
+}
+
+.job-polling-timeout-notice {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.job-polling-timeout-notice p {
+  margin-bottom: 8px;
+  font-size: 0.85rem;
+}
+
+.job-completed-box .success-text {
+  color: #15803d;
+  font-weight: 650;
+  margin-bottom: 12px;
+}
+
+.completed-output-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.completed-img-view {
+  width: 100%;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: #111;
+}
+
+.download-btn-link {
+  display: inline-block;
+  text-align: center;
+  text-decoration: none;
+  background: var(--accent);
+  color: white;
+  padding: 10px 18px;
+  border-radius: var(--radius);
+  font-weight: 650;
+  font-size: 0.9rem;
+}
+
+.download-btn-link:hover {
+  background: #17422f;
+}
+
+.job-failed-box .error-text {
+  color: var(--error);
+  font-weight: 650;
+  margin-bottom: 6px;
+}
+
+.error-code-badge {
+  font-family: monospace;
+  font-size: 0.8rem;
+  background: #fee2e2;
+  color: var(--error);
+  padding: 4px 8px;
+  border-radius: 4px;
+  display: inline-block;
+  margin: 4px 0 8px;
+}
+
+.readonly-notice-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 20px;
+}
+
+.readonly-notice-card h4 {
+  margin: 0 0 6px;
+  font-size: 1rem;
+}
+
+/* Seção de Histórico de Artes Recentes */
+.artwork-history-section {
+  margin-top: 48px;
+  padding-top: 28px;
+  border-top: 2px solid var(--line);
+}
+
+.history-header {
+  margin-bottom: 18px;
+}
+
+.history-header h3 {
+  margin: 0 0 4px;
+  font-size: 1.25rem;
+}
+
+.history-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 16px;
+}
+
+.history-job-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.history-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.history-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.history-thumb-wrapper {
+  width: 100%;
+  height: 180px;
+  background: #111;
+  border-radius: 4px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.history-thumb {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.history-placeholder-box {
+  width: 100%;
+  height: 100px;
+  background: var(--paper);
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.history-details {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+}
+
+.history-error-code {
+  font-family: monospace;
+  font-size: 0.72rem;
+  background: #fee2e2;
+  color: var(--error);
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+.history-card-footer {
+  display: flex;
+  gap: 10px;
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--line);
+}
+
+.history-card-footer a {
+  font-size: 0.85rem;
+  text-decoration: none;
+}

@@ -1,5 +1,6 @@
 "use client";
 import { MediaLibrary } from "./media-library";
+import { ArtworkGenerator } from "./artwork-generator";
 import { ContentManager } from "./content-manager";
 import { SocialAccountsManager } from "./social-accounts-manager";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -30,6 +31,7 @@ export default function Home() {
   const [org, setOrg] = useState("");
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
+  const [mediaRevision, setMediaRevision] = useState(0);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [loading, setLoading] = useState(true);
   const [listing, setListing] = useState(false);
@@ -425,6 +427,21 @@ export default function Home() {
           (m.role === "OWNER" || m.role === "ADMIN" || m.role === "EDITOR"))),
   );
 
+  const canInitializeTemplates = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && isAdmin(m.role)) ||
+        (m.clientId === selectedClientId && isAdmin(m.role))),
+  );
+
+  const canGenerate = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && isAdmin(m.role)) ||
+        (m.clientId === selectedClientId &&
+          (isAdmin(m.role) || m.role === "EDITOR"))),
+  );
+
   return (
     <div className="workspace">
       <a className="skip" href="#content">
@@ -779,6 +796,15 @@ export default function Home() {
               brands={brands}
               canWrite={canWriteBrands}
               canArchive={canCreateClient}
+              refreshKey={mediaRevision}
+            />
+            <ArtworkGenerator
+              key={`artwork-${org}/${selectedClientId}`}
+              org={org}
+              clientId={selectedClientId}
+              canGenerate={canGenerate}
+              canInitializeTemplates={canInitializeTemplates}
+              onArtworkCompleted={() => setMediaRevision((r) => r + 1)}
             />
             <ContentManager
               key={`content-${org}/${selectedClientId}`}

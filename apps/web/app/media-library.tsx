@@ -26,12 +26,14 @@ export function MediaLibrary({
   brands,
   canWrite,
   canArchive,
+  refreshKey,
 }: {
   org: string;
   clientId: string;
   brands: Brand[];
   canWrite: boolean;
   canArchive: boolean;
+  refreshKey?: number | string;
 }) {
   const base = `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/media`;
   const [items, setItems] = useState<Asset[]>([]),
@@ -69,7 +71,7 @@ export function MediaLibrary({
     return () => {
       live = false;
     };
-  }, [base, page, filter, revision]);
+  }, [base, page, filter, revision, refreshKey]);
   const refresh = () => setRevision((v) => v + 1);
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
