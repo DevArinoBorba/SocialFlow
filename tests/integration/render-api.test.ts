@@ -3,7 +3,7 @@ import { createDatabase, asActor } from "../../packages/db/src/index.js";
 import { readConfig } from "../../packages/config/src/index.js";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { createApplication } from "../../apps/api/dist/app.js";
 import {
   RENDERER_VERSION,
@@ -898,12 +898,20 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     expect(audits.length).toBe(1);
   });
 
-  // 21. Falha de queue.add() mantém job PENDING e retorna 202
-  it("21. Falha de queue.add() mantém job PENDING no banco e responde 202", async () => {
-    // Cria app com queue falha propositalmente
+  // 21. Falha de queue.add() mantém job PENDING e responde 202 com log sanitizado
+  it("21. Falha de queue.add() mantém job PENDING no banco e responde 202 com log sanitizado", async () => {
+    const errorWithSecrets =
+      "Redis error: redis://:redis_password_123@10.0.0.1:6379/0 and postgresql://admin:pg_secret@127.0.0.1:5432/db and http://10.0.4.1:8080/internal and Bearer secret-token-456 and secretKey=0123456789abcdef0123456789abcdef";
+
+    let capturedLog = "";
+    const originalConsoleError = console.error;
+    console.error = (msg: string) => {
+      capturedLog += msg + "\n";
+    };
+
     const failingQueue = {
       add: async () => {
-        throw new Error("Redis connection simulate failure");
+        throw new Error(errorWithSecrets);
       },
       close: async () => {},
     } as unknown as ReturnType<typeof createRenderQueue>;
@@ -948,7 +956,22 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
       });
       expect(saved?.status).toBe("PENDING");
       expect(saved?.queueJobId).toBeNull();
+
+      // Verifica que nenhum segredo vazou para o log
+      expect(capturedLog).not.toContain("redis_password_123");
+      expect(capturedLog).not.toContain("pg_secret");
+      expect(capturedLog).not.toContain("10.0.4.1");
+      expect(capturedLog).not.toContain("secret-token-456");
+      expect(capturedLog).not.toContain("0123456789abcdef0123456789abcdef");
+      expect(capturedLog).toContain("render_enqueue_failed");
+      expect(capturedLog).toContain("QUEUE_ENQUEUE_ERROR");
+      expect(capturedLog).toContain("[REDACTED_REDIS_URL]");
+      expect(capturedLog).toContain("[REDACTED_DB_URL]");
+      expect(capturedLog).toContain("[REDACTED_URL]");
+      expect(capturedLog).toContain("Bearer [REDACTED]");
+      expect(capturedLog).toContain("[REDACTED_SECRET]");
     } finally {
+      console.error = originalConsoleError;
       await failApp.close();
     }
   });
@@ -1119,11 +1142,14 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     expect(invalidRes.status).toBe(400);
   });
 
-  // 26. Mídia pronta produz URL relativa autenticada
-  it("26. Mídia resultante pronta produz URL relativa autenticada", async () => {
+  // 26. Mídia resultante pronta produz URL relativa autenticada com /content e entrega bytes reais
+  it("26. Mídia resultante pronta produz URL relativa autenticada terminando em /content", async () => {
     const cookie = await login("editor-a");
-    // Cria output media asset
     const outputAssetId = randomUUID();
+    const sampleBytes = Buffer.from("sample-rendered-image-bytes-12345");
+    const sampleSha256 = createHash("sha256").update(sampleBytes).digest("hex");
+    mockStorageMap.set(`media/org-a/client-a/${outputAssetId}`, sampleBytes);
+
     const outputAsset = await migration.mediaAsset.create({
       data: {
         id: outputAssetId,
@@ -1133,10 +1159,10 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
         storageKey: `media/org-a/client-a/${outputAssetId}`,
         status: "ready",
         mimeType: "image/png",
-        byteSize: 2048,
+        byteSize: sampleBytes.length,
         width: 1080,
         height: 1350,
-        sha256: "9".repeat(64),
+        sha256: sampleSha256,
         archived: false,
       },
     });
@@ -1167,11 +1193,24 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     };
     expect(body.outputMediaAssetId).toBe(outputAsset.id);
     expect(body.outputMediaUrl).toBe(
-      `/api/organizations/org-a/clients/client-a/media/${outputAsset.id}`,
+      `/api/organizations/org-a/clients/client-a/media/${outputAsset.id}/content`,
     );
+    expect(body.outputMediaUrl.endsWith("/content")).toBe(true);
     // Não expõe S3 nem bucket URL
     expect(body.outputMediaUrl).not.toContain("http");
     expect(body.outputMediaUrl).not.toContain("s3");
+
+    // Usa exatamente a URL retornada com o cookie autenticado
+    const contentRes = await request(body.outputMediaUrl, cookie, "GET");
+    expect(contentRes.status).toBe(200);
+    expect(contentRes.headers.get("content-type")).toBe("image/png");
+    const receivedBuffer = Buffer.from(await contentRes.arrayBuffer());
+    expect(receivedBuffer.equals(sampleBytes)).toBe(true);
+
+    // Confirma que um usuário de outro tenant não consegue acessar a mídia (404)
+    const cookieB = await login("admin-b");
+    const crossRes = await request(body.outputMediaUrl, cookieB, "GET");
+    expect(crossRes.status).toBe(404);
   });
 
   // 27. queueJobId é preenchido somente pelo renderer
@@ -1274,5 +1313,395 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
       },
     );
     expect(resPost.status).toBe(401);
+  });
+
+  // 31. Replay idêntico após arquivar template retorna 200
+  it("31. Replay idêntico após arquivar template retorna 200 OK sem consultar estado mutável", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `replay-archived-template-${randomUUID()}`;
+    const payload = {
+      templateVersionId: versionAId,
+      input: { title: "Arte de replay após arquivar template" },
+      idempotencyKey,
+    };
+
+    const res1 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res1.status).toBe(202);
+    const job1 = (await res1.json()) as { id: string };
+
+    // Arquiva o template de design após a criação usando asActor
+    await asActor(db, "admin-a", async (tx) => {
+      await tx.designTemplate.update({
+        where: { id: templateAId },
+        data: { status: "ARCHIVED" },
+      });
+    });
+
+    try {
+      // Replay idêntico com o template agora arquivado: deve retornar 200 OK com o mesmo job
+      const res2 = await request(
+        "/api/organizations/org-a/clients/client-a/render-jobs",
+        cookie,
+        "POST",
+        payload,
+      );
+      expect(res2.status).toBe(200);
+      const job2 = (await res2.json()) as { id: string };
+      expect(job2.id).toBe(job1.id);
+    } finally {
+      await asActor(db, "admin-a", async (tx) => {
+        await tx.designTemplate.update({
+          where: { id: templateAId },
+          data: { status: "ACTIVE" },
+        });
+      });
+    }
+  });
+
+  // 32. Replay idêntico após arquivar background retorna 200
+  it("32. Replay idêntico após arquivar background retorna 200 OK", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `replay-archived-bg-${randomUUID()}`;
+    const payload = {
+      templateVersionId: versionAId,
+      input: {
+        title: "Arte de replay após arquivar background",
+        backgroundMediaAssetId: validBgAssetId,
+      },
+      idempotencyKey,
+    };
+
+    const res1 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res1.status).toBe(202);
+    const job1 = (await res1.json()) as { id: string };
+
+    // Arquiva o asset de background usando asActor
+    await asActor(db, "admin-a", async (tx) => {
+      await tx.mediaAsset.update({
+        where: { id: validBgAssetId },
+        data: { archived: true },
+      });
+    });
+
+    try {
+      const res2 = await request(
+        "/api/organizations/org-a/clients/client-a/render-jobs",
+        cookie,
+        "POST",
+        payload,
+      );
+      expect(res2.status).toBe(200);
+      const job2 = (await res2.json()) as { id: string };
+      expect(job2.id).toBe(job1.id);
+    } finally {
+      await asActor(db, "admin-a", async (tx) => {
+        await tx.mediaAsset.update({
+          where: { id: validBgAssetId },
+          data: { archived: false },
+        });
+      });
+    }
+  });
+
+  // 33. Replay idêntico após arquivar logotipo retorna 200
+  it("33. Replay idêntico após arquivar logotipo retorna 200 OK", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `replay-archived-logo-${randomUUID()}`;
+    const payload = {
+      templateVersionId: versionAId,
+      input: {
+        title: "Arte de replay após arquivar logotipo",
+        logoMediaAssetId: validLogoAssetId,
+      },
+      idempotencyKey,
+    };
+
+    const res1 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res1.status).toBe(202);
+    const job1 = (await res1.json()) as { id: string };
+
+    // Arquiva o asset de logotipo usando asActor
+    await asActor(db, "admin-a", async (tx) => {
+      await tx.mediaAsset.update({
+        where: { id: validLogoAssetId },
+        data: { archived: true },
+      });
+    });
+
+    try {
+      const res2 = await request(
+        "/api/organizations/org-a/clients/client-a/render-jobs",
+        cookie,
+        "POST",
+        payload,
+      );
+      expect(res2.status).toBe(200);
+      const job2 = (await res2.json()) as { id: string };
+      expect(job2.id).toBe(job1.id);
+    } finally {
+      await asActor(db, "admin-a", async (tx) => {
+        await tx.mediaAsset.update({
+          where: { id: validLogoAssetId },
+          data: { archived: false },
+        });
+      });
+    }
+  });
+
+  // 34. Replay idêntico após mudança de estado do post retorna 200
+  it("34. Replay idêntico após mudança de estado do post retorna 200 OK", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `replay-modified-post-${randomUUID()}`;
+    const payload = {
+      templateVersionId: versionAId,
+      postId: postAId,
+      input: { title: "Arte de replay com post" },
+      idempotencyKey,
+    };
+
+    const res1 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res1.status).toBe(202);
+    const job1 = (await res1.json()) as { id: string };
+
+    // Altera legenda do post usando asActor
+    await asActor(db, "editor-a", async (tx) => {
+      await tx.post.update({
+        where: { id: postAId },
+        data: { caption: "Nova legenda após criação do render" },
+      });
+    });
+
+    // Replay deve continuar retornando 200 OK
+    const res2 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res2.status).toBe(200);
+    const job2 = (await res2.json()) as { id: string };
+    expect(job2.id).toBe(job1.id);
+  });
+
+  // 35. Replay idêntico não cria nova auditoria nem reenfileira
+  it("35. Replay idêntico não cria nova auditoria nem reenfileira", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `replay-no-audit-no-queue-${randomUUID()}`;
+    const payload = {
+      templateVersionId: versionAId,
+      input: { title: "Sem auditoria duplicada nem reenfileiramento" },
+      idempotencyKey,
+    };
+
+    const res1 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res1.status).toBe(202);
+    const job1 = (await res1.json()) as { id: string };
+
+    const auditCountBefore = await migration.auditLog.count({
+      where: { entityId: job1.id },
+    });
+    expect(auditCountBefore).toBe(1);
+
+    // Replay idêntico
+    const res2 = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      payload,
+    );
+    expect(res2.status).toBe(200);
+
+    const auditCountAfter = await migration.auditLog.count({
+      where: { entityId: job1.id },
+    });
+    expect(auditCountAfter).toBe(1);
+  });
+
+  // 36. Concorrência P2002 idêntica retorna o mesmo job e divergente retorna 409
+  it("36. Concorrência P2002: idêntica retorna 200 com mesmo job e divergente retorna 409", async () => {
+    const cookie = await login("editor-a");
+    const idempotencyKey = `p2002-test-${randomUUID()}`;
+
+    // Cria o primeiro job simulando o registro persistido vencedor na colisão concorrente
+    const winningJob = await migration.renderJob.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        templateVersionId: versionAId,
+        status: "PENDING",
+        input: {
+          title: "Vencedor Concorrente",
+          eyebrow: "",
+          subtitle: "",
+          callToAction: "",
+          backgroundMediaAssetId: null,
+          logoMediaAssetId: null,
+        },
+        inputHash: "hash-p2002",
+        idempotencyKey,
+        createdById: "editor-a",
+      },
+    });
+
+    // Replay com payload idêntico: recupera registro vencedor e retorna 200
+    const resIdentical = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      {
+        templateVersionId: versionAId,
+        input: { title: "Vencedor Concorrente" },
+        idempotencyKey,
+      },
+    );
+    expect(resIdentical.status).toBe(200);
+    const bodyIdentical = (await resIdentical.json()) as { id: string };
+    expect(bodyIdentical.id).toBe(winningJob.id);
+
+    // Replay com payload divergente: retorna 409 Conflict
+    const resDivergent = await request(
+      "/api/organizations/org-a/clients/client-a/render-jobs",
+      cookie,
+      "POST",
+      {
+        templateVersionId: versionAId,
+        input: { title: "Divergente Concorrente" },
+        idempotencyKey,
+      },
+    );
+    expect(resDivergent.status).toBe(409);
+    const bodyDivergent = (await resDivergent.json()) as { message: string };
+    expect(bodyDivergent.message).toMatch(/idempotência/i);
+  });
+
+  // 37. Apenas uma rota Express é registrada para cada operação (sem alias :organizationId)
+  it("37. Apenas uma rota canônica (:org) é registrada para cada operação Express", () => {
+    const expressApp = appRuntime.app.getHttpAdapter().getInstance();
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const stack = (expressApp.router?.stack ||
+      expressApp._router?.stack ||
+      []) as any[];
+    const renderRoutes: string[] = [];
+    for (const layer of stack) {
+      if (layer.route?.path && typeof layer.route.path === "string") {
+        if (layer.route.path.includes("render-jobs")) {
+          renderRoutes.push(layer.route.path);
+        }
+      }
+    }
+
+    // Não deve existir nenhum caminho registrado com :organizationId
+    expect(renderRoutes.some((r) => r.includes(":organizationId"))).toBe(false);
+
+    // Deve conter apenas as rotas canônicas :org
+    expect(renderRoutes).toContain(
+      "/api/organizations/:org/clients/:clientId/render-jobs",
+    );
+    expect(renderRoutes).toContain(
+      "/api/organizations/:org/clients/:clientId/render-jobs/:renderJobId",
+    );
+
+    // Apenas uma rota registrada para cada método na coleção (sem duplicidade)
+    const postRoutes = stack.filter(
+      (l) =>
+        l.route?.path ===
+          "/api/organizations/:org/clients/:clientId/render-jobs" &&
+        l.route.methods?.post,
+    );
+    const getRoutes = stack.filter(
+      (l) =>
+        l.route?.path ===
+          "/api/organizations/:org/clients/:clientId/render-jobs" &&
+        l.route.methods?.get,
+    );
+    expect(postRoutes.length).toBe(1);
+    expect(getRoutes.length).toBe(1);
+  });
+
+  // 38. Erro inesperado não expõe mensagem interna nem stack trace
+  it("38. Erro inesperado não expõe mensagem interna nem stack trace (503 genérico e log sanitizado)", async () => {
+    let capturedLog = "";
+    const originalConsoleError = console.error;
+    console.error = (msg: string) => {
+      capturedLog += msg + "\n";
+    };
+
+    // Cria servidor de teste com scoped que lança erro inesperado com URL interna de banco
+    const unexpectedDbError = new Error(
+      "PrismaClientInitializationError: Can't reach database server at postgresql://social_user:raw_pg_secret_pw@db.internal:5432/socialflow",
+    );
+    const mockFailingScoped = async () => {
+      throw unexpectedDbError;
+    };
+
+    // @ts-expect-error express is resolved dynamically from apps/api
+    const expressModule =
+      await import("../../apps/api/node_modules/express/index.js");
+    const dummyServer = expressModule.default();
+    dummyServer.use(expressModule.default.json());
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dummyQueue = { add: async () => {}, close: async () => {} } as any;
+
+    const { registerRender } = await import("../../apps/api/dist/render.js");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    registerRender(dummyServer, mockFailingScoped as any, dummyQueue);
+
+    const http = await import("node:http");
+    const testHttpServer = http.createServer(dummyServer);
+    await new Promise<void>((resolve) =>
+      testHttpServer.listen(0, "127.0.0.1", resolve),
+    );
+    const port = (testHttpServer.address() as AddressInfo).port;
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/api/organizations/org-a/clients/client-a/render-jobs/123e4567-e89b-12d3-a456-426614174000`,
+      );
+
+      // Deve responder 503 com mensagem genérica controlada
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { message: string };
+      expect(body.message).toBe("Serviço indisponível. Tente novamente.");
+      expect(body.message).not.toContain("Prisma");
+      expect(body.message).not.toContain("raw_pg_secret_pw");
+      expect(body.message).not.toContain("postgresql");
+
+      // Log deve ser sanitizado: evento controlado e erro sanitizado
+      expect(capturedLog).toContain("render_request_failed");
+      expect(capturedLog).toContain("INTERNAL_UNEXPECTED_ERROR");
+      expect(capturedLog).not.toContain("raw_pg_secret_pw");
+      expect(capturedLog).not.toContain("db.internal");
+      expect(capturedLog).toContain("[REDACTED_DB_URL]");
+    } finally {
+      console.error = originalConsoleError;
+      await new Promise<void>((resolve) =>
+        testHttpServer.close(() => resolve()),
+      );
+    }
   });
 });

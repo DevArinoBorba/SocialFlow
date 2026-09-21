@@ -55,14 +55,8 @@ import {
   type RenderJobData,
 } from "./render-queue.js";
 
-class HttpError extends Error {
-  constructor(
-    public status: number,
-    message: string,
-  ) {
-    super(message);
-  }
-}
+import { HttpError } from "./errors.js";
+export { HttpError };
 
 export interface CreateApplicationOptions {
   mediaDependencies?: MediaDependencies;

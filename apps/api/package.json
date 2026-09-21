@@ -9,7 +9,9 @@
     "./media-ticket.js": "./dist/media-ticket.js",
     "./media-storage.js": "./dist/media-storage.js",
     "./render-queue.js": "./dist/render-queue.js",
-    "./scheduler-queue.js": "./dist/scheduler-queue.js"
+    "./scheduler-queue.js": "./dist/scheduler-queue.js",
+    "./log-sanitizer.js": "./dist/log-sanitizer.js",
+    "./errors.js": "./dist/errors.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

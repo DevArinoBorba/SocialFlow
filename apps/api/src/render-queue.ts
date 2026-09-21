@@ -1,6 +1,7 @@
 import { Queue } from "bullmq";
 import type { Redis } from "ioredis";
 
+export { sanitizeErrorMessage } from "./log-sanitizer.js";
 export const RENDER_QUEUE_NAME = "artwork-render";
 
 export interface RenderJobData {
