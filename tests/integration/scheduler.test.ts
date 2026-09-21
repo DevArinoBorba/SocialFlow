@@ -17,13 +17,11 @@ import { readConfig } from "../../packages/config/src/index.js";
 import type { AddressInfo } from "node:net";
 import { Redis } from "ioredis";
 import { randomUUID } from "node:crypto";
-// @ts-expect-error dist output does not emit d.ts
 import { createApplication } from "../../apps/api/dist/app.js";
 import {
   startMetaMockServer,
   type MetaMockServer,
 } from "../helpers/meta-mock.js";
-// @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
 import { MetaPublisherAdapter } from "../../apps/api/dist/meta-publisher.js";
 import {
   processScheduleJob,
@@ -1573,7 +1571,6 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
 
     it("ciclo de vida explícito da fila BullMQ sem singleton global", async () => {
       const schedulerQueueModule =
-        // @ts-ignore integration tests execute the built API, which intentionally does not emit declarations
         await import("../../apps/api/dist/scheduler-queue.js");
       const { createScheduleQueue, closeScheduleQueue } = schedulerQueueModule;
 

@@ -19,7 +19,6 @@ import {
   type Prisma,
 } from "../../packages/db/src/index.js";
 import { readConfig } from "../../packages/config/src/index.js";
-// @ts-expect-error dist output does not emit d.ts
 import { createApplication } from "../../apps/api/dist/app.js";
 import {
   startMetaMockServer,
