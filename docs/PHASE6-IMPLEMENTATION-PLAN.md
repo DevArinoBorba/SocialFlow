@@ -111,13 +111,25 @@ continua reservado para a Fase 7, após a revisão de licença e capacidade.
 
 1. Spike técnico isolado e ADR do renderer. **Concluído:** Satori + Sharp foi
    selecionado no [ADR-012](ADR.md#adr-012--renderer-estático-da-fase-6-21092026).
-2. Contratos e schema do Incremento 1. **Próximo passo.**
-3. Renderer puro com testes de hash e casos de overflow.
-4. Armazenamento e fila idempotente.
+2. Contratos e schema do Incremento 1. **Concluído:** formatos, especificação
+   declarativa, versões imutáveis, execuções idempotentes e isolamento RLS foram
+   adicionados na migration `202609210001_design_templates_and_render_jobs`.
+3. Renderer puro com testes de hash e casos de overflow. **Concluído:** o pacote
+   `@socialflow/render` usa fontes empacotadas, bytes de mídia já autorizados e
+   limites de texto, sem aceitar HTML, CSS, URL ou caminho arbitrário.
+4. Armazenamento e fila idempotente. **Próximo passo.**
 5. API com RBAC/RLS e auditoria.
 6. Interface de prévia e geração individual.
 7. Revisão independente do Incremento 1.
 8. Editor básico e, somente depois, geração em lote.
+
+### Verificação da fundação
+
+A fundação foi validada com 147 testes unitários e 174 testes de integração,
+incluindo determinismo nos três formatos, dimensões finais, validação de entrada,
+isolamento entre organizações, imutabilidade de versões e unicidade da chave de
+idempotência. Migration, lint, formatação, tipos e build de produção também
+foram executados com sucesso.
 
 ## Fora do primeiro incremento
 

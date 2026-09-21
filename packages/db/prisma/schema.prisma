@@ -26,6 +26,7 @@ model User {
   memberships Membership[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
   publicationSchedules PublicationSchedule[]
+  renderJobs RenderJob[]
 }
 model Session {
   id String @id
@@ -87,6 +88,9 @@ model Organization {
   publicationAttempts PublicationAttempt[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
   publicationSchedules PublicationSchedule[]
+  designTemplates DesignTemplate[]
+  designTemplateVersions DesignTemplateVersion[]
+  renderJobs RenderJob[]
 }
 model Client {
   id String @id @default(uuid())
@@ -105,6 +109,9 @@ model Client {
   publicationAttempts PublicationAttempt[]
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
   publicationSchedules PublicationSchedule[]
+  designTemplates DesignTemplate[]
+  designTemplateVersions DesignTemplateVersion[]
+  renderJobs RenderJob[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -160,6 +167,8 @@ model MediaAsset {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
   publicationSchedules PublicationSchedule[]
+  sourceRenderJobs RenderJob[] @relation("RenderSourceMedia")
+  outputRenderJobs RenderJob[] @relation("RenderOutputMedia")
   @@unique([organizationId, id])
   @@index([organizationId, clientId, createdAt, id])
 }
@@ -232,6 +241,7 @@ model Post {
   updatedAt           DateTime             @updatedAt
   publicationAttempts PublicationAttempt[]
   schedules           PublicationSchedule[]
+  renderJobs          RenderJob[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
@@ -398,5 +408,99 @@ model PublicationSchedule {
   @@index([postId, status])
   @@index([jobId])
   @@index([status, leaseExpiresAt])
+}
+
+enum DesignFormat {
+  SQUARE
+  PORTRAIT
+  STORY
+}
+
+enum DesignTemplateStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+enum RenderJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+model DesignTemplate {
+  id             String                  @id @default(uuid())
+  organizationId String
+  organization   Organization            @relation(fields: [organizationId], references: [id])
+  clientId       String
+  client         Client                  @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  name           String
+  status         DesignTemplateStatus    @default(ACTIVE)
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+  versions       DesignTemplateVersion[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@index([organizationId, clientId, status, createdAt])
+}
+
+model DesignTemplateVersion {
+  id              String         @id @default(uuid())
+  organizationId  String
+  organization    Organization   @relation(fields: [organizationId], references: [id])
+  clientId        String
+  client          Client         @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  templateId      String
+  template        DesignTemplate @relation(fields: [organizationId, clientId, templateId], references: [organizationId, clientId, id], onDelete: Cascade)
+  version         Int
+  format          DesignFormat
+  spec            Json
+  specHash        String
+  rendererVersion String
+  createdAt       DateTime       @default(now())
+  renderJobs      RenderJob[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@unique([templateId, version])
+  @@index([organizationId, clientId, templateId, version])
+}
+
+model RenderJob {
+  id                 String                @id @default(uuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id])
+  clientId           String
+  client             Client                @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  templateVersionId  String
+  templateVersion    DesignTemplateVersion @relation(fields: [organizationId, clientId, templateVersionId], references: [organizationId, clientId, id], onDelete: Restrict)
+  postId             String?
+  post               Post?                 @relation(fields: [organizationId, clientId, postId], references: [organizationId, clientId, id], onDelete: Restrict)
+  sourceMediaAssetId String?
+  sourceMediaAsset   MediaAsset?           @relation("RenderSourceMedia", fields: [organizationId, sourceMediaAssetId], references: [organizationId, id], onDelete: Restrict)
+  outputMediaAssetId String?               @unique
+  outputMediaAsset   MediaAsset?           @relation("RenderOutputMedia", fields: [organizationId, outputMediaAssetId], references: [organizationId, id], onDelete: Restrict)
+  status             RenderJobStatus       @default(PENDING)
+  input              Json
+  inputHash          String
+  idempotencyKey     String
+  createdById        String
+  createdBy          User                  @relation(fields: [createdById], references: [id])
+  attemptNumber      Int                   @default(0)
+  leaseExpiresAt     DateTime?
+  errorCode          String?
+  errorMessage       String?
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@unique([organizationId, clientId, idempotencyKey])
+  @@index([organizationId, clientId, status, createdAt])
+  @@index([status, leaseExpiresAt])
+  @@index([templateVersionId])
+  @@index([postId])
 }
 

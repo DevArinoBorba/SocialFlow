@@ -69,3 +69,4 @@ export * from "./content.js";
 export * from "./social-account.js";
 export * from "./timezone.js";
 export * from "./schedule.js";
+export * from "./design.js";
