@@ -1,5 +1,19 @@
 # Local development overrides. Merged automatically by docker compose when no -f flag is passed.
 services:
+  migrate:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:local}
+    build: { context: . }
+  api:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:local}
+    build: { context: . }
+  worker:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:local}
+    build: { context: . }
   web:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:local}
+    build: { context: . }
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:3000"
+  seed:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:local}
+    build: { context: . }

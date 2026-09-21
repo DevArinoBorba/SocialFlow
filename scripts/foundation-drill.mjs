@@ -27,11 +27,13 @@ const values = {
   TEST_REDIS_PORT: await port(),
   TEST_API_PORT: await port(),
   TEST_WORKER_PORT: await port(),
+  TEST_STORAGE_PORT: await port(),
   POSTGRES_PASSWORD: secret(),
   RUNTIME_DB_PASSWORD: secret(),
   REDIS_PASSWORD: secret(),
   SESSION_SECRET: secret(),
   DEV_SEED_PASSWORD: secret(),
+  SOCIALFLOW_IMAGE: "socialflow-test:local",
 };
 values.APP_URL = `http://localhost:${values.WEB_PORT}`;
 writeFileSync(

@@ -51,8 +51,7 @@ services:
         ]
     restart: unless-stopped
   migrate:
-    build:
-      context: .
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     command:
@@ -65,9 +64,7 @@ services:
       postgres: { condition: service_healthy }
     restart: "no"
   api:
-    build:
-      context: .
-      args: { SERVICE: api }
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     environment:
       <<: *app-env
       MEDIA_S3_ENDPOINT: ${MEDIA_S3_ENDPOINT:-}
@@ -98,9 +95,7 @@ services:
         ]
     restart: unless-stopped
   worker:
-    build:
-      context: .
-      args: { SERVICE: worker }
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     environment: *app-env
     command:
       [
@@ -123,14 +118,14 @@ services:
     stop_grace_period: 30s
     restart: unless-stopped
   web:
-    build:
-      context: .
-      args: { SERVICE: web }
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     expose:
       - "3000"
     environment:
       NODE_ENV: production
+      PORT: 3000
       API_INTERNAL_URL: http://api:3001
+    command: [sh, -c, "exec pnpm --filter @socialflow/web start"]
     depends_on:
       api: { condition: service_healthy }
     healthcheck:
@@ -145,7 +140,7 @@ services:
     restart: unless-stopped
   seed:
     profiles: [tools]
-    build: { context: . }
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     environment:
       APP_ENV: ${APP_ENV:?Set APP_ENV}
       ALLOW_DEV_SEED: "true"

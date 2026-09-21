@@ -15,7 +15,16 @@ FROM base AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 COPY --from=build --chown=node:node /app /app
 USER node
-ARG SERVICE=api
-ENV SERVICE=$SERVICE
-EXPOSE 3000
-CMD ["sh", "-c", "exec pnpm --filter @socialflow/$SERVICE start"]
+EXPOSE 3000 3001 3002
+
+ARG COMMIT_SHA=""
+ARG BUILD_DATE=""
+ARG REPO_URL="https://github.com/DevArinoBorba/SocialFlow"
+
+LABEL org.opencontainers.image.title="SocialFlow" \
+      org.opencontainers.image.description="SocialFlow unified immutable container image for Web, API, Worker and Prisma Migrations" \
+      org.opencontainers.image.source="${REPO_URL}" \
+      org.opencontainers.image.revision="${COMMIT_SHA}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+
+CMD ["sh", "-c", "exec pnpm --filter @socialflow/web start"]

@@ -72,7 +72,7 @@ try {
       const migrations = await source.$queryRaw<
         { count: bigint }[]
       >`SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL`;
-      assert.equal(Number(migrations[0]?.count), 7);
+      assert.equal(Number(migrations[0]?.count), 16);
       break;
     }
     case "seed": {

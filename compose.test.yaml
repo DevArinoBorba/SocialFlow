@@ -1,10 +1,15 @@
 # Test-only overrides; no data service ports in the base production topology.
 services:
+  migrate:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:test}
+    build: { context: . }
   postgres:
     ports: ["127.0.0.1:${TEST_DB_PORT:-55432}:5432"]
   redis:
     ports: ["127.0.0.1:${TEST_REDIS_PORT:-56379}:6379"]
   api:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:test}
+    build: { context: . }
     environment:
       MEDIA_S3_ENDPOINT: http://media-storage:9000
       MEDIA_S3_BUCKET: socialflow-media-test
@@ -21,8 +26,12 @@ services:
       media-storage: { condition: service_healthy }
     ports: ["127.0.0.1:${TEST_API_PORT:-53001}:3001"]
   worker:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:test}
+    build: { context: . }
     ports: ["127.0.0.1:${TEST_WORKER_PORT:-53002}:3002"]
   web:
+    image: ${SOCIALFLOW_IMAGE:-socialflow:test}
+    build: { context: . }
     ports: ["127.0.0.1:${WEB_PORT:-3000}:3000"]
   media-storage:
     image: quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z

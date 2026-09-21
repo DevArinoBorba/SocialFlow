@@ -1,15 +1,49 @@
+# Version control & agents
 .git
+.github
+.claude
+.codex
+.gemini
+agents
+
+# Environments and credentials
+**/.env
+**/.env.*
+!**/.env.example
+*.pem
+*.key
+*.cert
+*.crt
+
+# Build outputs & caches
 **/node_modules
 **/.next
 **/dist
 **/generated
-**/.env
-**/.env.*
-!**/.env.example
+**/.turbo
+**/.cache
+
+# Local & scratch directories
 .local
 .impeccable
+scratch
+
+# Test & inspection artifacts
 test-results
 playwright-report
+coverage
+
+# Backups, dumps and logs
 *.log
 *.dump
 *.backup
+*.bak
+*.tmp
+attachments
+
+# Documentation & prompts (not needed in runtime image)
+docs
+prompts
+DESIGN.md
+README.md
+walkthrough.md
