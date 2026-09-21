@@ -65,11 +65,14 @@ Separar workers de render, storage externo, tuning DB/Redis, horizontal
 scaling. Só executar após métricas reais demonstrarem necessidade.
 
 
-## Estado após auditoria local e homologação — 20/09/2026
+## Estado operacional — 21/09/2026
 
 - **Fase 0 (Discovery técnico)**: Concluída.
 - **Fase 1 (Fundação)**: Concluída e testada.
 - **Fase 2 (Conteúdo e mídia)**: Concluída e testada.
-- **Fase 3 (Meta - Facebook e Instagram)**: Concluída em homologação (`socialflow-homolog`). Publicações em Facebook Page e Instagram Business validadas com IDs remotos gerados pela Meta Graph API, sem duplicações, com idempotência estrita, leases e trilha de auditoria completa. Produção permanece **não implantada**.
-- **Fase 4 (Scheduler com BullMQ)**: Em implementação no repositório local. Modelo persistente, filas BullMQ com jobs determinísticos, reconciliação na inicialização, suporte a timezone IANA (padrão `America/Cuiaba`), política de tolerância a atraso e cancelamento/reprogramação implementados e validados por suíte abrangente de testes automatizados com mocks locais.
-
+- **Fase 3 (Meta — Facebook e Instagram)**: Concluída, testada com publicações reais controladas em homologação e implantada em produção. O fluxo inclui OAuth, seleção explícita de contas, publicação manual, idempotência, leases, reconciliação e auditoria.
+- **Fase 4 (Scheduler com BullMQ)**: Concluída, testada com agendamento real controlado em homologação e implantada em produção. O fluxo inclui jobs determinísticos, retries persistentes, reconciliação, timezone IANA, cancelamento, reprogramação e prevenção de duplicações.
+- **Infraestrutura de entrega**: Build externo no GitHub Actions, imagem imutável no GHCR e deploy por digest validados em homologação e produção. A VPS não compila a aplicação durante o deploy.
+- **Fase 5 (TikTok)**: Adiada até confirmar elegibilidade e aprovação do aplicativo na Content Posting API oficial. A avaliação pode prosseguir em paralelo, sem bloquear o produto.
+- **Fase 6 (Geração em lote)**: Próximo ciclo ativo. O plano de execução está em [PHASE6-IMPLEMENTATION-PLAN.md](PHASE6-IMPLEMENTATION-PLAN.md).
+- **Fases 7 a 10**: Planejadas e ainda não iniciadas.

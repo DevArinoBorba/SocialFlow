@@ -50,4 +50,9 @@ Consulte esse relatório antes de executar os prompts de implementação.
 Ele registra decisões propostas, pendências Meta/TikTok, ameaças e seis
 entregas para a Fase 1. A fundação está implementada; o estado de validação
 está em [docs/discovery/FOUNDATION-IMPLEMENTATION.md](docs/discovery/FOUNDATION-IMPLEMENTATION.md).
-Ainda não há deploy externo validado.
+As fases de fundação, conteúdo e mídia, publicação Meta e agendamento estão
+implantadas em produção. O deploy usa imagem imutável construída no GitHub
+Actions e publicada no GHCR; consulte o estado atual em
+[docs/ROADMAP.md](docs/ROADMAP.md). O próximo ciclo ativo é a Fase 6, geração de
+artes estáticas em lote. A integração TikTok permanece condicionada à
+elegibilidade da API oficial.
