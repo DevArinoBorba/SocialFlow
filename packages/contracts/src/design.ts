@@ -3,6 +3,13 @@ import { z } from "zod";
 export const designFormats = ["SQUARE", "PORTRAIT", "STORY"] as const;
 export type DesignFormat = (typeof designFormats)[number];
 
+export const systemTemplateKeys = [
+  "EDITORIAL_SQUARE",
+  "EDITORIAL_PORTRAIT",
+  "EDITORIAL_STORY",
+] as const;
+export type SystemTemplateKey = (typeof systemTemplateKeys)[number];
+
 export const designDimensions: Record<
   DesignFormat,
   { width: number; height: number }

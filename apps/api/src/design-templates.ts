@@ -6,6 +6,7 @@ import type {
 } from "@socialflow/db";
 import {
   type Role,
+  type SystemTemplateKey,
   designTemplateInputSchema,
   designTemplatePatchSchema,
   designTemplateVersionInputSchema,
@@ -41,6 +42,7 @@ export interface DesignTemplateVersionSummaryDto {
 export interface DesignTemplateListItemDto {
   id: string;
   name: string;
+  systemKey: string | null;
   status: DesignTemplateStatus;
   createdAt: string;
   updatedAt: string;
@@ -60,6 +62,7 @@ export interface DesignTemplateVersionDetailDto {
 export interface DesignTemplateDetailDto {
   id: string;
   name: string;
+  systemKey: string | null;
   status: DesignTemplateStatus;
   createdAt: string;
   updatedAt: string;
@@ -69,6 +72,7 @@ export interface DesignTemplateDetailDto {
 export function toDesignTemplateListItemDto(template: {
   id: string;
   name: string;
+  systemKey?: string | null;
   status: DesignTemplateStatus;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -85,6 +89,7 @@ export function toDesignTemplateListItemDto(template: {
   return {
     id: template.id,
     name: template.name,
+    systemKey: template.systemKey ?? null,
     status: template.status,
     createdAt:
       template.createdAt instanceof Date
@@ -113,6 +118,7 @@ export function toDesignTemplateListItemDto(template: {
 export function toDesignTemplateDetailDto(template: {
   id: string;
   name: string;
+  systemKey?: string | null;
   status: DesignTemplateStatus;
   createdAt: Date | string;
   updatedAt: Date | string;
@@ -129,6 +135,7 @@ export function toDesignTemplateDetailDto(template: {
   return {
     id: template.id,
     name: template.name,
+    systemKey: template.systemKey ?? null,
     status: template.status,
     createdAt:
       template.createdAt instanceof Date
@@ -166,11 +173,13 @@ function validateTemplateName(name: string) {
 }
 
 export const DEFAULT_DESIGN_TEMPLATES: Array<{
-  name: string;
+  systemKey: SystemTemplateKey;
+  defaultName: string;
   spec: DesignTemplateSpec;
 }> = [
   {
-    name: "Editorial Square",
+    systemKey: "EDITORIAL_SQUARE",
+    defaultName: "Editorial Square",
     spec: {
       schemaVersion: 1,
       format: "SQUARE",
@@ -189,7 +198,8 @@ export const DEFAULT_DESIGN_TEMPLATES: Array<{
     },
   },
   {
-    name: "Editorial Portrait",
+    systemKey: "EDITORIAL_PORTRAIT",
+    defaultName: "Editorial Portrait",
     spec: {
       schemaVersion: 1,
       format: "PORTRAIT",
@@ -208,7 +218,8 @@ export const DEFAULT_DESIGN_TEMPLATES: Array<{
     },
   },
   {
-    name: "Editorial Story",
+    systemKey: "EDITORIAL_STORY",
+    defaultName: "Editorial Story",
     spec: {
       schemaVersion: 1,
       format: "STORY",
@@ -403,8 +414,8 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
           where: {
             organizationId,
             clientId,
-            name: {
-              in: DEFAULT_DESIGN_TEMPLATES.map((t) => t.name),
+            systemKey: {
+              in: DEFAULT_DESIGN_TEMPLATES.map((t) => t.systemKey),
             },
           },
           include: {
@@ -416,24 +427,21 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
           orderBy: [{ createdAt: "asc" }, { id: "asc" }],
         });
 
-        const existingNames = new Set(existingTemplates.map((t) => t.name));
-        const missingDefaults = DEFAULT_DESIGN_TEMPLATES.filter(
-          (t) => !existingNames.has(t.name),
+        const existingKeys = new Set(
+          existingTemplates
+            .map((t) => t.systemKey)
+            .filter((k): k is SystemTemplateKey => Boolean(k)),
         );
-
-        if (missingDefaults.length === 0) {
-          return {
-            created: false,
-            templates: existingTemplates.map(toDesignTemplateListItemDto),
-          };
-        }
+        const missingDefaults = DEFAULT_DESIGN_TEMPLATES.filter(
+          (t) => !existingKeys.has(t.systemKey),
+        );
 
         const createdTemplates: Array<
           Parameters<typeof toDesignTemplateListItemDto>[0]
         > = [];
 
         for (const item of missingDefaults) {
-          validateTemplateName(item.name);
+          validateTemplateName(item.defaultName);
           const spec = designTemplateSpecSchema.parse(item.spec);
           const specHash = hashTemplateSpec(spec);
 
@@ -441,7 +449,8 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             data: {
               organizationId,
               clientId,
-              name: item.name,
+              name: item.defaultName,
+              systemKey: item.systemKey,
               status: "ACTIVE",
             },
           });
@@ -484,9 +493,13 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
         }
 
         const allTemplates = [...existingTemplates, ...createdTemplates];
+        const orderedTemplates = DEFAULT_DESIGN_TEMPLATES.map((def) =>
+          allTemplates.find((t) => t.systemKey === def.systemKey)!,
+        );
+
         return {
-          created: true,
-          templates: allTemplates.map(toDesignTemplateListItemDto),
+          created: missingDefaults.length > 0,
+          templates: orderedTemplates.map(toDesignTemplateListItemDto),
         };
       });
 
@@ -556,6 +569,7 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             organizationId,
             clientId,
             name,
+            systemKey: null,
             status: "ACTIVE",
           },
         });
@@ -895,6 +909,7 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             organizationId,
             clientId,
             name,
+            systemKey: null,
             status: "ACTIVE",
           },
         });

@@ -137,6 +137,7 @@ describe("Phase 6: Design Templates API", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.id).toBeDefined();
+    expect(body.systemKey).toBeNull();
     expect(body.status).toBe("ACTIVE");
     expect(body.versions).toHaveLength(1);
     expect(body.versions[0].version).toBe(1);
@@ -152,6 +153,7 @@ describe("Phase 6: Design Templates API", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.id).toBeDefined();
+    expect(body.systemKey).toBeNull();
     expect(body.status).toBe("ACTIVE");
     expect(body.versions[0].version).toBe(1);
   });
@@ -165,6 +167,7 @@ describe("Phase 6: Design Templates API", () => {
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.id).toBeDefined();
+    expect(body.systemKey).toBeNull();
     expect(body.status).toBe("ACTIVE");
   });
 
@@ -789,46 +792,89 @@ describe("Phase 6: Design Templates API", () => {
     ).toBe(true);
   });
 
-  // 30. Criação do template inicial é idempotente
-  it("30. Default templates creation is idempotent", async () => {
+  // 30. Criação do template inicial é idempotente e gera as três chaves do sistema
+  it("30. Default templates creation produces exactly the 3 system keys and is idempotent", async () => {
     // Initial call creates default templates
     const res1 = await request(`${rootA}/default`, cookieOwnerA, "POST");
     expect([200, 201]).toContain(res1.status);
     const list1 = await res1.json();
-    expect(list1.length).toBeGreaterThanOrEqual(3);
+    expect(list1).toHaveLength(3);
+    expect(list1.map((t: { systemKey: string }) => t.systemKey)).toEqual([
+      "EDITORIAL_SQUARE",
+      "EDITORIAL_PORTRAIT",
+      "EDITORIAL_STORY",
+    ]);
+    expect(
+      list1.every(
+        (t: {
+          status: string;
+          latestVersion: { version: number; rendererVersion: string } | null;
+        }) =>
+          t.status === "ACTIVE" &&
+          t.latestVersion !== null &&
+          t.latestVersion.version === 1 &&
+          t.latestVersion.rendererVersion === RENDERER_VERSION,
+      ),
+    ).toBe(true);
 
     // Second call is idempotent and returns 200 without creating duplicates
     const res2 = await request(`${rootA}/default`, cookieOwnerA, "POST");
     expect(res2.status).toBe(200);
     const list2 = await res2.json();
-    expect(list2.length).toBe(list1.length);
+    expect(list2).toHaveLength(3);
+    expect(list2.map((t: { id: string }) => t.id)).toEqual(
+      list1.map((t: { id: string }) => t.id),
+    );
+    expect(list2.map((t: { systemKey: string }) => t.systemKey)).toEqual(
+      list1.map((t: { systemKey: string }) => t.systemKey),
+    );
+
+    const dbTemplates = await migration.designTemplate.findMany({
+      where: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        systemKey: { not: null },
+      },
+    });
+    expect(dbTemplates).toHaveLength(3);
   });
 
   // 31. Concorrência no template inicial não cria duplicatas
   it("31. Concurrent default template requests do not create duplicates", async () => {
-    // We test on Org B, Client B to test clean initialization
-    const [res1, res2] = await Promise.all([
-      request(`${rootB}/default`, cookieAdminB, "POST"),
-      request(`${rootB}/default`, cookieAdminB, "POST"),
+    const concClient = await migration.client.create({
+      data: {
+        id: `client-conc-${randomUUID().slice(0, 8)}`,
+        organizationId: "org-a",
+        name: "Concurrent Test Client",
+        slug: `conc-${randomUUID().slice(0, 8)}`,
+      },
+    });
+    const concRoot = `/api/organizations/org-a/clients/${concClient.id}/design-templates`;
+
+    const [res1, res2, res3] = await Promise.all([
+      request(`${concRoot}/default`, cookieAdminA, "POST"),
+      request(`${concRoot}/default`, cookieAdminA, "POST"),
+      request(`${concRoot}/default`, cookieAdminA, "POST"),
     ]);
 
     expect([200, 201]).toContain(res1.status);
     expect([200, 201]).toContain(res2.status);
+    expect([200, 201]).toContain(res3.status);
 
-    const templatesInB = await migration.designTemplate.findMany({
+    const templatesInConc = await migration.designTemplate.findMany({
       where: {
-        organizationId: "org-b",
-        clientId: "client-b",
-        name: {
-          in: ["Editorial Square", "Editorial Portrait", "Editorial Story"],
-        },
+        organizationId: "org-a",
+        clientId: concClient.id,
+        systemKey: { not: null },
       },
     });
 
-    // Exactly 3 templates, one for each name
-    expect(templatesInB).toHaveLength(3);
-    const names = new Set(templatesInB.map((t) => t.name));
-    expect(names.size).toBe(3);
+    expect(templatesInConc).toHaveLength(3);
+    const keys = new Set(templatesInConc.map((t) => t.systemKey));
+    expect(keys.size).toBe(3);
+    expect(keys.has("EDITORIAL_SQUARE")).toBe(true);
+    expect(keys.has("EDITORIAL_PORTRAIT")).toBe(true);
+    expect(keys.has("EDITORIAL_STORY")).toBe(true);
   });
 
   // 32. API de renderização aceita a versão criada
@@ -883,5 +929,353 @@ describe("Phase 6: Design Templates API", () => {
       });
       expect(otherTemplates).toHaveLength(0);
     });
+  });
+
+  // 35. Template personalizado com mesmo nome não bloqueia a criação do padrão
+  it("35. Custom template named 'Editorial Square' does not block default 'EDITORIAL_SQUARE'", async () => {
+    const collisionClient = await migration.client.create({
+      data: {
+        id: `client-coll-${randomUUID().slice(0, 8)}`,
+        organizationId: "org-a",
+        name: "Collision Test Client",
+        slug: `coll-${randomUUID().slice(0, 8)}`,
+      },
+    });
+    const clientRoot = `/api/organizations/org-a/clients/${collisionClient.id}/design-templates`;
+
+    // Create custom template named "Editorial Square"
+    const customRes = await request(clientRoot, cookieOwnerA, "POST", {
+      name: "Editorial Square",
+      spec: validSpec,
+    });
+    expect(customRes.status).toBe(201);
+    const customBody = await customRes.json();
+    expect(customBody.name).toBe("Editorial Square");
+    expect(customBody.systemKey).toBeNull();
+
+    // Call /default to create default templates
+    const defaultRes = await request(
+      `${clientRoot}/default`,
+      cookieOwnerA,
+      "POST",
+    );
+    expect([200, 201]).toContain(defaultRes.status);
+    const defaultBody = await defaultRes.json();
+    expect(defaultBody).toHaveLength(3);
+
+    const defaultSquare = defaultBody.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_SQUARE",
+    );
+    expect(defaultSquare).toBeDefined();
+    expect(defaultSquare.name).toBe("Editorial Square");
+    expect(defaultSquare.id).not.toBe(customBody.id);
+
+    // Verify in database that both coexist
+    const allTemplates = await migration.designTemplate.findMany({
+      where: { clientId: collisionClient.id },
+    });
+    expect(allTemplates).toHaveLength(4);
+
+    const squares = allTemplates.filter((t) => t.name === "Editorial Square");
+    expect(squares).toHaveLength(2);
+    expect(squares.find((t) => t.systemKey === null)?.id).toBe(customBody.id);
+    expect(squares.find((t) => t.systemKey === "EDITORIAL_SQUARE")?.id).toBe(
+      defaultSquare.id,
+    );
+  });
+
+  // 36. Renomear um padrão e chamar /default novamente preserva o mesmo ID e não cria outro
+  it("36. Renaming a default template and calling /default preserves ID and does not create duplicate", async () => {
+    const listRes = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    const defaults = await listRes.json();
+    const square = defaults.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_SQUARE",
+    );
+    expect(square).toBeDefined();
+
+    const newName = `Renamed Square ${randomUUID().slice(0, 6)}`;
+    const renameRes = await request(
+      `${rootA}/${square.id}`,
+      cookieOwnerA,
+      "PATCH",
+      {
+        name: newName,
+      },
+    );
+    expect(renameRes.status).toBe(200);
+    const renamed = await renameRes.json();
+    expect(renamed.id).toBe(square.id);
+    expect(renamed.name).toBe(newName);
+    expect(renamed.systemKey).toBe("EDITORIAL_SQUARE");
+
+    // Calling /default must recognize it by systemKey, not name
+    const afterDefaultRes = await request(
+      `${rootA}/default`,
+      cookieOwnerA,
+      "POST",
+    );
+    expect(afterDefaultRes.status).toBe(200);
+    const afterDefaults = await afterDefaultRes.json();
+    expect(afterDefaults).toHaveLength(3);
+
+    const squareAfter = afterDefaults.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_SQUARE",
+    );
+    expect(squareAfter).toBeDefined();
+    expect(squareAfter.id).toBe(square.id);
+    expect(squareAfter.name).toBe(newName);
+
+    // Count in DB remains exactly 3
+    const systemTemplates = await migration.designTemplate.findMany({
+      where: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        systemKey: { not: null },
+      },
+    });
+    expect(systemTemplates).toHaveLength(3);
+  });
+
+  // 37. Arquivar um padrão e chamar /default novamente preserva o mesmo ID e o status ARCHIVED
+  it("37. Archiving a default template and calling /default preserves ID and ARCHIVED status", async () => {
+    const listRes = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    const defaults = await listRes.json();
+    const story = defaults.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_STORY",
+    );
+    expect(story).toBeDefined();
+
+    // Archive default template
+    const archiveRes = await request(
+      `${rootA}/${story.id}`,
+      cookieOwnerA,
+      "PATCH",
+      { status: "ARCHIVED" },
+    );
+    expect(archiveRes.status).toBe(200);
+    const archived = await archiveRes.json();
+    expect(archived.id).toBe(story.id);
+    expect(archived.status).toBe("ARCHIVED");
+    expect(archived.systemKey).toBe("EDITORIAL_STORY");
+
+    // Call /default again: must NOT recreate or unarchive
+    const afterDefaultRes = await request(
+      `${rootA}/default`,
+      cookieOwnerA,
+      "POST",
+    );
+    expect(afterDefaultRes.status).toBe(200);
+    const afterDefaults = await afterDefaultRes.json();
+    expect(afterDefaults).toHaveLength(3);
+
+    const storyAfter = afterDefaults.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_STORY",
+    );
+    expect(storyAfter).toBeDefined();
+    expect(storyAfter.id).toBe(story.id);
+    expect(storyAfter.status).toBe("ARCHIVED");
+
+    // Count in DB remains exactly 3
+    const systemTemplates = await migration.designTemplate.findMany({
+      where: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        systemKey: { not: null },
+      },
+    });
+    expect(systemTemplates).toHaveLength(3);
+  });
+
+  // 38. Clientes distintos recebem conjuntos independentes das mesmas chaves
+  it("38. Distinct clients receive independent sets of the same system keys", async () => {
+    const resA = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    expect([200, 201]).toContain(resA.status);
+    const listA = await resA.json();
+
+    const resB = await request(`${rootB}/default`, cookieAdminB, "POST");
+    expect([200, 201]).toContain(resB.status);
+    const listB = await resB.json();
+
+    expect(listA).toHaveLength(3);
+    expect(listB).toHaveLength(3);
+
+    const keysA = listA.map((t: { systemKey: string }) => t.systemKey).sort();
+    const keysB = listB.map((t: { systemKey: string }) => t.systemKey).sort();
+    expect(keysA).toEqual([
+      "EDITORIAL_PORTRAIT",
+      "EDITORIAL_SQUARE",
+      "EDITORIAL_STORY",
+    ]);
+    expect(keysB).toEqual([
+      "EDITORIAL_PORTRAIT",
+      "EDITORIAL_SQUARE",
+      "EDITORIAL_STORY",
+    ]);
+
+    const idsA = new Set(listA.map((t: { id: string }) => t.id));
+    for (const itemB of listB) {
+      expect(idsA.has(itemB.id)).toBe(false);
+    }
+  });
+
+  // 39. Usuário não consegue informar systemKey na criação
+  it("39. User cannot provide systemKey on template creation (400)", async () => {
+    const res = await request(rootA, cookieOwnerA, "POST", {
+      name: "Attempt System Key",
+      spec: validSpec,
+      systemKey: "EDITORIAL_SQUARE",
+    });
+    expect(res.status).toBe(400);
+  });
+
+  // 40. Usuário não consegue alterar systemKey no PATCH ou na duplicação
+  it("40. User cannot modify or pass systemKey on PATCH or duplicate (400)", async () => {
+    const listRes = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    const defaults = await listRes.json();
+    const portrait = defaults.find(
+      (t: { systemKey: string }) => t.systemKey === "EDITORIAL_PORTRAIT",
+    );
+
+    const patchRes = await request(
+      `${rootA}/${portrait.id}`,
+      cookieOwnerA,
+      "PATCH",
+      {
+        systemKey: "EDITORIAL_STORY",
+      },
+    );
+    expect(patchRes.status).toBe(400);
+
+    const dupRes = await request(
+      `${rootA}/${portrait.id}/duplicate`,
+      cookieOwnerA,
+      "POST",
+      {
+        name: "Duplicated",
+        systemKey: "EDITORIAL_STORY",
+      },
+    );
+    expect(dupRes.status).toBe(400);
+  });
+
+  // 41. Atualização direta pelo papel de runtime não consegue mudar a chave (privilégios mínimos e trigger postgres)
+  it("41. Direct SQL update on systemKey by runtime role is blocked by trigger (42501)", async () => {
+    const listRes = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    const defaults = await listRes.json();
+    const defaultTemplate = defaults[0];
+
+    // 1. O papel de runtime socialflow_runtime não possui permissão UPDATE na coluna systemKey
+    await expect(
+      asActor(db, "admin-a", async (tx) => {
+        await tx.$executeRaw`UPDATE "DesignTemplate" SET "systemKey" = 'HACKED' WHERE "id" = ${defaultTemplate.id}`;
+      }),
+    ).rejects.toThrow();
+
+    // 2. Conexão direta com papel amplo aciona o gatilho protect_design_template_scope()
+    await expect(
+      migration.$executeRaw`UPDATE "DesignTemplate" SET "systemKey" = 'HACKED' WHERE "id" = ${defaultTemplate.id}`,
+    ).rejects.toThrow(/DesignTemplate systemKey is immutable/);
+
+    // 3. Tentativa de atribuir chave a template personalizado (de NULL para chave) também é bloqueada pelo gatilho
+    const customRes = await request(rootA, cookieOwnerA, "POST", {
+      name: `Custom For Immutability Test ${randomUUID()}`,
+      spec: validSpec,
+    });
+    const custom = await customRes.json();
+    await expect(
+      migration.$executeRaw`UPDATE "DesignTemplate" SET "systemKey" = 'EDITORIAL_SQUARE' WHERE "id" = ${custom.id}`,
+    ).rejects.toThrow(/DesignTemplate systemKey is immutable/);
+  });
+
+  // 42. Listagem e detalhe retornam corretamente systemKey
+  it("42. Listing and detail endpoints return systemKey (and systemKey: null for custom templates)", async () => {
+    const inspectClient = await migration.client.create({
+      data: {
+        id: `client-insp-${randomUUID().slice(0, 8)}`,
+        organizationId: "org-a",
+        name: "Inspection Test Client",
+        slug: `insp-${randomUUID().slice(0, 8)}`,
+      },
+    });
+    const inspectRoot = `/api/organizations/org-a/clients/${inspectClient.id}/design-templates`;
+
+    // Cria 1 template customizado e os 3 templates padrão no mesmo cliente
+    const customCreated = await request(inspectRoot, cookieOwnerA, "POST", {
+      name: "Custom Inspection Template",
+      spec: validSpec,
+    });
+    expect(customCreated.status).toBe(201);
+    const customJson = await customCreated.json();
+    expect(customJson.systemKey).toBeNull();
+
+    const defaultCreated = await request(
+      `${inspectRoot}/default`,
+      cookieOwnerA,
+      "POST",
+    );
+    expect([200, 201]).toContain(defaultCreated.status);
+
+    const listRes = await request(inspectRoot, cookieOwnerA, "GET");
+    expect(listRes.status).toBe(200);
+    const listBody = await listRes.json();
+    expect(listBody.items).toHaveLength(4);
+
+    const systemItem = listBody.items.find(
+      (i: { systemKey: string | null }) => i.systemKey !== null,
+    );
+    expect(systemItem).toBeDefined();
+    expect([
+      "EDITORIAL_SQUARE",
+      "EDITORIAL_PORTRAIT",
+      "EDITORIAL_STORY",
+    ]).toContain(systemItem.systemKey);
+
+    const customItem = listBody.items.find(
+      (i: { systemKey: string | null }) => i.systemKey === null,
+    );
+    expect(customItem).toBeDefined();
+    expect(customItem.systemKey).toBeNull();
+    expect(customItem.id).toBe(customJson.id);
+
+    // Verify detail endpoints
+    const systemDetailRes = await request(
+      `${inspectRoot}/${systemItem.id}`,
+      cookieOwnerA,
+      "GET",
+    );
+    expect(systemDetailRes.status).toBe(200);
+    const systemDetail = await systemDetailRes.json();
+    expect(systemDetail.systemKey).toBe(systemItem.systemKey);
+
+    const customDetailRes = await request(
+      `${inspectRoot}/${customItem.id}`,
+      cookieOwnerA,
+      "GET",
+    );
+    expect(customDetailRes.status).toBe(200);
+    const customDetail = await customDetailRes.json();
+    expect(customDetail.systemKey).toBeNull();
+  });
+
+  // 43. Permissões na rota /default: OWNER e ADMIN permitidos, EDITOR, APPROVER e CLIENT_VIEWER bloqueados
+  it("43. Role permissions on /default: OWNER and ADMIN allowed (200/201), EDITOR, APPROVER, CLIENT_VIEWER forbidden (403)", async () => {
+    const ownerRes = await request(`${rootA}/default`, cookieOwnerA, "POST");
+    expect([200, 201]).toContain(ownerRes.status);
+
+    const adminRes = await request(`${rootA}/default`, cookieAdminA, "POST");
+    expect([200, 201]).toContain(adminRes.status);
+
+    const editorRes = await request(`${rootA}/default`, cookieEditorA, "POST");
+    expect(editorRes.status).toBe(403);
+
+    const approverRes = await request(
+      `${rootA}/default`,
+      cookieApproverA,
+      "POST",
+    );
+    expect(approverRes.status).toBe(403);
+
+    const viewerRes = await request(`${rootA}/default`, cookieViewerA, "POST");
+    expect(viewerRes.status).toBe(403);
   });
 });

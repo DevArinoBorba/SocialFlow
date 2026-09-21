@@ -437,6 +437,7 @@ model DesignTemplate {
   clientId       String
   client         Client                  @relation(fields: [organizationId, clientId], references: [organizationId, id])
   name           String
+  systemKey      String?
   status         DesignTemplateStatus    @default(ACTIVE)
   createdAt      DateTime                @default(now())
   updatedAt      DateTime                @updatedAt
@@ -444,6 +445,7 @@ model DesignTemplate {
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
+  @@unique([organizationId, clientId, systemKey])
   @@index([organizationId, clientId, status, createdAt])
 }
 

@@ -1630,13 +1630,19 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
       (l) =>
         l.route?.path ===
           "/api/organizations/:org/clients/:clientId/render-jobs" &&
-        l.route.methods?.post,
+        Boolean(
+          (l.route as unknown as { methods?: Record<string, boolean> })?.methods
+            ?.post,
+        ),
     );
     const getRoutes = stack.filter(
       (l) =>
         l.route?.path ===
           "/api/organizations/:org/clients/:clientId/render-jobs" &&
-        l.route.methods?.get,
+        Boolean(
+          (l.route as unknown as { methods?: Record<string, boolean> })?.methods
+            ?.get,
+        ),
     );
     expect(postRoutes.length).toBe(1);
     expect(getRoutes.length).toBe(1);
@@ -1658,9 +1664,9 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
       throw unexpectedDbError;
     };
 
+    const expressPath: string = "../../apps/api/node_modules/express/index.js";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const expressModule: any =
-      await import("../../apps/api/node_modules/express/index.js");
+    const expressModule: any = await import(expressPath);
     const dummyServer = expressModule.default();
     dummyServer.use(expressModule.default.json());
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
