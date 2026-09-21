@@ -1,7 +1,18 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { DesignFormat, DesignTemplateSpec } from "@socialflow/contracts";
+import {
+  ArtworkPollingController,
+  type PollingJob,
+} from "./artwork-polling-controller";
 
 interface DesignTemplateVersionSummary {
   id: string;
@@ -51,21 +62,7 @@ interface MediaAssetSummary {
   byteSize: number;
 }
 
-interface RenderJobItem {
-  id: string;
-  status: "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
-  templateVersionId: string;
-  postId: string | null;
-  backgroundMediaAssetId: string | null;
-  logoMediaAssetId: string | null;
-  outputMediaAssetId: string | null;
-  outputMediaUrl: string | null;
-  attemptNumber: number;
-  errorCode: string | null;
-  createdAt: string;
-  updatedAt: string;
-  completedAt: string | null;
-}
+export type RenderJobItem = PollingJob;
 
 interface ArtworkGeneratorProps {
   org: string;
@@ -212,8 +209,12 @@ export function ArtworkGenerator({
   const [pollingTimeoutReached, setPollingTimeoutReached] = useState(false);
   const [refreshingJob, setRefreshingJob] = useState(false);
 
-  // Biblioteca de Mídias para Seleção
+  // Biblioteca de Mídias para Seleção com estados explícitos
   const [mediaAssets, setMediaAssets] = useState<MediaAssetSummary[]>([]);
+  const [mediaStatus, setMediaStatus] = useState<
+    "loading" | "available" | "unavailable" | "empty" | "error"
+  >("loading");
+  const [mediaError, setMediaError] = useState<string | null>(null);
   const [mediaHasMore, setMediaHasMore] = useState(false);
   const [mediaPage, setMediaPage] = useState(1);
   const [loadingMedia, setLoadingMedia] = useState(false);
@@ -228,24 +229,73 @@ export function ArtworkGenerator({
   const [generalError, setGeneralError] = useState("");
   const [generalNotice, setGeneralNotice] = useState("");
 
-  // Refs de controle de ciclo de vida e polling
+  // Refs de controle de ciclo de vida e montagem
   const isMountedRef = useRef(true);
-  const pollingAbortControllerRef = useRef<AbortController | null>(null);
-  const pollingCountRef = useRef(0);
 
-  // Limpa estados ao desmontar ou trocar de cliente/organização
+  // Callback de recarga do histórico para o controlador de polling
+  const loadHistoryRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const onArtworkCompletedRef = useRef(onArtworkCompleted);
+  useEffect(() => {
+    onArtworkCompletedRef.current = onArtworkCompleted;
+  }, [onArtworkCompleted]);
+
+  // Controlador de ciclo de vida de polling
+  const controllerRef = useRef<ArtworkPollingController | null>(null);
+  if (!controllerRef.current) {
+    controllerRef.current = new ArtworkPollingController({
+      fetchJob: async (jobId, signal) => {
+        return requestApi<RenderJobItem>(
+          `${renderJobsBase}/${encodeURIComponent(jobId)}`,
+          undefined,
+          signal,
+        );
+      },
+      onJobUpdated: (job) => {
+        if (!isMountedRef.current) return;
+        setActiveJob(job);
+        setHistory((prev) => {
+          const idx = prev.findIndex((item) => item.id === job.id);
+          if (idx >= 0) {
+            const copy = [...prev];
+            copy[idx] = job;
+            return copy;
+          }
+          return [job, ...prev];
+        });
+      },
+      onJobCompleted: () => {
+        if (!isMountedRef.current) return;
+        setPollingTimeoutReached(false);
+        setGeneralNotice(
+          "Arte gerada com sucesso! A imagem também foi adicionada à sua Biblioteca de Imagens.",
+        );
+        onArtworkCompletedRef.current?.();
+        void loadHistoryRef.current();
+      },
+      onJobFailed: () => {
+        if (!isMountedRef.current) return;
+        setPollingTimeoutReached(false);
+      },
+      onTimeoutReached: () => {
+        if (!isMountedRef.current) return;
+        setPollingTimeoutReached(true);
+      },
+    });
+  }
+
+  // Desmontagem: limpa recursos e cancela timers/requisições
   useEffect(() => {
     isMountedRef.current = true;
+    const controller = controllerRef.current;
     return () => {
       isMountedRef.current = false;
-      if (pollingAbortControllerRef.current) {
-        pollingAbortControllerRef.current.abort();
-      }
+      controller?.dispose();
     };
   }, []);
 
-  // Quando trocar de cliente ou organização: reseta o formulário e gera nova intenção
+  // Quando trocar de cliente ou organização: cancela polling, reseta formulário e estados
   useEffect(() => {
+    controllerRef.current?.stopPolling();
     setSelectedTemplateId(null);
     setSelectedDetail(null);
     setEyebrow("");
@@ -262,9 +312,12 @@ export function ArtworkGenerator({
     setTemplatesCursor(null);
     setHistoryCursor(null);
     setMediaPage(1);
+    setMediaAssets([]);
+    setMediaStatus("loading");
+    setMediaError(null);
   }, [org, clientId]);
 
-  // Carrega templates ativos
+  // Carrega templates ativos com deduplicação por ID
   const loadTemplates = useCallback(
     async (cursor?: string) => {
       try {
@@ -278,9 +331,12 @@ export function ArtworkGenerator({
 
         if (!isMountedRef.current) return;
 
-        setTemplates((prev) =>
-          cursor ? [...prev, ...data.items] : data.items,
-        );
+        setTemplates((prev) => {
+          if (!cursor) return data.items;
+          const existingIds = new Set(prev.map((t) => t.id));
+          const fresh = data.items.filter((t) => !existingIds.has(t.id));
+          return [...prev, ...fresh];
+        });
         setTemplatesHasMore(data.hasMore);
         setTemplatesCursor(data.nextCursor);
 
@@ -301,7 +357,7 @@ export function ArtworkGenerator({
     [templatesBase],
   );
 
-  // Carrega histórico de renderizações
+  // Carrega histórico de renderizações com deduplicação por ID
   const loadHistory = useCallback(
     async (cursor?: string) => {
       try {
@@ -315,7 +371,12 @@ export function ArtworkGenerator({
 
         if (!isMountedRef.current) return;
 
-        setHistory((prev) => (cursor ? [...prev, ...data.items] : data.items));
+        setHistory((prev) => {
+          if (!cursor) return data.items;
+          const existingIds = new Set(prev.map((h) => h.id));
+          const fresh = data.items.filter((h) => !existingIds.has(h.id));
+          return [...prev, ...fresh];
+        });
         setHistoryHasMore(data.hasMore);
         setHistoryCursor(data.nextCursor);
       } catch (err: unknown) {
@@ -331,11 +392,16 @@ export function ArtworkGenerator({
     [renderJobsBase],
   );
 
-  // Carrega mídias elegíveis para seleção
+  useEffect(() => {
+    loadHistoryRef.current = loadHistory;
+  }, [loadHistory]);
+
+  // Carrega mídias com estados explícitos (available, unavailable, empty, error) e deduplicação
   const loadMedia = useCallback(
     async (pageToLoad = 1) => {
       try {
         setLoadingMedia(true);
+        setMediaError(null);
         const url = `${mediaBase}?page=${pageToLoad}`;
         const data = await requestApi<{
           items: MediaAssetSummary[];
@@ -345,13 +411,31 @@ export function ArtworkGenerator({
 
         if (!isMountedRef.current) return;
 
-        setMediaAssets((prev) =>
-          pageToLoad === 1 ? data.items : [...prev, ...data.items],
-        );
+        if (!data.available) {
+          setMediaStatus("unavailable");
+          setMediaAssets([]);
+          setMediaHasMore(false);
+          return;
+        }
+
+        setMediaAssets((prev) => {
+          if (pageToLoad === 1) return data.items;
+          const existingIds = new Set(prev.map((m) => m.id));
+          const fresh = data.items.filter((m) => !existingIds.has(m.id));
+          return [...prev, ...fresh];
+        });
         setMediaHasMore(data.hasMore);
         setMediaPage(pageToLoad);
-      } catch {
-        // Se a biblioteca estiver vazia ou indisponível, continua sem interromper o gerador
+        setMediaStatus(
+          data.items.length === 0 && pageToLoad === 1 ? "empty" : "available",
+        );
+      } catch (err: unknown) {
+        if (!isMountedRef.current) return;
+        const msg =
+          (err as Error).message ??
+          "Não foi possível carregar as imagens da biblioteca.";
+        setMediaError(msg);
+        setMediaStatus("error");
       } finally {
         if (isMountedRef.current) {
           setLoadingMedia(false);
@@ -408,28 +492,71 @@ export function ArtworkGenerator({
   const currentSpec: DesignTemplateSpec | null = latestVersion?.spec ?? null;
   const currentFormat: DesignFormat = latestVersion?.format ?? "SQUARE";
 
+  // Requisito 9: Ao trocar de modelo, limpa valores incompatíveis com as flags do novo template
+  useEffect(() => {
+    if (!currentSpec) return;
+    if (!currentSpec.showEyebrow) {
+      setEyebrow("");
+    }
+    if (!currentSpec.showSubtitle) {
+      setSubtitle("");
+    }
+    if (!currentSpec.showCallToAction) {
+      setCallToAction("");
+    }
+  }, [currentSpec]);
+
+  // Mapa local memoizado para resolver nome e formato de template no histórico (sem requisições extras)
+  const versionMap = useMemo(() => {
+    const map = new Map<string, { name: string; format: DesignFormat }>();
+    for (const tpl of templates) {
+      if (tpl.latestVersion) {
+        map.set(tpl.latestVersion.id, {
+          name: tpl.name,
+          format: tpl.latestVersion.format,
+        });
+      }
+    }
+    if (selectedDetail) {
+      for (const ver of selectedDetail.versions) {
+        map.set(ver.id, {
+          name: selectedDetail.name,
+          format: ver.format,
+        });
+      }
+    }
+    return map;
+  }, [templates, selectedDetail]);
+
   // Se qualquer campo do formulário mudar após uma tentativa, gera uma nova chave de idempotência
   const handleInputChange = useCallback(
     <T,>(setter: (val: T) => void, val: T) => {
       setter(val);
-      // Gera nova chave se o formulário for alterado
       setIdempotencyKey(crypto.randomUUID());
       setGeneralError("");
     },
     [],
   );
 
-  // Inicializa modelos padrão (OWNER ou ADMIN)
+  // Troca de modelo: cancela polling anterior e gera nova intenção
+  function handleSelectTemplate(templateId: string) {
+    controllerRef.current?.stopPolling();
+    setActiveJob(null);
+    setPollingTimeoutReached(false);
+    setSelectedTemplateId(templateId);
+    setIdempotencyKey(crypto.randomUUID());
+    setGeneralError("");
+    setGeneralNotice("");
+  }
+
+  // Inicializa modelos padrão (OWNER ou ADMIN) - contrato /default retorna array direto
   async function handleInitializeDefaults() {
     try {
       setInitializingDefaults(true);
       setGeneralError("");
       setGeneralNotice("");
 
-      await requestApi<{
-        created: boolean;
-        templates: DesignTemplateListItem[];
-      }>(`${templatesBase}/default`, {
+      await requestApi<DesignTemplateListItem[]>(`${templatesBase}/default`, {
         method: "POST",
       });
 
@@ -438,117 +565,31 @@ export function ArtworkGenerator({
     } catch (err: unknown) {
       setGeneralError((err as Error).message);
     } finally {
-      setInitializingDefaults(false);
+      if (isMountedRef.current) {
+        setInitializingDefaults(false);
+      }
     }
   }
 
-  // Polling resiliente do job ativo
-  const pollJobStatus = useCallback(
-    async (jobId: string) => {
-      if (pollingAbortControllerRef.current) {
-        pollingAbortControllerRef.current.abort();
-      }
-      const controller = new AbortController();
-      pollingAbortControllerRef.current = controller;
-
-      try {
-        const updated = await requestApi<RenderJobItem>(
-          `${renderJobsBase}/${jobId}`,
-          undefined,
-          controller.signal,
-        );
-
-        if (!isMountedRef.current) return;
-
-        setActiveJob(updated);
-
-        // Atualiza item correspondente no histórico
-        setHistory((prev) =>
-          prev.map((item) => (item.id === updated.id ? updated : item)),
-        );
-
-        if (updated.status === "COMPLETED") {
-          setPollingTimeoutReached(false);
-          setGeneralNotice(
-            "Arte gerada com sucesso! A imagem também foi adicionada à sua Biblioteca de Imagens.",
-          );
-          if (onArtworkCompleted) {
-            onArtworkCompleted();
-          }
-          void loadHistory();
-          return;
-        }
-
-        if (updated.status === "FAILED") {
-          setPollingTimeoutReached(false);
-          return;
-        }
-
-        // Se ainda PENDING ou PROCESSING
-        pollingCountRef.current += 1;
-
-        // Limite de polling (~25 tentativas x 1.6s ≈ 40s)
-        if (pollingCountRef.current >= 25) {
-          setPollingTimeoutReached(true);
-          return;
-        }
-
-        // Aguarda intervalo respeitando visibilidade da aba
-        const delay = document.visibilityState === "hidden" ? 4000 : 1600;
-        setTimeout(() => {
-          if (
-            isMountedRef.current &&
-            (updated.status === "PENDING" || updated.status === "PROCESSING")
-          ) {
-            void pollJobStatus(jobId);
-          }
-        }, delay);
-      } catch (err: unknown) {
-        if ((err as Error)?.name === "AbortError") return;
-        // Falha transitória de consulta: continua tentando até o teto
-        pollingCountRef.current += 1;
-        if (pollingCountRef.current < 25) {
-          setTimeout(() => {
-            if (isMountedRef.current) {
-              void pollJobStatus(jobId);
-            }
-          }, 2000);
-        } else {
-          setPollingTimeoutReached(true);
-        }
-      }
-    },
-    [renderJobsBase, onArtworkCompleted, loadHistory],
-  );
-
-  // Consulta manual caso o polling atinja o limite
+  // Consulta manual caso o polling atinja o limite ou usuário solicite
   async function handleManualStatusCheck() {
-    if (!activeJob) return;
+    if (!activeJob || refreshingJob) return;
     try {
       setRefreshingJob(true);
-      const updated = await requestApi<RenderJobItem>(
-        `${renderJobsBase}/${activeJob.id}`,
-      );
-      setActiveJob(updated);
-      setHistory((prev) =>
-        prev.map((item) => (item.id === updated.id ? updated : item)),
-      );
-      if (updated.status === "COMPLETED") {
-        setPollingTimeoutReached(false);
-        setGeneralNotice("Arte concluída!");
-        if (onArtworkCompleted) {
-          onArtworkCompleted();
-        }
-        void loadHistory();
-      } else if (updated.status === "FAILED") {
-        setPollingTimeoutReached(false);
-      }
+      setGeneralError("");
+      await controllerRef.current?.executeManualCheck(activeJob.id);
     } catch (err: unknown) {
       setGeneralError((err as Error).message);
     } finally {
-      setRefreshingJob(false);
+      if (isMountedRef.current) {
+        setRefreshingJob(false);
+      }
     }
   }
+
+  // Verifica se o formulário está bloqueado por job ativo em andamento
+  const isJobProcessing =
+    activeJob?.status === "PENDING" || activeJob?.status === "PROCESSING";
 
   // Submissão do formulário para geração da arte
   async function handleSubmitArtwork(e: React.FormEvent) {
@@ -556,6 +597,13 @@ export function ArtworkGenerator({
 
     if (!canGenerate) {
       setGeneralError("Seu perfil não possui permissão para gerar artes.");
+      return;
+    }
+
+    if (isJobProcessing) {
+      setGeneralError(
+        "Há uma arte em processamento. Aguarde a conclusão ou clique em 'Nova arte'.",
+      );
       return;
     }
 
@@ -577,16 +625,13 @@ export function ArtworkGenerator({
       return;
     }
 
-    // Previne envio duplicado por duplo clique
     if (submitting) return;
 
     setSubmitting(true);
     setGeneralError("");
     setGeneralNotice("");
     setPollingTimeoutReached(false);
-    pollingCountRef.current = 0;
 
-    // Monta o payload estrito com base nas flags do template
     const inputPayload = {
       eyebrow: currentSpec?.showEyebrow ? eyebrow.trim() : "",
       title: trimmedTitle,
@@ -610,7 +655,6 @@ export function ArtworkGenerator({
       });
 
       setActiveJob(job);
-      // Adiciona ao topo do histórico se não existir
       setHistory((prev) => {
         const exists = prev.some((item) => item.id === job.id);
         return exists
@@ -618,38 +662,37 @@ export function ArtworkGenerator({
           : [job, ...prev];
       });
 
-      // Inicia polling caso não tenha vindo concluído de imediato
       if (job.status === "PENDING" || job.status === "PROCESSING") {
-        void pollJobStatus(job.id);
+        controllerRef.current?.startPolling(job.id);
       } else if (job.status === "COMPLETED") {
-        setGeneralNotice("Arte gerada com sucesso!");
-        if (onArtworkCompleted) {
-          onArtworkCompleted();
-        }
+        controllerRef.current?.handleJobCompletion(job);
       }
     } catch (err: unknown) {
       setGeneralError((err as Error).message);
     } finally {
-      setSubmitting(false);
+      if (isMountedRef.current) {
+        setSubmitting(false);
+      }
     }
   }
 
-  // Iniciar nova arte (limpa o formulário e gera nova intenção idempotente)
+  // Iniciar nova arte: cancela o acompanhamento visual local sem abortar o job no servidor
   function handleStartNewArtwork() {
+    controllerRef.current?.stopPolling();
+    setActiveJob(null);
+    setPollingTimeoutReached(false);
+    setIdempotencyKey(crypto.randomUUID());
     setTitle("");
     setEyebrow("");
     setSubtitle("");
     setCallToAction("");
     setBackgroundMediaAssetId(null);
     setLogoMediaAssetId(null);
-    setActiveJob(null);
-    setPollingTimeoutReached(false);
-    setIdempotencyKey(crypto.randomUUID());
     setGeneralNotice("");
     setGeneralError("");
   }
 
-  // Resolve URLs autenticadas das mídias para prévia
+  // URLs de imagens autenticadas para a prévia
   const bgMediaUrl = backgroundMediaAssetId
     ? `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/media/${encodeURIComponent(backgroundMediaAssetId)}/content`
     : null;
@@ -760,34 +803,29 @@ export function ArtworkGenerator({
                   aria-checked={isSelected}
                   tabIndex={0}
                   className={`template-select-card ${isSelected ? "selected" : ""}`}
-                  onClick={() => {
-                    setSelectedTemplateId(tpl.id);
-                    // Gera nova intenção idempotente ao mudar o modelo
-                    setIdempotencyKey(crypto.randomUUID());
-                  }}
+                  onClick={() => handleSelectTemplate(tpl.id)}
                   onKeyDown={(e) => {
                     if (e.key === " " || e.key === "Enter") {
                       e.preventDefault();
-                      setSelectedTemplateId(tpl.id);
-                      setIdempotencyKey(crypto.randomUUID());
+                      handleSelectTemplate(tpl.id);
                     }
                   }}
                 >
                   <div className="template-card-top">
-                    <span
-                      className={`format-tag format-${format.toLowerCase()}`}
-                    >
-                      {meta.label}
+                    <span className="template-format-badge">
+                      {meta?.label ?? format}
                     </span>
-                    <span className="version-tag">
+                    <span className="template-version-badge">
                       v{tpl.latestVersion?.version ?? 1}
                     </span>
                   </div>
                   <h4 className="template-name">{tpl.name}</h4>
-                  <p className="template-dimensions muted">{meta.dimensions}</p>
+                  <p className="template-dims muted">
+                    {meta?.dimensions ?? "1080 × 1080"}
+                  </p>
                   <div
-                    className={`format-indicator-box ratio-${format.toLowerCase()}`}
-                    aria-hidden="true"
+                    className="template-aspect-box"
+                    style={{ aspectRatio: meta?.ratio ?? "1 / 1" }}
                   />
                 </div>
               );
@@ -807,41 +845,49 @@ export function ArtworkGenerator({
             </div>
           )}
 
-          {/* 2. Workspace do Formulário + Prévia */}
+          {/* 2. Workspace de Criação (Formulário + Prévia) */}
           {selectedTemplateId && (
             <div className="artwork-workspace-grid">
-              {/* Coluna da Esquerda: Formulário e Seletores */}
-              <div className="artwork-form-column">
+              {/* Coluna Esquerda: Formulário de Entrada */}
+              <div className="artwork-form-container">
+                <div className="form-header">
+                  <h3>Conteúdo da arte</h3>
+                  <p className="muted">
+                    Preencha os textos e escolha as imagens complementares da
+                    sua biblioteca.
+                  </p>
+                </div>
+
                 {!canGenerate ? (
-                  <div className="readonly-notice-card">
-                    <h4>Modo somente leitura</h4>
-                    <p className="muted">
-                      Seu perfil pode visualizar o catálogo de modelos e o
-                      histórico de artes geradas, mas não pode preencher novos
-                      conteúdos ou solicitar renderizações.
+                  <div className="readonly-notice-box">
+                    <p>
+                      <strong>Modo somente leitura</strong>: seu perfil possui
+                      permissão para visualizar modelos e histórico, mas não
+                      para gerar novas artes.
                     </p>
                   </div>
                 ) : loadingDetail ? (
                   <p role="status" className="empty">
                     Carregando detalhes do modelo…
                   </p>
-                ) : !latestVersion ? (
-                  <p role="alert" className="error">
-                    Este modelo não possui uma versão válida para renderização.
-                    Escolha outro modelo.
-                  </p>
                 ) : (
-                  <form
-                    onSubmit={handleSubmitArtwork}
-                    className="artwork-compose-form"
-                  >
-                    <div className="form-legend">
-                      <h3>Conteúdo da arte</h3>
-                      <p className="muted">
-                        Preencha os textos e escolha as imagens complementares
-                        da sua biblioteca.
-                      </p>
-                    </div>
+                  <form onSubmit={handleSubmitArtwork} className="artwork-form">
+                    {/* Aviso se houver renderização em andamento */}
+                    {isJobProcessing && (
+                      <div className="active-render-alert" role="status">
+                        <p>
+                          <strong>Renderização em andamento:</strong> os campos
+                          estão bloqueados enquanto a arte é gerada.
+                        </p>
+                        <button
+                          type="button"
+                          className="quiet"
+                          onClick={handleStartNewArtwork}
+                        >
+                          Nova arte
+                        </button>
+                      </div>
+                    )}
 
                     {/* Chamada Superior (Eyebrow) */}
                     {currentSpec?.showEyebrow && (
@@ -863,6 +909,7 @@ export function ArtworkGenerator({
                             handleInputChange(setEyebrow, e.target.value)
                           }
                           placeholder="Ex.: NOVIDADE, DICA DA SEMANA…"
+                          disabled={isJobProcessing}
                         />
                         <small className="help">
                           Opcional. Até 60 caracteres.
@@ -887,6 +934,7 @@ export function ArtworkGenerator({
                           handleInputChange(setTitle, e.target.value)
                         }
                         placeholder="Insira o título principal da arte…"
+                        disabled={isJobProcessing}
                       />
                       <small className="help">
                         Obrigatório. De 1 a 180 caracteres. Limite visual de{" "}
@@ -914,6 +962,7 @@ export function ArtworkGenerator({
                             handleInputChange(setSubtitle, e.target.value)
                           }
                           placeholder="Texto de apoio ou contexto adicional…"
+                          disabled={isJobProcessing}
                         />
                         <small className="help">
                           Opcional. Até 300 caracteres.
@@ -941,6 +990,7 @@ export function ArtworkGenerator({
                             handleInputChange(setCallToAction, e.target.value)
                           }
                           placeholder="Ex.: SAIBA MAIS, VISITE O SITE…"
+                          disabled={isJobProcessing}
                         />
                         <small className="help">
                           Opcional. Até 40 caracteres.
@@ -948,13 +998,47 @@ export function ArtworkGenerator({
                       </div>
                     )}
 
-                    {/* Seletor de Imagem de Fundo */}
+                    {/* Estados e Seletor de Imagem de Fundo */}
                     <div className="field-group">
                       <label id={`${idPrefix}-bg-label`}>Imagem de fundo</label>
                       <small className="help">
                         Selecione uma imagem da sua biblioteca ou use apenas as
                         cores do modelo.
                       </small>
+
+                      {mediaStatus === "unavailable" && (
+                        <p role="status" className="notice">
+                          Armazenamento de imagens temporariamente indisponível.
+                          Você ainda pode gerar artes utilizando as cores do
+                          modelo.
+                        </p>
+                      )}
+
+                      {mediaStatus === "error" && (
+                        <div role="alert" className="error-box">
+                          <p>
+                            Não foi possível carregar as imagens da biblioteca.
+                            {mediaError ? ` (${mediaError})` : ""}
+                          </p>
+                          <button
+                            type="button"
+                            className="quiet"
+                            onClick={() => void loadMedia(1)}
+                            disabled={loadingMedia}
+                          >
+                            Tentar novamente
+                          </button>
+                        </div>
+                      )}
+
+                      {mediaStatus === "empty" && (
+                        <p className="muted">
+                          Nenhuma imagem encontrada na biblioteca deste cliente.
+                          Você pode usar as cores do modelo ou adicionar imagens
+                          na Biblioteca acima.
+                        </p>
+                      )}
+
                       <div
                         className="media-selector-box"
                         role="group"
@@ -966,6 +1050,7 @@ export function ArtworkGenerator({
                           onClick={() =>
                             handleInputChange(setBackgroundMediaAssetId, null)
                           }
+                          disabled={isJobProcessing}
                         >
                           <span className="no-media-icon" aria-hidden="true">
                             ∅
@@ -989,6 +1074,7 @@ export function ArtworkGenerator({
                                   asset.id,
                                 )
                               }
+                              disabled={isJobProcessing}
                             >
                               <img
                                 src={`${mediaBase}/${encodeURIComponent(asset.id)}/content`}
@@ -1003,16 +1089,18 @@ export function ArtworkGenerator({
                           );
                         })}
                       </div>
-                      {mediaHasMore && (
-                        <button
-                          type="button"
-                          className="quiet"
-                          onClick={() => void loadMedia(mediaPage + 1)}
-                          disabled={loadingMedia}
-                        >
-                          Carregar mais imagens
-                        </button>
-                      )}
+                      {mediaHasMore &&
+                        mediaStatus !== "unavailable" &&
+                        mediaStatus !== "error" && (
+                          <button
+                            type="button"
+                            className="quiet"
+                            onClick={() => void loadMedia(mediaPage + 1)}
+                            disabled={loadingMedia}
+                          >
+                            Carregar mais imagens
+                          </button>
+                        )}
                     </div>
 
                     {/* Seletor de Logotipo */}
@@ -1032,6 +1120,7 @@ export function ArtworkGenerator({
                           onClick={() =>
                             handleInputChange(setLogoMediaAssetId, null)
                           }
+                          disabled={isJobProcessing}
                         >
                           <span className="no-media-icon" aria-hidden="true">
                             ∅
@@ -1049,6 +1138,7 @@ export function ArtworkGenerator({
                               onClick={() =>
                                 handleInputChange(setLogoMediaAssetId, asset.id)
                               }
+                              disabled={isJobProcessing}
                             >
                               <img
                                 src={`${mediaBase}/${encodeURIComponent(asset.id)}/content`}
@@ -1065,54 +1155,77 @@ export function ArtworkGenerator({
                       </div>
                     </div>
 
-                    {/* Resumo e Ação de Envio */}
-                    <div className="submission-box">
-                      <div className="summary-details">
-                        <strong>Resumo da geração:</strong>
-                        <span>Modelo: {selectedDetail?.name}</span>
-                        <span>
-                          Formato: {FORMAT_METADATA[currentFormat]?.label} (
-                          {FORMAT_METADATA[currentFormat]?.dimensions})
-                        </span>
-                        <span>
+                    {/* Resumo da Geração */}
+                    <div className="artwork-summary-card">
+                      <h4>Resumo da arte</h4>
+                      <ul>
+                        <li>
+                          Formato:{" "}
+                          <strong>
+                            {FORMAT_METADATA[currentFormat]?.label} (
+                            {FORMAT_METADATA[currentFormat]?.dimensions})
+                          </strong>
+                        </li>
+                        <li>
+                          Modelo:{" "}
+                          <strong>
+                            {selectedDetail?.name ?? "Carregando…"}
+                          </strong>
+                        </li>
+                        <li>
                           Fundo:{" "}
                           {backgroundMediaAssetId
-                            ? "Personalizado"
+                            ? (mediaAssets.find(
+                                (m) => m.id === backgroundMediaAssetId,
+                              )?.name ?? "Imagem selecionada")
                             : "Cor do modelo"}
-                        </span>
-                        <span>
+                        </li>
+                        <li>
                           Logotipo:{" "}
-                          {logoMediaAssetId ? "Selecionado" : "Nenhum"}
-                        </span>
-                      </div>
+                          {logoMediaAssetId
+                            ? (mediaAssets.find(
+                                (m) => m.id === logoMediaAssetId,
+                              )?.name ?? "Logotipo selecionado")
+                            : "Nenhum"}
+                        </li>
+                      </ul>
+                    </div>
 
-                      <div className="form-actions">
+                    {/* Ações do Formulário */}
+                    <div className="form-actions">
+                      <button
+                        type="submit"
+                        disabled={
+                          submitting ||
+                          isJobProcessing ||
+                          !title.trim() ||
+                          !latestVersion
+                        }
+                      >
+                        {submitting
+                          ? "Enviando…"
+                          : isJobProcessing
+                            ? "Geração em andamento…"
+                            : "Gerar arte"}
+                      </button>
+
+                      {activeJob && (
                         <button
-                          type="submit"
-                          disabled={submitting || !title.trim()}
+                          type="button"
+                          className="quiet"
+                          onClick={handleStartNewArtwork}
                         >
-                          {submitting ? "Enviando solicitação…" : "Gerar arte"}
+                          Nova arte
                         </button>
-
-                        {(activeJob || title) && (
-                          <button
-                            type="button"
-                            className="quiet"
-                            onClick={handleStartNewArtwork}
-                            disabled={submitting}
-                          >
-                            Nova arte
-                          </button>
-                        )}
-                      </div>
+                      )}
                     </div>
                   </form>
                 )}
               </div>
 
-              {/* Coluna da Direita: Prévia Segura e Status de Renderização */}
-              <div className="artwork-preview-column">
-                <div className="preview-heading">
+              {/* Coluna Direita: Prévia Segura e Status de Renderização */}
+              <div className="artwork-preview-container">
+                <div className="preview-header">
                   <h3>Prévia do modelo</h3>
                   <span className="muted">
                     {FORMAT_METADATA[currentFormat]?.label} (
@@ -1120,7 +1233,13 @@ export function ArtworkGenerator({
                   </span>
                 </div>
 
-                {/* Container com proporção correta */}
+                {/*
+                  Container com proporção correta.
+                  Nota de segurança: Estilos inline utilizam estritamente valores validados do DesignTemplateSpec
+                  (cores hexadecimais, opacidade numérica, safe area e line-clamp). Textos fornecidos pelo usuário
+                  são renderizados exclusivamente como nós de texto comuns do React, sem dangerouslySetInnerHTML,
+                  sem interpretação de tags HTML e sem interpolação de texto de usuário em propriedades de estilo.
+                */}
                 <div
                   className="preview-viewport-wrapper"
                   style={{
@@ -1145,7 +1264,7 @@ export function ArtworkGenerator({
                       />
                     )}
 
-                    {/* Sobreposição de Cor e Opacidade */}
+                    {/* Sobreposição de Cor e Opacidade com valores validados do spec */}
                     <div
                       className="preview-overlay-layer"
                       style={{
@@ -1154,7 +1273,7 @@ export function ArtworkGenerator({
                       }}
                     />
 
-                    {/* Conteúdo textual seguro (Renderizado como texto puro React) */}
+                    {/* Conteúdo textual seguro (renderizado puramente como string React) */}
                     <div
                       className="preview-content-layer"
                       style={{
@@ -1314,6 +1433,16 @@ export function ArtworkGenerator({
                         </p>
                       </div>
                     )}
+
+                    <div className="job-status-footer-actions">
+                      <button
+                        type="button"
+                        className="quiet"
+                        onClick={handleStartNewArtwork}
+                      >
+                        Nova arte
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -1322,7 +1451,7 @@ export function ArtworkGenerator({
         </>
       )}
 
-      {/* 3. Histórico de Artes Recentes */}
+      {/* 3. Histórico de Artes Recentes com Mapeamento de Nome e Formato */}
       <div className="artwork-history-section">
         <div className="history-header">
           <h3>Artes recentes</h3>
@@ -1339,69 +1468,82 @@ export function ArtworkGenerator({
           <p className="empty">Nenhuma arte gerada ainda para este cliente.</p>
         ) : (
           <div className="history-cards-grid">
-            {history.map((item) => (
-              <article key={item.id} className="history-job-card">
-                <div className="history-card-header">
-                  <span
-                    className={`status-badge ${formatStatusClass(item.status)}`}
-                  >
-                    {formatStatusLabel(item.status)}
-                  </span>
-                  <small className="muted">{formatDate(item.createdAt)}</small>
-                </div>
+            {history.map((item) => {
+              const mappedModel = versionMap.get(item.templateVersionId);
 
-                <div className="history-card-body">
-                  {item.outputMediaUrl ? (
-                    <div className="history-thumb-wrapper">
-                      <img
-                        src={item.outputMediaUrl}
-                        alt="Arte gerada"
-                        className="history-thumb"
-                      />
-                    </div>
-                  ) : (
-                    <div className="history-placeholder-box">
-                      <span>
-                        {item.status === "FAILED"
-                          ? "Falha na geração"
-                          : "Processando…"}
+              return (
+                <article key={item.id} className="history-job-card">
+                  <div className="history-card-header">
+                    <span
+                      className={`status-badge ${formatStatusClass(item.status)}`}
+                    >
+                      {formatStatusLabel(item.status)}
+                    </span>
+                    <small className="muted">
+                      {formatDate(item.createdAt)}
+                    </small>
+                  </div>
+
+                  <div className="history-card-body">
+                    {item.outputMediaUrl ? (
+                      <div className="history-thumb-wrapper">
+                        <img
+                          src={item.outputMediaUrl}
+                          alt="Arte gerada"
+                          className="history-thumb"
+                        />
+                      </div>
+                    ) : (
+                      <div className="history-placeholder-box">
+                        <span>
+                          {item.status === "FAILED"
+                            ? "Falha na geração"
+                            : "Processando…"}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="history-details">
+                      {mappedModel && (
+                        <p className="history-model-info">
+                          <strong>{mappedModel.name}</strong> ·{" "}
+                          {FORMAT_METADATA[mappedModel.format].label} (
+                          {FORMAT_METADATA[mappedModel.format].dimensions})
+                        </p>
+                      )}
+                      <span className="history-attempt muted">
+                        Tentativa {item.attemptNumber}
                       </span>
+                      {item.errorCode && (
+                        <span className="history-error-code">
+                          {item.errorCode}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {item.outputMediaUrl && (
+                    <div className="history-card-footer">
+                      <a
+                        href={item.outputMediaUrl}
+                        download={`arte-${item.id}.png`}
+                        className="quiet"
+                      >
+                        Baixar
+                      </a>
+                      <a
+                        href={item.outputMediaUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="quiet"
+                      >
+                        Visualizar
+                      </a>
                     </div>
                   )}
-
-                  <div className="history-details">
-                    <span className="history-attempt muted">
-                      Tentativa {item.attemptNumber}
-                    </span>
-                    {item.errorCode && (
-                      <span className="history-error-code">
-                        {item.errorCode}
-                      </span>
-                    )}
-                  </div>
-                </div>
-
-                {item.outputMediaUrl && (
-                  <div className="history-card-footer">
-                    <a
-                      href={item.outputMediaUrl}
-                      download={`arte-${item.id}.png`}
-                      className="quiet"
-                    >
-                      Baixar
-                    </a>
-                    <a
-                      href={item.outputMediaUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="quiet"
-                    >
-                      Visualizar
-                    </a>
-                  </div>
-                )}
-              </article>
-            ))}
+                </article>
+              );
+            })}
           </div>
         )}
 

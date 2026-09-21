@@ -2136,6 +2136,50 @@ button.secondary:hover {
   margin: 4px 0 8px;
 }
 
+.active-render-alert {
+  background: #eff6ff;
+  border: 1px solid #bfdbfe;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.active-render-alert p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #1e3a8a;
+}
+
+.job-status-footer-actions {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.error-box {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.error-box p {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--error);
+}
+
 .readonly-notice-card {
   background: var(--paper);
   border: 1px solid var(--line);
@@ -2223,9 +2267,15 @@ button.secondary:hover {
 
 .history-details {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  gap: 4px;
   font-size: 0.8rem;
+}
+
+.history-model-info {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--ink);
 }
 
 .history-error-code {

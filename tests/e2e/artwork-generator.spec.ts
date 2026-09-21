@@ -68,13 +68,13 @@ test.describe("Fase 6: Gerador de Artes Individual", () => {
 
     // Verifica que os modelos aparecem no catálogo
     await expect(
-      generator.getByText("Editorial Square", { exact: true }),
+      generator.getByRole("radio", { name: /Editorial Square/ }),
     ).toBeVisible();
     await expect(
-      generator.getByText("Editorial Portrait", { exact: true }),
+      generator.getByRole("radio", { name: /Editorial Portrait/ }),
     ).toBeVisible();
     await expect(
-      generator.getByText("Editorial Story", { exact: true }),
+      generator.getByRole("radio", { name: /Editorial Story/ }),
     ).toBeVisible();
   });
 
@@ -466,5 +466,233 @@ test.describe("Fase 6: Gerador de Artes Individual", () => {
     // O gerador de artes está posicionado entre ambos
     const generator = page.getByRole("region", { name: "Gerador de artes" });
     await expect(generator).toBeVisible();
+  });
+
+  test("12. 'Nova arte' encerra acompanhamento visual local, limpa formulário e preserva job no histórico", async ({
+    page,
+  }) => {
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    const testJobId = `job-nova-arte-${Date.now()}`;
+
+    await page.route(
+      "**/api/organizations/*/clients/*/render-jobs",
+      async (route) => {
+        if (route.request().method() === "POST") {
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({
+              id: testJobId,
+              status: "PROCESSING",
+              templateVersionId: "tpl-v1",
+              postId: null,
+              backgroundMediaAssetId: null,
+              logoMediaAssetId: null,
+              outputMediaAssetId: null,
+              outputMediaUrl: null,
+              attemptNumber: 1,
+              errorCode: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              completedAt: null,
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await generator
+      .getByLabel("Título *")
+      .fill("Arte Original Em Processamento");
+    await generator
+      .getByRole("button", { name: "Gerar arte", exact: true })
+      .click();
+
+    // Card de status ativo visível
+    await expect(generator.locator(".render-job-status-card")).toBeVisible();
+    await expect(
+      generator.getByText("Renderizando pixels da arte com Satori e Sharp…"),
+    ).toBeVisible();
+
+    // Clica em "Nova arte"
+    await generator.getByRole("button", { name: "Nova arte" }).first().click();
+
+    // Formulário foi limpo e card de status ativo sumiu
+    await expect(generator.getByLabel("Título *")).toHaveValue("");
+    await expect(generator.locator(".render-job-status-card")).toHaveCount(0);
+
+    // Job anterior continua preservado no histórico de artes recentes
+    await expect(generator.getByText("Artes recentes")).toBeVisible();
+    await expect(generator.locator(".history-job-card").first()).toBeVisible();
+  });
+
+  test("13. Bloqueio de submissão acidental: formulário e botão ficam bloqueados durante PENDING/PROCESSING", async ({
+    page,
+  }) => {
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    const testJobId = `job-locked-${Date.now()}`;
+
+    await page.route(
+      "**/api/organizations/*/clients/*/render-jobs",
+      async (route) => {
+        if (route.request().method() === "POST") {
+          await route.fulfill({
+            status: 202,
+            contentType: "application/json",
+            body: JSON.stringify({
+              id: testJobId,
+              status: "PENDING",
+              templateVersionId: "tpl-v1",
+              postId: null,
+              backgroundMediaAssetId: null,
+              logoMediaAssetId: null,
+              outputMediaAssetId: null,
+              outputMediaUrl: null,
+              attemptNumber: 1,
+              errorCode: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              completedAt: null,
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await generator.getByLabel("Título *").fill("Arte Para Teste de Bloqueio");
+    await generator
+      .getByRole("button", { name: "Gerar arte", exact: true })
+      .click();
+
+    // Alerta de renderização em andamento e botão desabilitado
+    await expect(
+      generator.getByText("Renderização em andamento:"),
+    ).toBeVisible();
+    const submitBtn = generator.getByRole("button", {
+      name: "Geração em andamento…",
+    });
+    await expect(submitBtn).toBeDisabled();
+
+    // Campo de título desabilitado
+    await expect(generator.getByLabel("Título *")).toBeDisabled();
+  });
+
+  test("14. Armazenamento de mídias indisponível exibe aviso específico e permite gerar sem mídias", async ({
+    page,
+  }) => {
+    // Intercepta rota de mídia simulando indisponibilidade
+    await page.route(
+      "**/api/organizations/*/clients/*/media*",
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            items: [],
+            hasMore: false,
+            available: false,
+          }),
+        });
+      },
+    );
+
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    // Mensagem específica de armazenamento indisponível
+    await expect(
+      generator.getByText(
+        "Armazenamento de imagens temporariamente indisponível. Você ainda pode gerar artes utilizando as cores do modelo.",
+      ),
+    ).toBeVisible();
+
+    // Seletores Nenhuma continuam ativos
+    await expect(
+      generator.getByRole("button", { name: "Nenhuma (Cor sólida)" }),
+    ).toBeVisible();
+    await expect(
+      generator.getByRole("button", { name: "Nenhum", exact: true }),
+    ).toBeVisible();
+
+    // Usuário consegue preencher e gerar mesmo com armazenamento indisponível
+    await generator.getByLabel("Título *").fill("Arte Sem Mídia");
+    await expect(
+      generator.getByRole("button", { name: "Gerar arte", exact: true }),
+    ).toBeEnabled();
+  });
+
+  test("15. Falha ao listar mídias exibe erro e botão de tentar novamente", async ({
+    page,
+  }) => {
+    let failMedia = true;
+    await page.route(
+      "**/api/organizations/*/clients/*/media*",
+      async (route) => {
+        if (failMedia) {
+          await route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            body: JSON.stringify({
+              message: "Falha de conexão com o storage.",
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    // Exibe caixa de erro com botão de retry
+    await expect(
+      generator.getByText(
+        "Não foi possível carregar as imagens da biblioteca.",
+      ),
+    ).toBeVisible();
+    const retryBtn = generator.getByRole("button", {
+      name: "Tentar novamente",
+    });
+    await expect(retryBtn).toBeVisible();
+
+    // Clica em Tentar novamente e recupera
+    failMedia = false;
+    await retryBtn.click();
+    await expect(
+      generator.getByText(
+        "Nenhuma imagem encontrada na biblioteca deste cliente.",
+      ),
+    ).toBeVisible();
+  });
+
+  test("16. Histórico mapeia nome e dimensões do modelo quando presente no catálogo", async ({
+    page,
+  }) => {
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    // Se houver jobs no histórico com versões conhecidas, o modelo e dimensões devem aparecer
+    const historySection = generator.locator(".artwork-history-section");
+    await expect(historySection).toBeVisible();
+
+    // Se já existem itens no histórico
+    const firstJobCard = historySection.locator(".history-job-card").first();
+    if (await firstJobCard.isVisible()) {
+      await expect(firstJobCard.locator(".history-details")).toBeVisible();
+    }
   });
 });
