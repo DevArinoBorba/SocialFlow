@@ -18,13 +18,10 @@ USER node
 EXPOSE 3000 3001 3002
 
 ARG COMMIT_SHA=""
-ARG BUILD_DATE=""
 ARG REPO_URL="https://github.com/DevArinoBorba/SocialFlow"
 
 LABEL org.opencontainers.image.title="SocialFlow" \
       org.opencontainers.image.description="SocialFlow unified immutable container image for Web, API, Worker and Prisma Migrations" \
-      org.opencontainers.image.source="${REPO_URL}" \
-      org.opencontainers.image.revision="${COMMIT_SHA}" \
-      org.opencontainers.image.created="${BUILD_DATE}"
+      org.opencontainers.image.source="${REPO_URL}"
 
 CMD ["sh", "-c", "exec pnpm --filter @socialflow/web start"]

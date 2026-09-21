@@ -1,4 +1,5 @@
-# Local development overrides. Merged automatically by docker compose when no -f flag is passed.
+# Local development overrides. Explicitly invoked via:
+# docker compose -f compose.yaml -f compose.local.yaml up
 services:
   migrate:
     image: ${SOCIALFLOW_IMAGE:-socialflow:local}

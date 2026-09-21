@@ -9,9 +9,9 @@ npm install --global pnpm@11.19.0
 pnpm install --frozen-lockfile
 pnpm db:generate
 node scripts/local-env.mjs
-docker compose config --quiet
-docker compose up --build --wait
-docker compose run --rm seed
+docker compose -f compose.yaml -f compose.local.yaml config --quiet
+docker compose -f compose.yaml -f compose.local.yaml up --build --wait
+docker compose -f compose.yaml -f compose.local.yaml run --rm seed
 ```
 
 Abra http://localhost:3000. Usuário `admin-a@socialflow.test`; senha está em `DEV_SEED_PASSWORD` do `.env` local. Os outros acessos são `owner-a`, `editor-a`, `approver-a`, `viewer-a`, `admin-b`, todos no domínio fictício `socialflow.test`. O gerador não exibe as senhas nem sobrescreve arquivos. Nunca envie `.env` ao GitHub. Use senhas hexadecimais geradas para evitar caracteres reservados nas URLs de banco/Redis.
