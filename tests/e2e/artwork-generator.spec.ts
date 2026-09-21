@@ -695,4 +695,107 @@ test.describe("Fase 6: Gerador de Artes Individual", () => {
       await expect(firstJobCard.locator(".history-details")).toBeVisible();
     }
   });
+
+  test("17. POST retornando COMPLETED diretamente executa fluxo de conclusão imediata", async ({
+    page,
+  }) => {
+    await page.route(
+      "**/api/organizations/*/clients/*/render-jobs",
+      async (route) => {
+        if (route.request().method() === "POST") {
+          await route.fulfill({
+            status: 201,
+            contentType: "application/json",
+            body: JSON.stringify({
+              id: "direct-completed-job",
+              status: "COMPLETED",
+              templateVersionId: "test-ver-id",
+              postId: null,
+              backgroundMediaAssetId: null,
+              logoMediaAssetId: null,
+              outputMediaAssetId: "out-media-1",
+              outputMediaUrl: "/media/out-1/content",
+              attemptNumber: 1,
+              errorCode: null,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    await generator.getByLabel("Título *").fill("Arte Conclusão Imediata");
+    await generator
+      .getByRole("button", { name: "Gerar arte", exact: true })
+      .click();
+
+    // Deve exibir aviso de sucesso imediatamente
+    await expect(
+      generator.getByText(
+        "Arte gerada com sucesso! A imagem também foi adicionada à sua Biblioteca de Imagens.",
+      ),
+    ).toBeVisible();
+  });
+
+  test("18. POST retornando FAILED diretamente não inicia polling nem trata como sucesso", async ({
+    page,
+  }) => {
+    await page.route(
+      "**/api/organizations/*/clients/*/render-jobs",
+      async (route) => {
+        if (route.request().method() === "POST") {
+          await route.fulfill({
+            status: 201,
+            contentType: "application/json",
+            body: JSON.stringify({
+              id: "direct-failed-job",
+              status: "FAILED",
+              templateVersionId: "test-ver-id",
+              postId: null,
+              backgroundMediaAssetId: null,
+              logoMediaAssetId: null,
+              outputMediaAssetId: null,
+              outputMediaUrl: null,
+              attemptNumber: 1,
+              errorCode: "RENDER_EXECUTION_TIMEOUT",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              completedAt: new Date().toISOString(),
+            }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await loginAndOpenClient(page, "admin-a@socialflow.test");
+    const generator = page.getByRole("region", { name: "Gerador de artes" });
+    await ensureTemplatesInitialized(page);
+
+    await generator.getByLabel("Título *").fill("Arte Falha Imediata");
+    await generator
+      .getByRole("button", { name: "Gerar arte", exact: true })
+      .click();
+
+    // Deve exibir mensagem de erro
+    await expect(
+      generator.getByText(
+        "A renderização da arte falhou. Você pode tentar novamente ou iniciar uma nova arte.",
+      ),
+    ).toBeVisible();
+
+    // Não deve exibir mensagem de sucesso
+    await expect(generator.getByText("Arte gerada com sucesso!")).toHaveCount(
+      0,
+    );
+  });
 });

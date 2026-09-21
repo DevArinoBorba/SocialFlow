@@ -11,6 +11,7 @@ import {
 import type { DesignFormat, DesignTemplateSpec } from "@socialflow/contracts";
 import {
   ArtworkPollingController,
+  PollingLifecycleManager,
   type PollingJob,
 } from "./artwork-polling-controller";
 
@@ -232,17 +233,19 @@ export function ArtworkGenerator({
   // Refs de controle de ciclo de vida e montagem
   const isMountedRef = useRef(true);
 
-  // Callback de recarga do histórico para o controlador de polling
+  // Callbacks para acesso atualizado no controlador de polling
   const loadHistoryRef = useRef<() => Promise<void>>(() => Promise.resolve());
+  const loadMediaRef = useRef<(pageToLoad?: number) => Promise<void>>(() =>
+    Promise.resolve(),
+  );
   const onArtworkCompletedRef = useRef(onArtworkCompleted);
   useEffect(() => {
     onArtworkCompletedRef.current = onArtworkCompleted;
   }, [onArtworkCompleted]);
 
-  // Controlador de ciclo de vida de polling
-  const controllerRef = useRef<ArtworkPollingController | null>(null);
-  if (!controllerRef.current) {
-    controllerRef.current = new ArtworkPollingController({
+  // Factory para criar instâncias do controlador vinculadas ao contexto atual do cliente
+  const createController = useCallback(() => {
+    return new ArtworkPollingController({
       fetchJob: async (jobId, signal) => {
         return requestApi<RenderJobItem>(
           `${renderJobsBase}/${encodeURIComponent(jobId)}`,
@@ -269,8 +272,12 @@ export function ArtworkGenerator({
         setGeneralNotice(
           "Arte gerada com sucesso! A imagem também foi adicionada à sua Biblioteca de Imagens.",
         );
+        // Atualização da Biblioteca de Imagens externa
         onArtworkCompletedRef.current?.();
-        void loadHistoryRef.current();
+        // Atualização da lista interna dos seletores de mídia
+        void loadMediaRef.current?.(1);
+        // Recarga do histórico
+        void loadHistoryRef.current?.();
       },
       onJobFailed: () => {
         if (!isMountedRef.current) return;
@@ -281,21 +288,33 @@ export function ArtworkGenerator({
         setPollingTimeoutReached(true);
       },
     });
+  }, [renderJobsBase]);
+
+  // Gerenciador de ciclo de vida seguro para React Strict Mode e remounts
+  const lifecycleManagerRef = useRef<PollingLifecycleManager | null>(null);
+  if (!lifecycleManagerRef.current) {
+    lifecycleManagerRef.current = new PollingLifecycleManager(createController);
+  } else {
+    lifecycleManagerRef.current.updateFactory(createController);
   }
 
-  // Desmontagem: limpa recursos e cancela timers/requisições
+  // Ciclo de vida estrito: setup cria nova instância; cleanup descarta exatamente essa instância
   useEffect(() => {
     isMountedRef.current = true;
-    const controller = controllerRef.current;
+    const manager = lifecycleManagerRef.current;
+    const instance = manager?.onSetup();
+
     return () => {
       isMountedRef.current = false;
-      controller?.dispose();
+      if (instance && manager) {
+        manager.onCleanup(instance);
+      }
     };
-  }, []);
+  }, [createController]);
 
   // Quando trocar de cliente ou organização: cancela polling, reseta formulário e estados
   useEffect(() => {
-    controllerRef.current?.stopPolling();
+    lifecycleManagerRef.current?.getController().stopPolling();
     setSelectedTemplateId(null);
     setSelectedDetail(null);
     setEyebrow("");
@@ -445,6 +464,10 @@ export function ArtworkGenerator({
     [mediaBase],
   );
 
+  useEffect(() => {
+    loadMediaRef.current = loadMedia;
+  }, [loadMedia]);
+
   // Carrega templates, histórico e mídias na inicialização do componente
   useEffect(() => {
     void loadTemplates();
@@ -540,7 +563,7 @@ export function ArtworkGenerator({
 
   // Troca de modelo: cancela polling anterior e gera nova intenção
   function handleSelectTemplate(templateId: string) {
-    controllerRef.current?.stopPolling();
+    lifecycleManagerRef.current?.getController().stopPolling();
     setActiveJob(null);
     setPollingTimeoutReached(false);
     setSelectedTemplateId(templateId);
@@ -577,7 +600,9 @@ export function ArtworkGenerator({
     try {
       setRefreshingJob(true);
       setGeneralError("");
-      await controllerRef.current?.executeManualCheck(activeJob.id);
+      await lifecycleManagerRef.current
+        ?.getController()
+        .executeManualCheck(activeJob.id);
     } catch (err: unknown) {
       setGeneralError((err as Error).message);
     } finally {
@@ -663,9 +688,13 @@ export function ArtworkGenerator({
       });
 
       if (job.status === "PENDING" || job.status === "PROCESSING") {
-        controllerRef.current?.startPolling(job.id);
+        lifecycleManagerRef.current?.getController().startPolling(job.id);
       } else if (job.status === "COMPLETED") {
-        controllerRef.current?.handleJobCompletion(job);
+        lifecycleManagerRef.current?.getController().handleJobCompletion(job);
+      } else if (job.status === "FAILED") {
+        setGeneralError(
+          "A renderização da arte falhou. Você pode tentar novamente ou iniciar uma nova arte.",
+        );
       }
     } catch (err: unknown) {
       setGeneralError((err as Error).message);
@@ -678,7 +707,7 @@ export function ArtworkGenerator({
 
   // Iniciar nova arte: cancela o acompanhamento visual local sem abortar o job no servidor
   function handleStartNewArtwork() {
-    controllerRef.current?.stopPolling();
+    lifecycleManagerRef.current?.getController().stopPolling();
     setActiveJob(null);
     setPollingTimeoutReached(false);
     setIdempotencyKey(crypto.randomUUID());
@@ -1504,7 +1533,7 @@ export function ArtworkGenerator({
                     )}
 
                     <div className="history-details">
-                      {mappedModel && (
+                      {mappedModel && FORMAT_METADATA[mappedModel.format] && (
                         <p className="history-model-info">
                           <strong>{mappedModel.name}</strong> ·{" "}
                           {FORMAT_METADATA[mappedModel.format].label} (

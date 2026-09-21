@@ -95,6 +95,10 @@ export class ArtworkPollingController {
     return this.completedJobIds.has(jobId);
   }
 
+  public getIsDisposed(): boolean {
+    return this.isDisposed;
+  }
+
   /**
    * Interrompe qualquer ciclo de polling ativo.
    * É estritamente idempotente e seguro mesmo quando não há timer ou requisição ativa.
@@ -133,6 +137,7 @@ export class ArtworkPollingController {
   /**
    * Prepara uma consulta manual ("Atualizar status").
    * Interrompe o polling automático prévio e autoriza uma nova geração para o mesmo job.
+   * O acompanhamento permanece em modo manual sem reativar loops automáticos de polling.
    */
   public prepareManualCheck(jobId: string): {
     generation: number;
@@ -284,5 +289,51 @@ export class ArtworkPollingController {
     return this.getVisibilityState() === "hidden"
       ? this.hiddenIntervalMs
       : this.baseIntervalMs;
+  }
+}
+
+/**
+ * Gerenciador de ciclo de vida para instâncias de ArtworkPollingController.
+ * Garante compatibilidade estrita com o React Strict Mode, remounts,
+ * hot-reloads e trocas de contexto (cliente/organização).
+ * Impede que instâncias descartadas continuem ativas ou sejam reutilizadas.
+ */
+export class PollingLifecycleManager {
+  private currentInstance: ArtworkPollingController | null = null;
+  private factory: () => ArtworkPollingController;
+
+  constructor(factory: () => ArtworkPollingController) {
+    this.factory = factory;
+  }
+
+  public updateFactory(newFactory: () => ArtworkPollingController): void {
+    this.factory = newFactory;
+  }
+
+  public getController(): ArtworkPollingController {
+    if (!this.currentInstance || this.currentInstance.getIsDisposed()) {
+      this.currentInstance = this.factory();
+    }
+    return this.currentInstance;
+  }
+
+  public onSetup(): ArtworkPollingController {
+    if (this.currentInstance && !this.currentInstance.getIsDisposed()) {
+      this.currentInstance.dispose();
+    }
+    const instance = this.factory();
+    this.currentInstance = instance;
+    return instance;
+  }
+
+  public onCleanup(instance: ArtworkPollingController): void {
+    instance.dispose();
+    if (this.currentInstance === instance) {
+      this.currentInstance = null;
+    }
+  }
+
+  public getCurrentInstance(): ArtworkPollingController | null {
+    return this.currentInstance;
   }
 }
