@@ -5,6 +5,11 @@ const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
 
 test.beforeEach(async () => {
   await migration.rateLimit.deleteMany();
+  await migration.brand.deleteMany({
+    where: {
+      name: { startsWith: "Marca" },
+    },
+  });
 });
 
 test.afterAll(async () => {

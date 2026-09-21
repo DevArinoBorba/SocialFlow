@@ -1,6 +1,7 @@
 "use client";
 import { MediaLibrary } from "./media-library";
 import { ArtworkGenerator } from "./artwork-generator";
+import { DesignTemplateManager } from "./design-template-manager";
 import { ContentManager } from "./content-manager";
 import { SocialAccountsManager } from "./social-accounts-manager";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
@@ -32,6 +33,7 @@ export default function Home() {
   const [clients, setClients] = useState<Client[]>([]);
   const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [mediaRevision, setMediaRevision] = useState(0);
+  const [templateRevision, setTemplateRevision] = useState(0);
   const [brands, setBrands] = useState<Brand[]>([]);
   const [loading, setLoading] = useState(true);
   const [listing, setListing] = useState(false);
@@ -434,6 +436,21 @@ export default function Home() {
         (m.clientId === selectedClientId && isAdmin(m.role))),
   );
 
+  const canEditTemplates = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && isAdmin(m.role)) ||
+        (m.clientId === selectedClientId &&
+          (isAdmin(m.role) || m.role === "EDITOR"))),
+  );
+
+  const canReactivateTemplates = me.memberships.some(
+    (m) =>
+      m.organizationId === org &&
+      ((m.clientId === null && isAdmin(m.role)) ||
+        (m.clientId === selectedClientId && isAdmin(m.role))),
+  );
+
   const canGenerate = me.memberships.some(
     (m) =>
       m.organizationId === org &&
@@ -798,6 +815,15 @@ export default function Home() {
               canArchive={canCreateClient}
               refreshKey={mediaRevision}
             />
+            <DesignTemplateManager
+              key={`templates-${org}/${selectedClientId}`}
+              org={org}
+              clientId={selectedClientId}
+              canEditTemplates={canEditTemplates}
+              canReactivateTemplates={canReactivateTemplates}
+              canInitializeTemplates={canInitializeTemplates}
+              onTemplatesModified={() => setTemplateRevision((r) => r + 1)}
+            />
             <ArtworkGenerator
               key={`artwork-${org}/${selectedClientId}`}
               org={org}
@@ -805,6 +831,7 @@ export default function Home() {
               canGenerate={canGenerate}
               canInitializeTemplates={canInitializeTemplates}
               onArtworkCompleted={() => setMediaRevision((r) => r + 1)}
+              refreshKey={templateRevision}
             />
             <ContentManager
               key={`content-${org}/${selectedClientId}`}

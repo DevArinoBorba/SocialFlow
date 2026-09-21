@@ -2299,3 +2299,590 @@ button.secondary:hover {
   font-size: 0.85rem;
   text-decoration: none;
 }
+
+/* ==========================================================================
+   Modelos de Design (DesignTemplateManager & ArtworkPreview)
+   ========================================================================== */
+.design-template-manager-section {
+  margin-top: 48px;
+  padding-top: 32px;
+  border-top: 2px solid var(--line);
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 24px;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.section-header h2 {
+  margin: 0 0 6px;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.section-header-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+/* Barra de Ferramentas do Catálogo */
+.catalog-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+}
+
+.search-field {
+  flex: 1;
+  min-width: 240px;
+  max-width: 420px;
+}
+
+.status-filter-group {
+  display: flex;
+  gap: 6px;
+  background: var(--paper);
+  padding: 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+
+.filter-btn {
+  padding: 6px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 4px;
+  border: none;
+  cursor: pointer;
+}
+
+.filter-btn.active {
+  background: var(--accent);
+  color: white;
+}
+
+/* Grid de Cards de Templates */
+.template-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.template-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
+}
+
+.template-card:hover {
+  border-color: var(--accent);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.template-card.status-archived {
+  opacity: 0.82;
+  background: #fafafa;
+}
+
+.template-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.template-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.template-card h4,
+.template-detail-header h3 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.system-badge {
+  font-size: 0.7rem;
+  font-weight: 700;
+  background: #e0f2fe;
+  color: #0369a1;
+  padding: 2px 8px;
+  border-radius: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.badge-active {
+  background: #dcfce7;
+  color: #15803d;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.badge-archived {
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.template-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.format-tag {
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.template-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.empty-catalog-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 32px 24px;
+  text-align: center;
+  max-width: 580px;
+  margin: 24px auto;
+}
+
+.empty-catalog-card h3 {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+/* Layout do Editor (Formulário à Esquerda, Prévia à Direita) */
+.template-editor-layout {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 28px;
+  align-items: flex-start;
+  margin-top: 16px;
+}
+
+.editor-form-column {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 24px;
+}
+
+.editor-form-header {
+  margin-bottom: 20px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.editor-form-header h3,
+.editor-form-header h4 {
+  margin: 0 0 4px;
+  font-size: 1.25rem;
+}
+
+.template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-group label {
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.help-text {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.warning-hint {
+  font-size: 0.78rem;
+  color: #b45309;
+  margin-top: 4px;
+}
+
+.form-row-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* Seção de Cores */
+.colors-grid-section {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.colors-grid-section h4 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.color-fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.color-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.color-field label {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.color-input-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.color-input-wrapper input[type="color"] {
+  width: 28px;
+  height: 28px;
+  border: none;
+  padding: 0;
+  background: none;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.color-input-wrapper code {
+  font-size: 0.78rem;
+  font-family: monospace;
+}
+
+/* Sliders */
+.slider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.slider-label-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.slider-field input[type="range"] {
+  width: 100%;
+}
+
+/* Checkboxes */
+.checkbox-toggles-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 12px 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+/* Coluna da Prévia no Editor */
+.editor-preview-column {
+  position: sticky;
+  top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.preview-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: white;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.preview-toggle-guide {
+  font-size: 0.82rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.simulation-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.small-select {
+  font-size: 0.8rem;
+  padding: 4px 8px;
+}
+
+/* Guia visual de safe area na prévia */
+.preview-safe-area-guide {
+  position: absolute;
+  border: 1px dashed rgba(255, 255, 255, 0.75);
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 10;
+  border-radius: 2px;
+}
+
+.preview-logo-top-container {
+  margin-bottom: 24px;
+}
+
+/* Card de Relatório de Contraste */
+.contrast-report-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.contrast-report-card h4 {
+  margin: 0 0 4px;
+  font-size: 1rem;
+}
+
+.contrast-metrics-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.contrast-metric-item {
+  border-top: 1px solid var(--line);
+  padding-top: 8px;
+}
+
+.contrast-metric-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.85rem;
+}
+
+.contrast-badge {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+
+.contrast-badge.status-approved {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.contrast-badge.status-warning {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.contrast-badge.status-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.contrast-explanation {
+  margin: 4px 0 0;
+  color: var(--muted);
+}
+
+/* Detalhe do Template */
+.template-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 20px;
+  flex-wrap: wrap;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 18px 20px;
+}
+
+.detail-header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.unsaved-badge {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #b45309;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 4px;
+  margin-bottom: 12px;
+}
+
+.version-info-box {
+  margin-bottom: 20px;
+}
+
+.version-active-card {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px;
+}
+
+.version-active-card h4 {
+  margin: 0 0 4px;
+  font-size: 1.1rem;
+}
+
+.spec-meta-list {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 12px;
+  font-size: 0.85rem;
+  margin: 12px 0 0;
+}
+
+.spec-meta-list dt {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.spec-meta-list dd {
+  margin: 0;
+}
+
+/* Timeline de Versões */
+.versions-history-section {
+  margin-top: 24px;
+  border-top: 1px solid var(--line);
+  padding-top: 16px;
+}
+
+.versions-history-section h4 {
+  margin: 0 0 4px;
+  font-size: 1.05rem;
+}
+
+.versions-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.timeline-version-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px 14px;
+  transition: all 0.15s ease-in-out;
+}
+
+.timeline-version-row.active-preview {
+  border-color: var(--accent);
+  background: #f0fdf4;
+}
+
+.version-col-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 0.88rem;
+}
+
+.small-btn {
+  font-size: 0.8rem;
+  padding: 4px 8px;
+}
+
+/* Responsividade Mobile */
+@media (max-width: 900px) {
+  .template-editor-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .editor-preview-column {
+    position: static;
+  }
+
+  .form-row-2 {
+    grid-template-columns: 1fr;
+  }
+
+  .section-header {
+    flex-direction: column;
+  }
+}

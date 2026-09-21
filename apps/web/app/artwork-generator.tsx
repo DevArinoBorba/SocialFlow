@@ -14,6 +14,7 @@ import {
   PollingLifecycleManager,
   type PollingJob,
 } from "./artwork-polling-controller";
+import { ArtworkPreview } from "./artwork-preview";
 
 interface DesignTemplateVersionSummary {
   id: string;
@@ -71,6 +72,7 @@ interface ArtworkGeneratorProps {
   canGenerate: boolean;
   canInitializeTemplates: boolean;
   onArtworkCompleted?: () => void;
+  refreshKey?: number;
 }
 
 const FORMAT_METADATA: Record<
@@ -168,6 +170,7 @@ export function ArtworkGenerator({
   canGenerate,
   canInitializeTemplates,
   onArtworkCompleted,
+  refreshKey,
 }: ArtworkGeneratorProps) {
   const idPrefix = useId();
 
@@ -359,9 +362,14 @@ export function ArtworkGenerator({
         setTemplatesHasMore(data.hasMore);
         setTemplatesCursor(data.nextCursor);
 
-        // Se nenhum template selecionado, seleciona o primeiro disponível
-        if (!cursor && data.items.length > 0) {
-          setSelectedTemplateId((prev) => prev ?? data.items[0]?.id ?? null);
+        // Se nenhum template selecionado ou se o selecionado foi arquivado, seleciona o primeiro disponível
+        if (!cursor) {
+          setSelectedTemplateId((prev) => {
+            if (prev && data.items.some((t) => t.id === prev)) {
+              return prev;
+            }
+            return data.items[0]?.id ?? null;
+          });
         }
       } catch (err: unknown) {
         if (isMountedRef.current) {
@@ -474,6 +482,13 @@ export function ArtworkGenerator({
     void loadHistory();
     void loadMedia(1);
   }, [loadTemplates, loadHistory, loadMedia]);
+
+  // Recarrega catálogo de templates quando houver alterações em DesignTemplateManager
+  useEffect(() => {
+    if (refreshKey !== undefined && refreshKey > 0) {
+      void loadTemplates();
+    }
+  }, [refreshKey, loadTemplates]);
 
   // Carrega detalhes do template selecionado
   useEffect(() => {
@@ -1269,104 +1284,33 @@ export function ArtworkGenerator({
                   são renderizados exclusivamente como nós de texto comuns do React, sem dangerouslySetInnerHTML,
                   sem interpretação de tags HTML e sem interpolação de texto de usuário em propriedades de estilo.
                 */}
-                <div
-                  className="preview-viewport-wrapper"
-                  style={{
-                    aspectRatio: FORMAT_METADATA[currentFormat]?.ratio,
-                  }}
-                >
-                  <div
-                    className="preview-artboard"
-                    style={{
-                      backgroundColor:
-                        currentSpec?.backgroundColor ?? "#0F172A",
-                      padding: `${Math.round(((currentSpec?.safeArea ?? 80) / 1080) * 100)}%`,
-                    }}
-                  >
-                    {/* Imagem de Fundo (se selecionada) */}
-                    {bgMediaUrl && (
-                      <img
-                        src={bgMediaUrl}
-                        alt=""
-                        className="preview-bg-layer"
-                        style={{ objectFit: "cover" }}
-                      />
-                    )}
-
-                    {/* Sobreposição de Cor e Opacidade com valores validados do spec */}
+                {/* Prévia compartilhada e segura */}
+                {currentSpec ? (
+                  <ArtworkPreview
+                    spec={currentSpec}
+                    format={currentFormat}
+                    title={title}
+                    eyebrow={eyebrow}
+                    subtitle={subtitle}
+                    callToAction={callToAction}
+                    backgroundImageUrl={bgMediaUrl}
+                    logoImageUrl={logoMediaUrl}
+                  />
+                ) : (
+                  <div className="preview-viewport-wrapper">
                     <div
-                      className="preview-overlay-layer"
+                      className="preview-artboard"
                       style={{
-                        backgroundColor: currentSpec?.overlayColor ?? "#000000",
-                        opacity: currentSpec?.overlayOpacity ?? 0.3,
-                      }}
-                    />
-
-                    {/* Conteúdo textual seguro (renderizado puramente como string React) */}
-                    <div
-                      className="preview-content-layer"
-                      style={{
-                        textAlign: currentSpec?.textAlign ?? "left",
+                        padding: "20px",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
                       }}
                     >
-                      {currentSpec?.showEyebrow && eyebrow && (
-                        <div
-                          className="preview-eyebrow"
-                          style={{
-                            color: currentSpec?.accentColor ?? "#E9C46A",
-                          }}
-                        >
-                          {eyebrow}
-                        </div>
-                      )}
-
-                      <h3
-                        className="preview-title"
-                        style={{
-                          color: currentSpec?.textColor ?? "#FFFFFF",
-                          WebkitLineClamp: currentSpec?.titleMaxLines ?? 3,
-                        }}
-                      >
-                        {title.trim() || "Título da sua arte"}
-                      </h3>
-
-                      {currentSpec?.showSubtitle && subtitle && (
-                        <p
-                          className="preview-subtitle"
-                          style={{
-                            color: currentSpec?.mutedTextColor ?? "#94A3B8",
-                          }}
-                        >
-                          {subtitle}
-                        </p>
-                      )}
-
-                      {currentSpec?.showCallToAction && callToAction && (
-                        <div
-                          className="preview-cta-badge"
-                          style={{
-                            backgroundColor:
-                              currentSpec?.accentColor ?? "#E9C46A",
-                            color: currentSpec?.backgroundColor ?? "#0F172A",
-                          }}
-                        >
-                          {callToAction}
-                        </div>
-                      )}
-
-                      {logoMediaUrl && (
-                        <div className="preview-logo-container">
-                          <img
-                            src={logoMediaUrl}
-                            alt=""
-                            className="preview-logo-image"
-                            style={{ objectFit: "contain" }}
-                          />
-                        </div>
-                      )}
+                      <span className="muted">Carregando modelo…</span>
                     </div>
                   </div>
-                </div>
+                )}
 
                 {/* Status da Renderização Ativa */}
                 {activeJob && (
