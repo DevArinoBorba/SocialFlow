@@ -170,3 +170,5 @@ export function mediaStorage(env: NodeJS.ProcessEnv) {
     return null;
   }
 }
+
+export type MediaStorage = NonNullable<ReturnType<typeof mediaStorage>>;

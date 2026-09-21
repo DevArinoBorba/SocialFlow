@@ -141,6 +141,7 @@ describe("Fase 4: Agendamento Seguro de Publicações com BullMQ", () => {
     await migration.oAuthCredential.deleteMany({});
     await migration.socialAccount.deleteMany({});
     await migration.post.deleteMany({});
+    await migration.renderJob.deleteMany({});
     await migration.mediaAsset.deleteMany({});
 
     redis.disconnect();

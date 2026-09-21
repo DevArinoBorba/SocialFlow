@@ -117,6 +117,34 @@ services:
         ]
     stop_grace_period: 30s
     restart: unless-stopped
+  render-worker:
+    image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
+    environment:
+      <<: *app-env
+      MEDIA_S3_ENDPOINT: ${MEDIA_S3_ENDPOINT:-}
+      MEDIA_S3_BUCKET: ${MEDIA_S3_BUCKET:-}
+      MEDIA_S3_ACCESS_KEY_ID: ${MEDIA_S3_ACCESS_KEY_ID:-}
+      MEDIA_S3_SECRET_ACCESS_KEY: ${MEDIA_S3_SECRET_ACCESS_KEY:-}
+    command:
+      [
+        sh,
+        -c,
+        'export NODE_ENV="$$APP_ENV" DATABASE_URL="postgresql://socialflow_runtime:$$RUNTIME_DB_PASSWORD@postgres:5432/socialflow" REDIS_URL="redis://:$$REDIS_PASSWORD@redis:6379" && exec pnpm --filter @socialflow/worker start:render',
+      ]
+    depends_on:
+      migrate: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    healthcheck:
+      <<: *health
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3003/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+    stop_grace_period: 30s
+    restart: unless-stopped
   web:
     image: ${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}
     expose:

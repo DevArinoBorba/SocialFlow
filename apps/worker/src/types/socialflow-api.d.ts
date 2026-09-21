@@ -20,6 +20,46 @@ declare module "@socialflow/api/scheduler-queue.js" {
   export function getScheduleQueue(redis: Redis): Queue<ScheduleJobData>;
 }
 
+declare module "@socialflow/api/render-queue.js" {
+  import type { Queue } from "bullmq";
+  import type { Redis } from "ioredis";
+
+  export const RENDER_QUEUE_NAME = "artwork-render";
+
+  export interface RenderJobData {
+    renderJobId: string;
+    organizationId: string;
+    clientId: string;
+  }
+
+  export function getRenderQueueJobId(renderJobId: string): string;
+  export function createRenderQueue(redis: Redis): Queue<RenderJobData>;
+  export function closeRenderQueue(queue: Queue<RenderJobData>): Promise<void>;
+}
+
+declare module "@socialflow/api/media-storage.js" {
+  export const MAX_IMAGE_BYTES: number;
+
+  export interface ValidatedImage {
+    data: Buffer;
+    mimeType: string;
+    byteSize: number;
+    width: number;
+    height: number;
+    sha256: string;
+  }
+
+  export function validateImage(input: Buffer): Promise<ValidatedImage>;
+
+  export interface MediaStorage {
+    put(key: string, data: Buffer, mimeType: string): Promise<void>;
+    get(key: string): Promise<Buffer>;
+    close(): void;
+  }
+
+  export function mediaStorage(env: NodeJS.ProcessEnv): MediaStorage | null;
+}
+
 declare module "@socialflow/api/meta-publisher.js" {
   export interface MetaPublisherOptions {
     graphBaseUrl?: string;

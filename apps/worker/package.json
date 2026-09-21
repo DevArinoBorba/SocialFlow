@@ -6,13 +6,15 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "start:render": "node dist/render-main.js"
   },
   "dependencies": {
     "@socialflow/api": "workspace:*",
     "@socialflow/config": "workspace:*",
     "@socialflow/contracts": "workspace:*",
     "@socialflow/db": "workspace:*",
+    "@socialflow/render": "workspace:*",
     "bullmq": "6.3.4",
     "ioredis": "6.0.0",
     "zod": "4.6.2"

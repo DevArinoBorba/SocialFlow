@@ -141,6 +141,9 @@ importers:
       '@socialflow/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@socialflow/render':
+        specifier: workspace:*
+        version: link:../../packages/render
       bullmq:
         specifier: 6.3.4
         version: 6.3.4(ioredis@6.0.0)(pg@8.23.0)

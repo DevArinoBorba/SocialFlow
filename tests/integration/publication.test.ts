@@ -144,6 +144,7 @@ describe("Incremento Fase 3: Publicação Manual Controlada na Meta", () => {
     await migration.oAuthCredential.deleteMany({});
     await migration.socialAccount.deleteMany({});
     await migration.post.deleteMany({});
+    await migration.renderJob.deleteMany({});
     await migration.mediaAsset.deleteMany({});
 
     redis.disconnect();

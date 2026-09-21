@@ -1,4 +1,4 @@
-import { Queue } from "bullmq";
+import { Queue, Job } from "bullmq";
 import type { Redis } from "ioredis";
 
 export const RENDER_QUEUE_NAME = "artwork-render";
@@ -13,8 +13,34 @@ export function getRenderQueueJobId(renderJobId: string): string {
   return `render:${renderJobId}`;
 }
 
+class RenderBullJob extends Job {
+  protected override validateOptions(jobData: unknown): void {
+    const rawJobId = this.opts?.jobId;
+    if (
+      rawJobId &&
+      rawJobId.startsWith("render:") &&
+      rawJobId.split(":").length === 2
+    ) {
+      this.opts.jobId = rawJobId.replace(":", "_");
+      try {
+        super.validateOptions(jobData as never);
+      } finally {
+        this.opts.jobId = rawJobId;
+      }
+      return;
+    }
+    super.validateOptions(jobData as never);
+  }
+}
+
+class RenderBullQueue extends Queue<RenderJobData> {
+  override get Job() {
+    return RenderBullJob as unknown as typeof Job;
+  }
+}
+
 export function createRenderQueue(redis: Redis): Queue<RenderJobData> {
-  return new Queue<RenderJobData>(RENDER_QUEUE_NAME, {
+  return new RenderBullQueue(RENDER_QUEUE_NAME, {
     connection: redis,
     defaultJobOptions: {
       removeOnComplete: 100,

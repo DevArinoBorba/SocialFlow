@@ -8,6 +8,7 @@
   "include": [
     "scripts/**/*.ts",
     "tests/**/*.ts",
+    "apps/worker/src/types/**/*.d.ts",
     "playwright.config.ts",
     "vitest*.ts"
   ]
