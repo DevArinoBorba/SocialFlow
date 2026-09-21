@@ -1,6 +1,7 @@
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient, Prisma } from "./generated/client.js";
 export { PrismaClient, Prisma };
+export * from "./generated/enums.js";
 export function createDatabase(url: string) {
   return new PrismaClient({
     adapter: new PrismaPg({

@@ -147,6 +147,7 @@ export async function executeRenderJob(
           data: {
             status: "PROCESSING",
             executionToken,
+            queueJobId: getRenderQueueJobId(renderJobId),
             attemptNumber: { increment: 1 },
             leaseExpiresAt,
             errorCode: null,

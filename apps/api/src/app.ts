@@ -48,6 +48,12 @@ import {
 } from "./publication.js";
 import { registerScheduler } from "./scheduler.js";
 import { createScheduleQueue, closeScheduleQueue } from "./scheduler-queue.js";
+import { registerRender } from "./render.js";
+import {
+  createRenderQueue,
+  closeRenderQueue,
+  type RenderJobData,
+} from "./render-queue.js";
 
 class HttpError extends Error {
   constructor(
@@ -62,6 +68,7 @@ export interface CreateApplicationOptions {
   mediaDependencies?: MediaDependencies;
   socialAccountDependencies?: SocialAccountDependencies;
   publicationDependencies?: PublicationDependencies;
+  renderQueue?: Queue<RenderJobData>;
 }
 
 export async function createApplication(
@@ -80,6 +87,7 @@ export async function createApplication(
   );
   const queue = new Queue("diagnostics", { connection: redis });
   const schedulerQueue = createScheduleQueue(redis);
+  const renderQueue = options?.renderQueue ?? createRenderQueue(redis);
   const auth = createAuth(db, config);
   const server = express();
   server.disable("x-powered-by");
@@ -210,6 +218,7 @@ export async function createApplication(
     options?.publicationDependencies,
   );
   registerScheduler(server, scoped, schedulerQueue);
+  registerRender(server, scoped, renderQueue);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {
@@ -614,12 +623,14 @@ export async function createApplication(
     redis,
     queue,
     schedulerQueue,
+    renderQueue,
     auth,
     close: async () => {
       closeMedia();
       await app.close();
       await queue.close();
       await closeScheduleQueue(schedulerQueue);
+      await closeRenderQueue(renderQueue);
       redis.disconnect();
       await db.$disconnect();
     },

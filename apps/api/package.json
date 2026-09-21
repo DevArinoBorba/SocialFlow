@@ -25,6 +25,7 @@
     "@socialflow/config": "workspace:*",
     "@socialflow/contracts": "workspace:*",
     "@socialflow/db": "workspace:*",
+    "@socialflow/render": "workspace:*",
     "better-auth": "1.7.4",
     "bullmq": "6.3.4",
     "express": "5.1.0",
