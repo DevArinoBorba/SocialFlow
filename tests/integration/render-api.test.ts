@@ -1602,10 +1602,9 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
   // 37. Apenas uma rota Express é registrada para cada operação (sem alias :organizationId)
   it("37. Apenas uma rota canônica (:org) é registrada para cada operação Express", () => {
     const expressApp = appRuntime.app.getHttpAdapter().getInstance();
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const stack = (expressApp.router?.stack ||
       expressApp._router?.stack ||
-      []) as any[];
+      []) as Array<{ route?: { path?: string } }>;
     const renderRoutes: string[] = [];
     for (const layer of stack) {
       if (layer.route?.path && typeof layer.route.path === "string") {
@@ -1659,8 +1658,8 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
       throw unexpectedDbError;
     };
 
-    // @ts-expect-error express is resolved dynamically from apps/api
-    const expressModule =
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const expressModule: any =
       await import("../../apps/api/node_modules/express/index.js");
     const dummyServer = expressModule.default();
     dummyServer.use(expressModule.default.json());

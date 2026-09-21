@@ -75,6 +75,11 @@ function stable(value: unknown): unknown {
   return value;
 }
 
+export function hashTemplateSpec(spec: DesignTemplateSpec): string {
+  const normalized = JSON.stringify(stable(spec));
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
 export function hashRenderInput(spec: DesignTemplateSpec, input: ArtworkInput) {
   const normalized = JSON.stringify(
     stable({ rendererVersion: RENDERER_VERSION, spec, input }),

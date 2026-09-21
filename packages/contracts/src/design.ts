@@ -38,6 +38,40 @@ export const designTemplateInputSchema = z.strictObject({
 });
 export type DesignTemplateInput = z.infer<typeof designTemplateInputSchema>;
 
+export const designTemplatePatchSchema = z
+  .strictObject({
+    name: z.string().trim().min(2).max(120).optional(),
+    status: z.enum(["ACTIVE", "ARCHIVED"]).optional(),
+  })
+  .refine((data) => data.name !== undefined || data.status !== undefined, {
+    message: "Pelo menos um campo deve ser informado para atualização.",
+  });
+export type DesignTemplatePatch = z.infer<typeof designTemplatePatchSchema>;
+
+export const designTemplateVersionInputSchema = z.strictObject({
+  spec: designTemplateSpecSchema,
+});
+export type DesignTemplateVersionInput = z.infer<
+  typeof designTemplateVersionInputSchema
+>;
+
+export const designTemplateDuplicateInputSchema = z.strictObject({
+  name: z.string().trim().min(2).max(120),
+});
+export type DesignTemplateDuplicateInput = z.infer<
+  typeof designTemplateDuplicateInputSchema
+>;
+
+export const designTemplateListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  cursor: z.string().uuid().optional(),
+  status: z.enum(["ACTIVE", "ARCHIVED"]).optional(),
+  search: z.string().trim().max(100).optional(),
+});
+export type DesignTemplateListQuery = z.infer<
+  typeof designTemplateListQuerySchema
+>;
+
 export const artworkInputSchema = z.strictObject({
   eyebrow: z.string().trim().max(60).optional().default(""),
   title: z.string().trim().min(1).max(180),

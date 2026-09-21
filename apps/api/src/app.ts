@@ -49,6 +49,7 @@ import {
 import { registerScheduler } from "./scheduler.js";
 import { createScheduleQueue, closeScheduleQueue } from "./scheduler-queue.js";
 import { registerRender } from "./render.js";
+import { registerDesignTemplates } from "./design-templates.js";
 import {
   createRenderQueue,
   closeRenderQueue,
@@ -213,6 +214,7 @@ export async function createApplication(
   );
   registerScheduler(server, scoped, schedulerQueue);
   registerRender(server, scoped, renderQueue);
+  registerDesignTemplates(server, scoped);
   @Controller()
   class FoundationController {
     @Get("health/live") live() {

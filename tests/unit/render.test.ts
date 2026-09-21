@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import sharp from "sharp";
 import {
   hashRenderInput,
+  hashTemplateSpec,
   renderArtwork,
   RENDERER_VERSION,
 } from "../../packages/render/src/index.js";
@@ -92,5 +93,46 @@ describe("static artwork renderer", () => {
     expect(first).toBe(reordered);
     expect(first).toHaveLength(64);
     expect(hashRenderInput(spec("STORY"), input)).not.toBe(first);
+  });
+
+  it("creates a deterministic spec hash regardless of property ordering", () => {
+    const original = spec("PORTRAIT");
+    // Create object with reversed keys order
+    const reversedKeys = Object.fromEntries(
+      Object.entries(original).reverse(),
+    ) as DesignTemplateSpec;
+    // Create object with shuffled keys order
+    const shuffledKeys = {
+      showCallToAction: original.showCallToAction,
+      accentColor: original.accentColor,
+      format: original.format,
+      schemaVersion: original.schemaVersion,
+      backgroundColor: original.backgroundColor,
+      titleMaxLines: original.titleMaxLines,
+      textAlign: original.textAlign,
+      mutedTextColor: original.mutedTextColor,
+      showSubtitle: original.showSubtitle,
+      textColor: original.textColor,
+      overlayOpacity: original.overlayOpacity,
+      safeArea: original.safeArea,
+      showEyebrow: original.showEyebrow,
+      overlayColor: original.overlayColor,
+    } as DesignTemplateSpec;
+
+    const hash1 = hashTemplateSpec(original);
+    const hash2 = hashTemplateSpec(reversedKeys);
+    const hash3 = hashTemplateSpec(shuffledKeys);
+
+    expect(hash1).toHaveLength(64);
+    expect(hash1).toMatch(/^[0-9a-f]{64}$/);
+    expect(hash1).toBe(hash2);
+    expect(hash1).toBe(hash3);
+
+    // Any visual modification must change the hash
+    expect(
+      hashTemplateSpec({ ...original, backgroundColor: "#000000" }),
+    ).not.toBe(hash1);
+    expect(hashTemplateSpec({ ...original, safeArea: 120 })).not.toBe(hash1);
+    expect(hashTemplateSpec({ ...original, format: "SQUARE" })).not.toBe(hash1);
   });
 });
