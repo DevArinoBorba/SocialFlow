@@ -24,6 +24,7 @@ export class DesignTemplateError extends Error {
   constructor(
     public status: number,
     message: string,
+    public details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = "DesignTemplateError";
@@ -308,7 +309,10 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
         await fn(req, res);
       } catch (error: unknown) {
         if (error instanceof DesignTemplateError) {
-          res.status(error.status).json({ message: error.message });
+          res.status(error.status).json({
+            message: error.message,
+            ...(error.details ?? {}),
+          });
           return;
         }
 
@@ -737,11 +741,11 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
       if (!parsedBody.success) {
         throw new DesignTemplateError(
           400,
-          "Especificação inválida para nova versão.",
+          "Parâmetros inválidos para criação de nova versão.",
         );
       }
 
-      const { spec } = parsedBody.data;
+      const { expectedBaseVersion, spec } = parsedBody.data;
       const templateId = param(req, "templateId");
       const organizationId = param(req, "org");
       const clientId = param(req, "clientId");
@@ -750,9 +754,11 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
         req,
         WRITE_ROLES,
         async (tx, userId) => {
-          // Bloquear linha do template pai para serializar a contagem de versões
-          const lockedTemplates = await tx.$queryRaw<Array<{ id: string }>>`
-            SELECT id FROM "DesignTemplate"
+          // 1. Bloquear o template com FOR UPDATE e confirmar tenant e status
+          const lockedTemplates = await tx.$queryRaw<
+            Array<{ id: string; status: DesignTemplateStatus }>
+          >`
+            SELECT id, status FROM "DesignTemplate"
             WHERE id = ${templateId} AND "organizationId" = ${organizationId} AND "clientId" = ${clientId}
             FOR UPDATE
           `;
@@ -764,21 +770,7 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             );
           }
 
-          const template = await tx.designTemplate.findFirst({
-            where: {
-              id: templateId,
-              organizationId,
-              clientId,
-            },
-          });
-
-          if (!template) {
-            throw new DesignTemplateError(
-              404,
-              "Template de design não encontrado.",
-            );
-          }
-
+          const template = lockedTemplates[0]!;
           if (template.status !== "ACTIVE") {
             throw new DesignTemplateError(
               400,
@@ -786,6 +778,7 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             );
           }
 
+          // 2. Consultar a versão mais recente
           const latestVersionRecord = await tx.designTemplateVersion.findFirst({
             where: {
               templateId: template.id,
@@ -796,7 +789,22 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
             select: { version: true },
           });
 
-          const nextVersion = (latestVersionRecord?.version ?? 0) + 1;
+          const currentLatestVersion = latestVersionRecord?.version ?? 0;
+
+          // 3. Comparar com expectedBaseVersion: se divergente, 409 imediato sem gravações
+          if (currentLatestVersion !== expectedBaseVersion) {
+            throw new DesignTemplateError(
+              409,
+              `Conflito de concorrência: a versão base informada (${expectedBaseVersion}) difere da versão mais recente atual (${currentLatestVersion}). Recarregue o modelo antes de salvar.`,
+              {
+                code: "TEMPLATE_VERSION_CONFLICT",
+                currentVersion: currentLatestVersion,
+              },
+            );
+          }
+
+          // 4. Se iguais, criar exatamente latestVersion + 1
+          const nextVersion = currentLatestVersion + 1;
           const specHash = hashTemplateSpec(spec);
 
           try {
@@ -813,6 +821,7 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
               },
             });
 
+            // 5. Gravar auditoria somente após criação bem-sucedida
             await tx.auditLog.create({
               data: {
                 organizationId,
@@ -841,6 +850,10 @@ export function registerDesignTemplates(server: Express, scoped: Scope) {
               throw new DesignTemplateError(
                 409,
                 "Conflito de concorrência ao criar versão. Tente novamente.",
+                {
+                  code: "TEMPLATE_VERSION_CONFLICT",
+                  currentVersion: currentLatestVersion + 1,
+                },
               );
             }
             throw error;

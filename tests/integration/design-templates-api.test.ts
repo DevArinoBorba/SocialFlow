@@ -365,7 +365,7 @@ describe("Phase 6: Design Templates API", () => {
   });
 
   // 15. Nova versão incrementa corretamente
-  it("15. New version increments correctly", async () => {
+  it("15. New version increments correctly with expectedBaseVersion", async () => {
     const createRes = await request(rootA, cookieOwnerA, "POST", {
       name: `Version Test ${randomUUID()}`,
       spec: validSpec,
@@ -377,6 +377,7 @@ describe("Phase 6: Design Templates API", () => {
       cookieOwnerA,
       "POST",
       {
+        expectedBaseVersion: 1,
         spec: {
           ...validSpec,
           backgroundColor: "#264653",
@@ -392,6 +393,7 @@ describe("Phase 6: Design Templates API", () => {
       cookieOwnerA,
       "POST",
       {
+        expectedBaseVersion: 2,
         spec: {
           ...validSpec,
           backgroundColor: "#2A9D8F",
@@ -403,8 +405,8 @@ describe("Phase 6: Design Templates API", () => {
     expect(v3Body.version).toBe(3);
   });
 
-  // 16. Duas criações concorrentes não repetem número
-  it("16. Concurrent version creations do not duplicate numbers", async () => {
+  // 16. Concorrência otimista com duas requisições concorrentes
+  it("16. Two concurrent requests with expectedBaseVersion: 1 -> exactly one 201 and one 409", async () => {
     const createRes = await request(rootA, cookieOwnerA, "POST", {
       name: `Concurrency Template ${randomUUID()}`,
       spec: validSpec,
@@ -413,15 +415,42 @@ describe("Phase 6: Design Templates API", () => {
 
     const [res1, res2] = await Promise.all([
       request(`${rootA}/${template.id}/versions`, cookieOwnerA, "POST", {
+        expectedBaseVersion: 1,
         spec: { ...validSpec, backgroundColor: "#111111" },
       }),
       request(`${rootA}/${template.id}/versions`, cookieOwnerA, "POST", {
+        expectedBaseVersion: 1,
         spec: { ...validSpec, backgroundColor: "#222222" },
       }),
     ]);
 
-    expect([201, 409]).toContain(res1.status);
-    expect([201, 409]).toContain(res2.status);
+    const statuses = [res1.status, res2.status].sort();
+    expect(statuses).toEqual([201, 409]);
+
+    const res201 = res1.status === 201 ? res1 : res2;
+    const res409 = res1.status === 409 ? res1 : res2;
+    const body201 = await res201.json();
+    const body409 = await res409.json();
+
+    expect(body201.version).toBe(2);
+    expect(body409.code).toBe("TEMPLATE_VERSION_CONFLICT");
+    expect(body409.currentVersion).toBe(2);
+    expect(body409.message).toBeDefined();
+
+    // Somente uma nova versão no banco
+    const v2Versions = await migration.designTemplateVersion.findMany({
+      where: { templateId: template.id, version: 2 },
+    });
+    expect(v2Versions).toHaveLength(1);
+
+    // Somente uma auditoria de sucesso
+    const auditLogsForV2 = await migration.auditLog.findMany({
+      where: {
+        entityId: body201.id,
+        action: "design_template.version_created",
+      },
+    });
+    expect(auditLogsForV2).toHaveLength(1);
 
     const detailRes = await request(
       `${rootA}/${template.id}`,
@@ -432,8 +461,232 @@ describe("Phase 6: Design Templates API", () => {
     const versionNumbers = detail.versions.map(
       (v: { version: number }) => v.version,
     );
-    const uniqueNumbers = new Set(versionNumbers);
-    expect(uniqueNumbers.size).toBe(versionNumbers.length);
+    expect(versionNumbers).toEqual([2, 1]);
+  });
+
+  // 16b. Concorrência Otimista: Requisitos 1-6 e Auditoria
+  it("16b. Optimistic concurrency: mismatch returns 409, creates no version, and records no audit log", async () => {
+    const createRes = await request(rootA, cookieOwnerA, "POST", {
+      name: `Optimistic Concurrency 409 Test ${randomUUID()}`,
+      spec: validSpec,
+    });
+    const template = await createRes.json();
+
+    // 1. Versão atual 1 + expectedBaseVersion: 1 cria versão 2
+    const v2Res = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      {
+        expectedBaseVersion: 1,
+        spec: { ...validSpec, backgroundColor: "#121212" },
+      },
+    );
+    expect(v2Res.status).toBe(201);
+    const v2 = await v2Res.json();
+    expect(v2.version).toBe(2);
+
+    const auditCountBefore409 = await migration.auditLog.count({
+      where: {
+        action: "design_template.version_created",
+      },
+    });
+    const v2Audit = await migration.auditLog.findFirst({
+      where: {
+        entityId: v2.id,
+        action: "design_template.version_created",
+      },
+    });
+    expect(v2Audit).not.toBeNull();
+
+    // 2. Versão atual 2 + expectedBaseVersion: 1 retorna 409
+    const conflictRes = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      {
+        expectedBaseVersion: 1,
+        spec: { ...validSpec, backgroundColor: "#343434" },
+      },
+    );
+    expect(conflictRes.status).toBe(409);
+    const conflictBody = await conflictRes.json();
+    expect(conflictBody.message).toContain("Conflito de concorrência");
+
+    // 3. O 409 não cria versão 3
+    const checkRes = await request(
+      `${rootA}/${template.id}`,
+      cookieOwnerA,
+      "GET",
+    );
+    const checkBody = await checkRes.json();
+    expect(checkBody.versions).toHaveLength(2);
+    expect(checkBody.versions[0].version).toBe(2);
+
+    // 4. O 409 não cria auditoria de sucesso
+    const auditCountAfter409 = await migration.auditLog.count({
+      where: {
+        action: "design_template.version_created",
+      },
+    });
+    expect(auditCountAfter409).toBe(auditCountBefore409);
+
+    // 6. Nova tentativa com base 2 cria versão 3
+    const v3Res = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      {
+        expectedBaseVersion: 2,
+        spec: { ...validSpec, backgroundColor: "#565656" },
+      },
+    );
+    expect(v3Res.status).toBe(201);
+    const v3 = await v3Res.json();
+    expect(v3.version).toBe(3);
+  });
+
+  // 16c. Validação de expectedBaseVersion: ausente ou inválido retorna 400
+  it("16c. Validation of expectedBaseVersion: missing or invalid returns 400", async () => {
+    const createRes = await request(rootA, cookieOwnerA, "POST", {
+      name: `Validation expectedBaseVersion ${randomUUID()}`,
+      spec: validSpec,
+    });
+    const template = await createRes.json();
+
+    // 7. Ausente
+    const resMissing = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      { spec: validSpec },
+    );
+    expect(resMissing.status).toBe(400);
+
+    // 8. Zero, negativo, fracionário, string
+    const resZero = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      { expectedBaseVersion: 0, spec: validSpec },
+    );
+    expect(resZero.status).toBe(400);
+
+    const resNeg = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      { expectedBaseVersion: -1, spec: validSpec },
+    );
+    expect(resNeg.status).toBe(400);
+
+    const resFloat = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      { expectedBaseVersion: 1.5, spec: validSpec },
+    );
+    expect(resFloat.status).toBe(400);
+
+    const resStr = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      { expectedBaseVersion: "1", spec: validSpec },
+    );
+    expect(resStr.status).toBe(400);
+  });
+
+  // 16d. Cross-tenant isolamento de versões
+  it("16d. Cross-tenant cannot create versions on other tenant template (404)", async () => {
+    const createRes = await request(rootA, cookieOwnerA, "POST", {
+      name: `Tenant Isolation ${randomUUID()}`,
+      spec: validSpec,
+    });
+    const template = await createRes.json();
+
+    const crossRes = await request(
+      `${rootB}/${template.id}/versions`,
+      cookieAdminB,
+      "POST",
+      { expectedBaseVersion: 1, spec: validSpec },
+    );
+    expect(crossRes.status).toBe(404);
+  });
+
+  // 16e. RBAC na criação de versões (OWNER, ADMIN, EDITOR allowed; APPROVER, CLIENT_VIEWER forbidden)
+  it("16e. RBAC on version creation: OWNER/ADMIN/EDITOR allowed (201), APPROVER/CLIENT_VIEWER forbidden (403)", async () => {
+    const createRes = await request(rootA, cookieOwnerA, "POST", {
+      name: `RBAC Concurrency Test ${randomUUID()}`,
+      spec: validSpec,
+    });
+    const template = await createRes.json();
+
+    // APPROVER -> 403
+    const resApprover = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieApproverA,
+      "POST",
+      {
+        expectedBaseVersion: 1,
+        spec: { ...validSpec, backgroundColor: "#111111" },
+      },
+    );
+    expect(resApprover.status).toBe(403);
+
+    // CLIENT_VIEWER -> 403
+    const resViewer = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieViewerA,
+      "POST",
+      {
+        expectedBaseVersion: 1,
+        spec: { ...validSpec, backgroundColor: "#222222" },
+      },
+    );
+    expect(resViewer.status).toBe(403);
+
+    // EDITOR -> 201 (cria v2)
+    const resEditor = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieEditorA,
+      "POST",
+      {
+        expectedBaseVersion: 1,
+        spec: { ...validSpec, backgroundColor: "#333333" },
+      },
+    );
+    expect(resEditor.status).toBe(201);
+    const bodyEditor = await resEditor.json();
+    expect(bodyEditor.version).toBe(2);
+
+    // ADMIN -> 201 (cria v3)
+    const resAdmin = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieAdminA,
+      "POST",
+      {
+        expectedBaseVersion: 2,
+        spec: { ...validSpec, backgroundColor: "#444444" },
+      },
+    );
+    expect(resAdmin.status).toBe(201);
+    const bodyAdmin = await resAdmin.json();
+    expect(bodyAdmin.version).toBe(3);
+
+    // OWNER -> 201 (cria v4)
+    const resOwner = await request(
+      `${rootA}/${template.id}/versions`,
+      cookieOwnerA,
+      "POST",
+      {
+        expectedBaseVersion: 3,
+        spec: { ...validSpec, backgroundColor: "#555555" },
+      },
+    );
+    expect(resOwner.status).toBe(201);
+    const bodyOwner = await resOwner.json();
+    expect(bodyOwner.version).toBe(4);
   });
 
   // 17. Versão anterior permanece imutável
@@ -446,6 +699,7 @@ describe("Phase 6: Design Templates API", () => {
     const v1Before = template.versions[0];
 
     await request(`${rootA}/${template.id}/versions`, cookieOwnerA, "POST", {
+      expectedBaseVersion: 1,
       spec: { ...validSpec, backgroundColor: "#E76F51" },
     });
 
@@ -486,6 +740,7 @@ describe("Phase 6: Design Templates API", () => {
       cookieOwnerA,
       "POST",
       {
+        expectedBaseVersion: 1,
         spec: { ...validSpec, safeArea: 100 },
       },
     );
@@ -671,6 +926,7 @@ describe("Phase 6: Design Templates API", () => {
     // Create version 2
     const v2Spec = { ...validSpec, safeArea: 120 };
     await request(`${rootA}/${source.id}/versions`, cookieOwnerA, "POST", {
+      expectedBaseVersion: 1,
       spec: v2Spec,
     });
 

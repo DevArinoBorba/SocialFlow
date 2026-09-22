@@ -5,6 +5,7 @@ import {
   blendColors,
   calculateRelativeLuminance,
   calculateContrastRatio,
+  evaluateWcagLevel,
   evaluateContrast,
   analyzeTemplateContrast,
 } from "../../apps/web/app/design-contrast.js";
@@ -14,7 +15,7 @@ describe("design-contrast: Cálculo e Análise de Contraste WCAG 2.1", () => {
     expect(hexToRgb("#000000")).toEqual({ r: 0, g: 0, b: 0 });
     expect(hexToRgb("#FFFFFF")).toEqual({ r: 255, g: 255, b: 255 });
     expect(hexToRgb("#0F172A")).toEqual({ r: 15, g: 23, b: 42 });
-    expect(hexToRgb("inválido")).toBeNull();
+    expect(hexToRgb("invalido")).toBeNull();
 
     expect(rgbToHex({ r: 0, g: 0, b: 0 })).toBe("#000000");
     expect(rgbToHex({ r: 255, g: 255, b: 255 })).toBe("#FFFFFF");
@@ -51,23 +52,56 @@ describe("design-contrast: Cálculo e Análise de Contraste WCAG 2.1", () => {
     expect(blendColors(base, overlay, 0.5)).toEqual({ r: 150, g: 150, b: 150 });
   });
 
-  it("classifica o contraste de acordo com os limiares WCAG", () => {
-    // >= 4.5: Aprovado
-    expect(evaluateContrast(7.5, false).status).toBe("APPROVED");
-    expect(evaluateContrast(4.5, false).status).toBe("APPROVED");
-
-    // Entre 3.0 e 4.5
-    // Para texto grande: Aprovado
-    expect(evaluateContrast(3.8, true).status).toBe("APPROVED");
-    // Para texto normal: Atenção
-    expect(evaluateContrast(3.8, false).status).toBe("WARNING");
-
-    // < 3.0: Reprovado
-    expect(evaluateContrast(2.2, true).status).toBe("FAILED");
-    expect(evaluateContrast(1.5, false).status).toBe("FAILED");
+  it("avalia níveis WCAG rigorosamente nos limites para texto normal", () => {
+    // Normal: AA >= 4.5, AAA >= 7.0
+    expect(evaluateWcagLevel(2.99, "normal")).toBe("FAIL");
+    expect(evaluateWcagLevel(4.49, "normal")).toBe("FAIL");
+    expect(evaluateWcagLevel(4.5, "normal")).toBe("AA");
+    expect(evaluateWcagLevel(6.99, "normal")).toBe("AA");
+    expect(evaluateWcagLevel(7.0, "normal")).toBe("AAA");
+    expect(evaluateWcagLevel(12.0, "normal")).toBe("AAA");
   });
 
-  it("analisa especificação de template com alto contraste (Editorial Dark)", () => {
+  it("avalia níveis WCAG rigorosamente nos limites para texto grande", () => {
+    // Grande: AA >= 3.0, AAA >= 4.5
+    expect(evaluateWcagLevel(2.99, "large")).toBe("FAIL");
+    expect(evaluateWcagLevel(3.0, "large")).toBe("AA");
+    expect(evaluateWcagLevel(4.49, "large")).toBe("AA");
+    expect(evaluateWcagLevel(4.5, "large")).toBe("AAA");
+    expect(evaluateWcagLevel(7.0, "large")).toBe("AAA");
+  });
+
+  it("classifica o status de contraste (APPROVED, WARNING, FAILED)", () => {
+    // Texto grande com AAA (>= 4.5) -> APPROVED
+    expect(evaluateContrast(5.0, "large").status).toBe("APPROVED");
+    expect(evaluateContrast(5.0, "large").wcagLevel).toBe("AAA");
+
+    // Texto grande com AA (3.0 a 4.5) -> APPROVED (atende nível AA para texto grande)
+    expect(evaluateContrast(3.5, "large").status).toBe("APPROVED");
+    expect(evaluateContrast(3.5, "large").wcagLevel).toBe("AA");
+
+    // Texto grande abaixo de AA (< 3.0) -> FAILED
+    expect(evaluateContrast(2.5, "large").status).toBe("FAILED");
+    expect(evaluateContrast(2.5, "large").wcagLevel).toBe("FAIL");
+
+    // Texto normal com AAA (>= 7.0) -> APPROVED
+    expect(evaluateContrast(7.5, "normal").status).toBe("APPROVED");
+    expect(evaluateContrast(7.5, "normal").wcagLevel).toBe("AAA");
+
+    // Texto normal com AA (4.5 a 7.0) -> APPROVED
+    expect(evaluateContrast(5.0, "normal").status).toBe("APPROVED");
+    expect(evaluateContrast(5.0, "normal").wcagLevel).toBe("AA");
+
+    // Texto normal entre 3.0 e 4.5 -> WARNING (aceitável para grande, reprovado para normal)
+    expect(evaluateContrast(3.5, "normal").status).toBe("WARNING");
+    expect(evaluateContrast(3.5, "normal").wcagLevel).toBe("FAIL");
+
+    // Texto normal abaixo de 3.0 -> FAILED
+    expect(evaluateContrast(2.5, "normal").status).toBe("FAILED");
+    expect(evaluateContrast(2.5, "normal").wcagLevel).toBe("FAIL");
+  });
+
+  it("analisa especificação com alto contraste (Editorial Dark)", () => {
     const analysis = analyzeTemplateContrast({
       backgroundColor: "#0F172A",
       overlayColor: "#020617",
@@ -85,19 +119,25 @@ describe("design-contrast: Cálculo e Análise de Contraste WCAG 2.1", () => {
 
     const titleResult = analysis.elements.find((e) => e.element === "title");
     expect(titleResult).toBeDefined();
+    expect(titleResult?.category).toBe("large");
+    expect(titleResult?.wcagLevel).toBe("AAA");
     expect(titleResult?.status).toBe("APPROVED");
-    expect(titleResult?.ratio).toBeGreaterThanOrEqual(10); // Branco sobre azul quase preto é altíssimo
+    expect(titleResult?.ratio).toBeGreaterThanOrEqual(10);
 
     const eyebrowResult = analysis.elements.find(
       (e) => e.element === "eyebrow",
     );
     expect(eyebrowResult).toBeDefined();
-    expect(eyebrowResult?.status).toBe("APPROVED");
+    expect(eyebrowResult?.category).toBe("large");
+    expect(eyebrowResult?.wcagLevel).toBe("AAA");
 
     const ctaResult = analysis.elements.find(
       (e) => e.element === "callToAction",
     );
     expect(ctaResult).toBeDefined();
+    expect(ctaResult?.category).toBe("large");
+    // CTA: texto escuro #0F172A sobre botão azul #38BDF8
+    expect(ctaResult?.ratio).toBeGreaterThanOrEqual(4.5);
     expect(ctaResult?.status).toBe("APPROVED");
   });
 
@@ -115,9 +155,31 @@ describe("design-contrast: Cálculo e Análise de Contraste WCAG 2.1", () => {
     });
 
     expect(analysis.hasFailure).toBe(true);
+    expect(analysis.failedElements.length).toBeGreaterThan(0);
     const titleResult = analysis.elements.find((e) => e.element === "title");
     expect(titleResult?.status).toBe("FAILED");
+    expect(titleResult?.wcagLevel).toBe("FAIL");
     expect(titleResult?.ratio).toBeLessThan(3.0);
+  });
+
+  it("calcula contraste de CTA entre o texto (backgroundColor) e botão (accentColor)", () => {
+    const analysis = analyzeTemplateContrast({
+      backgroundColor: "#000000", // Texto do botão
+      overlayColor: "#000000",
+      overlayOpacity: 0,
+      textColor: "#FFFFFF",
+      mutedTextColor: "#CCCCCC",
+      accentColor: "#FFFFFF", // Fundo do botão branco
+      showCallToAction: true,
+    });
+
+    const ctaResult = analysis.elements.find(
+      (e) => e.element === "callToAction",
+    );
+    expect(ctaResult).toBeDefined();
+    expect(ctaResult?.ratio).toBe(21); // Branco com preto = 21:1
+    expect(ctaResult?.wcagLevel).toBe("AAA");
+    expect(ctaResult?.status).toBe("APPROVED");
   });
 
   it("marca flag de estimativa quando houver imagem de fundo", () => {

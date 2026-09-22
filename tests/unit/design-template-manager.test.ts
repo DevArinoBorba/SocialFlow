@@ -208,11 +208,49 @@ describe("design-template-manager: Validações, Contratos e Permissões", () =>
     // Patch sem nenhum campo deve falhar
     expect(designTemplatePatchSchema.safeParse({}).success).toBe(false);
 
+    // Versão com expectedBaseVersion positivo é válida
+    expect(
+      designTemplateVersionInputSchema.safeParse({
+        expectedBaseVersion: 1,
+        spec: validSpec,
+      }).success,
+    ).toBe(true);
+
+    // Sem expectedBaseVersion deve falhar
     expect(
       designTemplateVersionInputSchema.safeParse({
         spec: validSpec,
       }).success,
-    ).toBe(true);
+    ).toBe(false);
+
+    // expectedBaseVersion <= 0, float ou string deve falhar
+    expect(
+      designTemplateVersionInputSchema.safeParse({
+        expectedBaseVersion: 0,
+        spec: validSpec,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      designTemplateVersionInputSchema.safeParse({
+        expectedBaseVersion: -1,
+        spec: validSpec,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      designTemplateVersionInputSchema.safeParse({
+        expectedBaseVersion: 1.5,
+        spec: validSpec,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      designTemplateVersionInputSchema.safeParse({
+        expectedBaseVersion: "1",
+        spec: validSpec,
+      }).success,
+    ).toBe(false);
 
     expect(
       designTemplateDuplicateInputSchema.safeParse({

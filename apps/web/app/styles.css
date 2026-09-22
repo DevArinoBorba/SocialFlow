@@ -2886,3 +2886,203 @@ button.secondary:hover {
     flex-direction: column;
   }
 }
+
+/* Conflito de Concorrência Otimista */
+.conflict-alert-card {
+  background: #fef2f2;
+  border: 2px solid #ef4444;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 20px;
+}
+
+.conflict-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.conflict-header h4 {
+  margin: 0 0 4px;
+  color: #991b1b;
+  font-size: 1.05rem;
+}
+
+.conflict-header p {
+  margin: 0;
+  font-size: 0.88rem;
+  color: #7f1d1d;
+}
+
+.conflict-meta-box {
+  margin: 12px 0;
+  padding: 10px 14px;
+  background: white;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.conflict-diff-box {
+  margin: 12px 0;
+  padding: 12px 14px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+
+.conflict-diff-box h5 {
+  margin: 0 0 8px;
+  font-size: 0.88rem;
+  color: var(--foreground);
+}
+
+.diff-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.diff-list li {
+  margin-bottom: 4px;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+/* Card de Orçamento de Layout e Overflow */
+.layout-budget-card {
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 14px;
+  margin-top: 16px;
+}
+
+.layout-budget-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.layout-budget-header h4 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.budget-badge-safe {
+  background: #dcfce7;
+  color: #15803d;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.budget-badge-warning {
+  background: #fef3c7;
+  color: #b45309;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.budget-badge-overflow {
+  background: #fee2e2;
+  color: #b91c1c;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.budget-metrics-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  font-size: 0.82rem;
+  margin: 8px 0;
+  color: var(--foreground);
+}
+
+.budget-warning-list {
+  color: #991b1b;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  padding: 8px 12px;
+  font-size: 0.82rem;
+  margin: 10px 0 0;
+  list-style-position: inside;
+}
+
+/* Resumo de Alterações */
+.diff-summary-card {
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 16px;
+}
+
+.diff-summary-card h5 {
+  margin: 0 0 6px;
+  font-size: 0.85rem;
+}
+
+/* Modal de Confirmação de Contraste */
+.modal-header-warning {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.modal-header-warning h3 {
+  margin: 0;
+  color: #92400e;
+}
+
+.contrast-failure-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 14px 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.contrast-failure-item {
+  background: #fffbeb;
+  border-left: 4px solid #d97706;
+  padding: 8px 12px;
+  border-radius: 0 4px 4px 0;
+  font-size: 0.85rem;
+}
+
+.warning-btn {
+  background: #d97706;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.warning-btn:hover {
+  background: #b45309;
+}

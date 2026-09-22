@@ -56,11 +56,228 @@ export const designTemplatePatchSchema = z
 export type DesignTemplatePatch = z.infer<typeof designTemplatePatchSchema>;
 
 export const designTemplateVersionInputSchema = z.strictObject({
+  expectedBaseVersion: z.number().int().positive(),
   spec: designTemplateSpecSchema,
 });
 export type DesignTemplateVersionInput = z.infer<
   typeof designTemplateVersionInputSchema
 >;
+
+export const RENDER_LAYOUT_RULES = {
+  logo: {
+    width: 180,
+    height: 90,
+    marginBottom: 32,
+    totalHeight: 122,
+  },
+  eyebrow: {
+    fontSize: 30,
+    fontWeight: 700,
+    lineHeight: 1.2,
+    height: 36,
+  },
+  title: {
+    fontSize: {
+      SQUARE: 72,
+      PORTRAIT: 72,
+      STORY: 82,
+    },
+    lineHeight: 1.08,
+    lineHeightPx: {
+      SQUARE: 72 * 1.08,
+      PORTRAIT: 72 * 1.08,
+      STORY: 82 * 1.08,
+    },
+    marginTopWithEyebrow: 28,
+    marginTopWithoutEyebrow: 0,
+  },
+  subtitle: {
+    fontSize: 34,
+    lineHeight: 1.3,
+    lineHeightPx: 34 * 1.3,
+    marginTop: 36,
+    maxLines: 3,
+  },
+  callToAction: {
+    fontSize: 28,
+    lineHeight: 1.2,
+    paddingVertical: 44,
+    height: 28 * 1.2 + 44,
+    minMarginTop: 32,
+  },
+} as const;
+
+export interface LayoutBudgetBlockUsage {
+  block: string;
+  height: number;
+  description: string;
+}
+
+export interface LayoutBudgetResult {
+  totalHeight: number;
+  safeAreaTotal: number;
+  availableHeight: number;
+  usedHeight: number;
+  remainingHeight: number;
+  percentUsed: number;
+  status: "safe" | "warning" | "overflow";
+  responsibleBlocks: string[];
+  blockBreakdown: LayoutBudgetBlockUsage[];
+  explanation: string;
+}
+
+export function calculateLayoutBudget(
+  spec: DesignTemplateSpec,
+  options?: {
+    hasLogo?: boolean;
+    textScenario?: "short" | "medium" | "limit";
+    customLines?: {
+      titleLines?: number;
+      subtitleLines?: number;
+      hasEyebrow?: boolean;
+      hasCta?: boolean;
+    };
+  },
+): LayoutBudgetResult {
+  const { height: totalHeight } = designDimensions[spec.format];
+  const safeAreaTotal = spec.safeArea * 2;
+  const availableHeight = Math.max(0, totalHeight - safeAreaTotal);
+
+  const scenario = options?.textScenario ?? "medium";
+  const hasLogo = options?.hasLogo ?? false;
+
+  let titleLines = 2;
+  let subtitleLines = 2;
+  let hasEyebrow = spec.showEyebrow;
+  let hasCta = spec.showCallToAction;
+
+  if (scenario === "short") {
+    titleLines = 1;
+    subtitleLines = 1;
+  } else if (scenario === "medium") {
+    titleLines = Math.min(2, spec.titleMaxLines);
+    subtitleLines = 2;
+  } else if (scenario === "limit") {
+    titleLines = spec.titleMaxLines;
+    subtitleLines = 3;
+  }
+
+  if (options?.customLines) {
+    if (options.customLines.titleLines !== undefined) {
+      titleLines = Math.min(options.customLines.titleLines, spec.titleMaxLines);
+    }
+    if (options.customLines.subtitleLines !== undefined) {
+      subtitleLines = Math.min(options.customLines.subtitleLines, 3);
+    }
+    if (options.customLines.hasEyebrow !== undefined) {
+      hasEyebrow = spec.showEyebrow && options.customLines.hasEyebrow;
+    }
+    if (options.customLines.hasCta !== undefined) {
+      hasCta = spec.showCallToAction && options.customLines.hasCta;
+    }
+  }
+
+  const breakdown: LayoutBudgetBlockUsage[] = [];
+  let usedHeight = 0;
+  const responsibleBlocks: string[] = [];
+
+  if (hasLogo) {
+    const h = RENDER_LAYOUT_RULES.logo.totalHeight;
+    breakdown.push({
+      block: "Logotipo",
+      height: h,
+      description: "Logotipo (90px) + margem inferior (32px)",
+    });
+    usedHeight += h;
+  }
+
+  if (hasEyebrow && spec.showEyebrow) {
+    const h = RENDER_LAYOUT_RULES.eyebrow.height;
+    breakdown.push({
+      block: "Chamada superior",
+      height: h,
+      description: "Chamada superior (30px)",
+    });
+    usedHeight += h;
+  }
+
+  const titleLineH = RENDER_LAYOUT_RULES.title.lineHeightPx[spec.format];
+  const titleMargin =
+    hasEyebrow && spec.showEyebrow
+      ? RENDER_LAYOUT_RULES.title.marginTopWithEyebrow
+      : RENDER_LAYOUT_RULES.title.marginTopWithoutEyebrow;
+  const titleHeight = Math.round(titleLines * titleLineH) + titleMargin;
+  breakdown.push({
+    block: "Título principal",
+    height: titleHeight,
+    description: `Título (${titleLines} linha(s) × ${Math.round(titleLineH)}px + ${titleMargin}px margem)`,
+  });
+  usedHeight += titleHeight;
+  if (titleLines >= 3) {
+    responsibleBlocks.push("Título extenso");
+  }
+
+  if (spec.showSubtitle && subtitleLines > 0) {
+    const subLineH = RENDER_LAYOUT_RULES.subtitle.lineHeightPx;
+    const subHeight =
+      Math.round(subtitleLines * subLineH) +
+      RENDER_LAYOUT_RULES.subtitle.marginTop;
+    breakdown.push({
+      block: "Subtítulo",
+      height: subHeight,
+      description: `Subtítulo (${subtitleLines} linha(s) × ${Math.round(subLineH)}px + 36px margem)`,
+    });
+    usedHeight += subHeight;
+    if (subtitleLines >= 3) {
+      responsibleBlocks.push("Subtítulo de 3 linhas");
+    }
+  }
+
+  if (hasCta && spec.showCallToAction) {
+    const ctaH =
+      Math.round(RENDER_LAYOUT_RULES.callToAction.height) +
+      RENDER_LAYOUT_RULES.callToAction.minMarginTop;
+    breakdown.push({
+      block: "Chamada para Ação (CTA)",
+      height: ctaH,
+      description: "Botão de CTA (78px + margem mínima de 32px)",
+    });
+    usedHeight += ctaH;
+  }
+
+  if (spec.safeArea >= 160) {
+    responsibleBlocks.push(`Área de segurança alta (${spec.safeArea}px)`);
+  }
+
+  const remainingHeight = availableHeight - usedHeight;
+  const percentUsed = Math.round(
+    (usedHeight / Math.max(availableHeight, 1)) * 100,
+  );
+
+  let status: "safe" | "warning" | "overflow" = "safe";
+  let explanation = `Espaço vertical seguro (estimativa conservadora). Conteúdo consome ${percentUsed}% da área útil (${usedHeight}px de ${availableHeight}px disponíveis).`;
+
+  if (usedHeight > availableHeight) {
+    status = "overflow";
+    explanation = `Risco de corte (estimativa conservadora): o conteúdo (${usedHeight}px) ultrapassa a área útil disponível (${availableHeight}px) em ${usedHeight - availableHeight}px.`;
+  } else if (percentUsed > 80) {
+    status = "warning";
+    explanation = `Próximo do limite (estimativa conservadora): o conteúdo consome ${percentUsed}% da área útil.`;
+  }
+
+  return {
+    totalHeight,
+    safeAreaTotal,
+    availableHeight,
+    usedHeight,
+    remainingHeight,
+    percentUsed,
+    status,
+    responsibleBlocks,
+    blockBreakdown: breakdown,
+    explanation,
+  };
+}
 
 export const designTemplateDuplicateInputSchema = z.strictObject({
   name: z.string().trim().min(2).max(120),

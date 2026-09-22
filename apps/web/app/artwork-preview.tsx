@@ -55,7 +55,13 @@ export const FORMAT_DETAILS: Record<
  * Componente compartilhado e seguro de prévia de artes e templates de design.
  * Renderiza exclusivamente nós de texto React comuns (sem dangerouslySetInnerHTML,
  * sem interpolação de strings não sanitizadas em regras de estilo) e respeita
- * rigorosamente o layout determinístico utilizado pelo renderizador do worker (Satori/Sharp).
+ * as mesmas regras declarativas de layout utilizadas pelo renderizador do worker.
+ *
+ * NOTA DE FIDELIDADE:
+ * A prévia no navegador é uma aproximação estrutural projetada para feedback
+ * imediato e responsivo. O render definitivo é executado no worker por Satori e Sharp
+ * utilizando métricas tipográficas exatas das fontes Inter. Pequenas variações
+ * de quebra e kerning podem ocorrer no navegador.
  */
 export function ArtworkPreview({
   spec,

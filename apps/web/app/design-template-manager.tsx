@@ -9,12 +9,22 @@ import React, {
   useState,
   type FormEvent,
 } from "react";
-import type { DesignFormat, DesignTemplateSpec } from "@socialflow/contracts";
+import {
+  type DesignFormat,
+  type DesignTemplateSpec,
+  calculateLayoutBudget,
+  type LayoutBudgetResult,
+} from "@socialflow/contracts";
 import { ArtworkPreview, FORMAT_DETAILS } from "./artwork-preview";
 import {
   analyzeTemplateContrast,
   type DesignContrastAnalysis,
 } from "./design-contrast";
+import {
+  describeTemplateDifferences,
+  areSpecsEqual,
+  type TemplateDifferenceItem,
+} from "./design-diff";
 
 export interface DesignTemplateManagerProps {
   org: string;
@@ -159,6 +169,88 @@ const SIMULATION_TEXTS = {
   },
 };
 
+function LayoutBudgetCard({
+  layoutBudget,
+}: {
+  layoutBudget: LayoutBudgetResult;
+}) {
+  return (
+    <div className="layout-budget-card" data-testid="layout-budget-card">
+      <div className="layout-budget-header">
+        <h4>Orçamento Vertical e Área Útil (Estimativa)</h4>
+        <span
+          className={
+            layoutBudget.status === "safe"
+              ? "budget-badge-safe"
+              : layoutBudget.status === "warning"
+                ? "budget-badge-warning"
+                : "budget-badge-overflow"
+          }
+          data-testid={`budget-status-${layoutBudget.status}`}
+        >
+          {layoutBudget.status === "safe"
+            ? "Seguro"
+            : layoutBudget.status === "warning"
+              ? "Próximo do Limite"
+              : "Risco de Corte"}
+        </span>
+      </div>
+
+      <div className="budget-metrics-grid">
+        <div>
+          <span className="muted">Altura total:</span>{" "}
+          <strong>{layoutBudget.totalHeight} px</strong>
+        </div>
+        <div>
+          <span className="muted">Safe area:</span>{" "}
+          <strong>{layoutBudget.safeAreaTotal} px (2×)</strong>
+        </div>
+        <div>
+          <span className="muted">Área útil disponível:</span>{" "}
+          <strong>{layoutBudget.availableHeight} px</strong>
+        </div>
+        <div>
+          <span className="muted">Conteúdo estimado:</span>{" "}
+          <strong>{layoutBudget.usedHeight} px</strong>
+        </div>
+        <div>
+          <span className="muted">Espaço restante:</span>{" "}
+          <strong
+            style={{
+              color: layoutBudget.remainingHeight < 0 ? "#b91c1c" : "inherit",
+            }}
+          >
+            {layoutBudget.remainingHeight} px
+          </strong>
+        </div>
+      </div>
+
+      {layoutBudget.explanation && (
+        <p className="small muted" style={{ margin: "6px 0 0" }}>
+          {layoutBudget.explanation}
+        </p>
+      )}
+
+      <p
+        className="small muted"
+        style={{ fontSize: "11px", margin: "4px 0 0" }}
+      >
+        Estimativa conservadora baseada nas regras de entrelinha e altura do
+        renderer. A renderização final no worker pode variar conforme o texto
+        exato.
+      </p>
+
+      {layoutBudget.responsibleBlocks.length > 0 && (
+        <ul className="budget-warning-list" data-testid="budget-warning-list">
+          {layoutBudget.responsibleBlocks.map((b: string, idx: number) => (
+            <li key={idx}>Bloco causador de risco: {b}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export function DesignTemplateManager({
   org,
   clientId,
@@ -202,9 +294,36 @@ export function DesignTemplateManager({
     useState<DesignTemplateSpec>(DEFAULT_SPEC);
   const [creating, setCreating] = useState(false);
 
-  // Estado de Edição de Versão
+  // Estado de Edição de Versão e Concorrência Otimista
   const [editSpec, setEditSpec] = useState<DesignTemplateSpec>(DEFAULT_SPEC);
+  const [baseVersionNumber, setBaseVersionNumber] = useState<number | null>(
+    null,
+  );
+  const [baseSpec, setBaseSpec] = useState<DesignTemplateSpec | null>(null);
   const [savingVersion, setSavingVersion] = useState(false);
+  const [isReappliedDirty, setIsReappliedDirty] = useState(false);
+
+  // Conflito de Concorrência Otimista (409)
+  const [conflictState, setConflictState] = useState<{
+    hasConflict: boolean;
+    baseVersionNumber: number;
+    serverVersion: number;
+    serverSpec: DesignTemplateSpec;
+    diffItems: TemplateDifferenceItem[];
+  } | null>(null);
+
+  // Confirmação Explícita de Contraste Reprovado (WCAG)
+  const [contrastConfirmDialog, setContrastConfirmDialog] = useState<{
+    isOpen: boolean;
+    failedElements: Array<{
+      label: string;
+      ratio: string;
+      explanation: string;
+      statusLabel: string;
+    }>;
+    isEstimated: boolean;
+    onConfirm: () => void;
+  } | null>(null);
 
   // Modais de Ação Rápida
   const [duplicatingTemplate, setDuplicatingTemplate] =
@@ -241,17 +360,14 @@ export function DesignTemplateManager({
   }, [detail]);
 
   const isVersionDirty = useMemo(() => {
-    if (!isEditingVersion || !latestDetailVersion) return false;
-    return (
-      JSON.stringify(editSpec) !== JSON.stringify(latestDetailVersion.spec)
-    );
-  }, [isEditingVersion, editSpec, latestDetailVersion]);
+    if (!isEditingVersion || !baseSpec) return false;
+    return isReappliedDirty || !areSpecsEqual(editSpec, baseSpec);
+  }, [isEditingVersion, editSpec, baseSpec, isReappliedDirty]);
 
   const isCreateDirty = useMemo(() => {
     if (viewMode !== "create") return false;
     return (
-      createName.trim().length > 0 ||
-      JSON.stringify(createSpec) !== JSON.stringify(DEFAULT_SPEC)
+      createName.trim().length > 0 || !areSpecsEqual(createSpec, DEFAULT_SPEC)
     );
   }, [viewMode, createName, createSpec]);
 
@@ -323,7 +439,7 @@ export function DesignTemplateManager({
 
   // Carrega Detalhe do Template Selecionado
   const loadDetail = useCallback(
-    async (templateId: string) => {
+    async (templateId: string, preserveDraft = false) => {
       try {
         setLoadingDetail(true);
         setGeneralError("");
@@ -332,12 +448,17 @@ export function DesignTemplateManager({
         );
         setDetail(data);
         setPreviewVersionIndex(null);
-        // Inicializa o spec de edição com o mais recente
+        // Inicializa o spec de edição com o mais recente se não estiver preservando rascunho
         const latest = [...data.versions].sort(
           (a, b) => b.version - a.version,
         )[0];
         if (latest) {
-          setEditSpec(JSON.parse(JSON.stringify(latest.spec)));
+          setBaseVersionNumber(latest.version);
+          setBaseSpec(JSON.parse(JSON.stringify(latest.spec)));
+          if (!preserveDraft) {
+            setEditSpec(JSON.parse(JSON.stringify(latest.spec)));
+            setConflictState(null);
+          }
         }
       } catch (err: unknown) {
         setGeneralError((err as Error).message);
@@ -406,15 +527,33 @@ export function DesignTemplateManager({
     }
   }
 
-  // Submeter Criação de Novo Template (Versão 1)
-  async function handleSubmitCreate(e: FormEvent) {
-    e.preventDefault();
-    const nameErr = validateName(createName);
-    if (nameErr) {
-      setGeneralError(nameErr);
-      return;
-    }
+  // Reaplicar rascunho sobre a versão atual do servidor
+  function handleReapplyOverServerVersion() {
+    if (!conflictState) return;
+    setBaseVersionNumber(conflictState.serverVersion);
+    setBaseSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
+    setIsReappliedDirty(true);
+    setConflictState(null);
+    setGeneralNotice(
+      `Rascunho mantido e reaplicado sobre a versão ${conflictState.serverVersion}. Revise e confirme o envio para salvar.`,
+    );
+  }
 
+  // Descartar rascunho e carregar a versão mais recente do servidor
+  function handleDiscardDraft() {
+    if (!conflictState) return;
+    setEditSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
+    setBaseVersionNumber(conflictState.serverVersion);
+    setBaseSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
+    setIsReappliedDirty(false);
+    setConflictState(null);
+    setIsEditingVersion(false);
+    setGeneralNotice(
+      `Rascunho descartado. O formulário foi atualizado para a versão ${conflictState.serverVersion}.`,
+    );
+  }
+
+  async function executeCreate() {
     try {
       setCreating(true);
       setGeneralError("");
@@ -441,14 +580,40 @@ export function DesignTemplateManager({
     }
   }
 
-  // Submeter Nova Versão Imutável
-  async function handleSubmitVersion(e: FormEvent) {
+  // Submeter Criação de Novo Template (Versão 1)
+  async function handleSubmitCreate(e: FormEvent) {
     e.preventDefault();
-    if (!detail) return;
-    if (!isVersionDirty) {
-      setGeneralError("Nenhuma alteração detectada em relação à versão atual.");
+    const nameErr = validateName(createName);
+    if (nameErr) {
+      setGeneralError(nameErr);
       return;
     }
+
+    if (contrastAnalysis.hasFailure) {
+      setContrastConfirmDialog({
+        isOpen: true,
+        failedElements: contrastAnalysis.failedElements.map((el) => ({
+          label: el.label,
+          ratio: el.formattedRatio,
+          explanation: el.explanation,
+          statusLabel: el.statusLabel,
+        })),
+        isEstimated: contrastAnalysis.isBackgroundEstimated,
+        onConfirm: () => {
+          setContrastConfirmDialog(null);
+          void executeCreate();
+        },
+      });
+      return;
+    }
+
+    await executeCreate();
+  }
+
+  async function executeSaveVersion() {
+    if (!detail || baseVersionNumber === null) return;
+    const targetTemplateId = detail.id;
+    const currentBaseVersion = baseVersionNumber;
 
     try {
       setSavingVersion(true);
@@ -456,10 +621,11 @@ export function DesignTemplateManager({
       setGeneralNotice("");
 
       const nextVersion = await requestApi<TemplateVersionDetail>(
-        `${templatesBase}/${detail.id}/versions`,
+        `${templatesBase}/${targetTemplateId}/versions`,
         {
           method: "POST",
           body: JSON.stringify({
+            expectedBaseVersion: currentBaseVersion,
             spec: editSpec,
           }),
         },
@@ -469,22 +635,89 @@ export function DesignTemplateManager({
         `Nova versão ${nextVersion.version} criada com sucesso para "${detail.name}".`,
       );
       setIsEditingVersion(false);
+      setIsReappliedDirty(false);
+      setConflictState(null);
       onTemplatesModified?.();
-      await loadDetail(detail.id);
+      await loadDetail(targetTemplateId, false);
       await loadCatalog();
     } catch (err: unknown) {
       const errorObj = err as { status?: number; message?: string };
       if (errorObj.status === 409) {
+        // Conflito de concorrência: preservar o rascunho do usuário integralmente!
+        // Não substituir editSpec. Buscar dados atualizados do servidor com proteção contra resposta obsoleta:
+        try {
+          const freshDetail = await requestApi<TemplateDetail>(
+            `${templatesBase}/${targetTemplateId}`,
+          );
+          // Proteger contra resposta de outro template ou se o usuário mudou de contexto
+          if (
+            freshDetail.id !== targetTemplateId ||
+            selectedTemplateId !== targetTemplateId
+          ) {
+            return;
+          }
+
+          setDetail((prev) =>
+            prev?.id === targetTemplateId ? freshDetail : prev,
+          );
+          const serverLatest = [...freshDetail.versions].sort(
+            (a, b) => b.version - a.version,
+          )[0];
+          if (serverLatest) {
+            const diffs = describeTemplateDifferences(
+              serverLatest.spec,
+              editSpec,
+            );
+            setConflictState({
+              hasConflict: true,
+              baseVersionNumber: currentBaseVersion,
+              serverVersion: serverLatest.version,
+              serverSpec: serverLatest.spec,
+              diffItems: diffs,
+            });
+          }
+        } catch {
+          // fallback se busca fresh falhar
+        }
         setGeneralError(
-          "Conflito de concorrência: uma nova versão foi criada recentemente por outro usuário. Recarregando as informações mais recentes...",
+          "Conflito de concorrência: a versão mais recente do servidor já foi alterada por outro usuário. Nenhuma alteração foi salva. Seu rascunho foi preservado abaixo.",
         );
-        await loadDetail(detail.id);
       } else {
         setGeneralError(errorObj.message ?? "Falha ao salvar nova versão.");
       }
     } finally {
       setSavingVersion(false);
     }
+  }
+
+  // Submeter Nova Versão Imutável
+  async function handleSubmitVersion(e: FormEvent) {
+    e.preventDefault();
+    if (!detail) return;
+    if (!isVersionDirty) {
+      setGeneralError("Nenhuma alteração detectada em relação à versão atual.");
+      return;
+    }
+
+    if (contrastAnalysis.hasFailure) {
+      setContrastConfirmDialog({
+        isOpen: true,
+        failedElements: contrastAnalysis.failedElements.map((el) => ({
+          label: el.label,
+          ratio: el.formattedRatio,
+          explanation: el.explanation,
+          statusLabel: el.statusLabel,
+        })),
+        isEstimated: contrastAnalysis.isBackgroundEstimated,
+        onConfirm: () => {
+          setContrastConfirmDialog(null);
+          void executeSaveVersion();
+        },
+      });
+      return;
+    }
+
+    await executeSaveVersion();
   }
 
   // Duplicar Template
@@ -666,6 +899,20 @@ export function DesignTemplateManager({
       hasBackgroundImage: false,
     });
   }, [activeSpecForPreview]);
+
+  // Análise Determinística de Orçamento Vertical e Safe Area
+  const layoutBudget: LayoutBudgetResult = useMemo(() => {
+    return calculateLayoutBudget(activeSpecForPreview, {
+      textScenario: simulationLength,
+      hasLogo: false,
+    });
+  }, [activeSpecForPreview, simulationLength]);
+
+  // Resumo de Alterações em Relação à Versão-Base
+  const pendingChanges = useMemo(() => {
+    if (!isEditingVersion || !baseSpec) return [];
+    return describeTemplateDifferences(baseSpec, editSpec);
+  }, [isEditingVersion, baseSpec, editSpec]);
 
   // Textos da Simulação de Prévia
   const simText = SIMULATION_TEXTS[simulationLength];
@@ -1343,6 +1590,9 @@ export function DesignTemplateManager({
                 ))}
               </div>
             </div>
+
+            {/* Painel de Orçamento Vertical e Safe Area */}
+            <LayoutBudgetCard layoutBudget={layoutBudget} />
           </div>
         </div>
       )}
@@ -1387,6 +1637,16 @@ export function DesignTemplateManager({
                     onClick={() => {
                       setIsEditingVersion(true);
                       setPreviewVersionIndex(null);
+                      if (latestDetailVersion) {
+                        setBaseVersionNumber(latestDetailVersion.version);
+                        setBaseSpec(
+                          JSON.parse(JSON.stringify(latestDetailVersion.spec)),
+                        );
+                        setEditSpec(
+                          JSON.parse(JSON.stringify(latestDetailVersion.spec)),
+                        );
+                        setConflictState(null);
+                      }
                     }}
                   >
                     Criar nova versão
@@ -1470,6 +1730,82 @@ export function DesignTemplateManager({
           <div className="template-editor-layout">
             {/* Coluna Esquerda: Edição de Versão ou Visualização da Versão Ativa */}
             <div className="editor-form-column">
+              {conflictState && conflictState.hasConflict && (
+                <div
+                  className="conflict-alert-card"
+                  role="alert"
+                  data-testid="concurrency-conflict-banner"
+                >
+                  <div className="conflict-header">
+                    <span className="conflict-icon" aria-hidden="true">
+                      ⚠️
+                    </span>
+                    <div>
+                      <h4>Conflito de concorrência detectado</h4>
+                      <p>
+                        Outro usuário publicou uma nova versão enquanto você
+                        editava.
+                        <strong>
+                          {" "}
+                          Nenhuma alteração foi salva no servidor. Seu rascunho
+                          de trabalho foi preservado intacto.
+                        </strong>
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="conflict-meta-box">
+                    <div>
+                      <strong>Versão em que sua edição começou:</strong> v
+                      {conflictState.baseVersionNumber}
+                    </div>
+                    <div>
+                      <strong>Versão atual mais recente no servidor:</strong> v
+                      {conflictState.serverVersion}
+                    </div>
+                  </div>
+
+                  {conflictState.diffItems.length > 0 && (
+                    <div className="conflict-diff-box">
+                      <h5>
+                        Diferenças entre a nova versão-base (v
+                        {conflictState.serverVersion}) e seu rascunho
+                        preservado:
+                      </h5>
+                      <ul className="diff-list">
+                        {conflictState.diffItems.map((item, idx) => (
+                          <li key={idx}>
+                            <strong>{item.label}:</strong>{" "}
+                            {item.beforeDescription} ➔{" "}
+                            <em>{item.afterDescription}</em>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
+                  <div className="conflict-actions">
+                    <button
+                      type="button"
+                      className="primary-btn"
+                      data-testid="reapply-draft-btn"
+                      onClick={handleReapplyOverServerVersion}
+                    >
+                      Reaplicar sobre a versão atual (v
+                      {conflictState.serverVersion})
+                    </button>
+                    <button
+                      type="button"
+                      className="quiet danger"
+                      data-testid="discard-draft-btn"
+                      onClick={handleDiscardDraft}
+                    >
+                      Descartar meu rascunho
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {isEditingVersion ? (
                 <form onSubmit={handleSubmitVersion} className="template-form">
                   <div className="editor-form-header">
@@ -1732,6 +2068,24 @@ export function DesignTemplateManager({
                     </div>
                   </div>
 
+                  {/* Resumo Legível de Alterações em Relação à Versão-Base */}
+                  {pendingChanges.length > 0 && (
+                    <div
+                      className="diff-summary-card"
+                      data-testid="diff-summary-card"
+                    >
+                      <h5>Resumo de alterações (vs v{baseVersionNumber}):</h5>
+                      <ul className="diff-list">
+                        {pendingChanges.map((diff, idx) => (
+                          <li key={idx}>
+                            <strong>{diff.label}:</strong>{" "}
+                            {diff.beforeDescription} ➔ {diff.afterDescription}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+
                   <div className="form-actions">
                     <button
                       type="submit"
@@ -1745,7 +2099,14 @@ export function DesignTemplateManager({
                       onClick={() => {
                         if (confirmDiscardChanges()) {
                           setIsEditingVersion(false);
+                          setConflictState(null);
                           if (latestDetailVersion) {
+                            setBaseVersionNumber(latestDetailVersion.version);
+                            setBaseSpec(
+                              JSON.parse(
+                                JSON.stringify(latestDetailVersion.spec),
+                              ),
+                            );
                             setEditSpec(
                               JSON.parse(
                                 JSON.stringify(latestDetailVersion.spec),
@@ -1795,6 +2156,43 @@ export function DesignTemplateManager({
                         </code>
                       </dd>
                     </dl>
+
+                    {/* Comparação Legível de Versão Histórica com a Mais Recente */}
+                    {previewVersionIndex !== null &&
+                      detail.versions[previewVersionIndex] &&
+                      latestDetailVersion && (
+                        <div
+                          className="diff-summary-card"
+                          data-testid="history-diff-card"
+                          style={{ marginTop: 14 }}
+                        >
+                          <h5>
+                            Diferenças em relação à versão ativa mais recente (v
+                            {latestDetailVersion.version}):
+                          </h5>
+                          {describeTemplateDifferences(
+                            detail.versions[previewVersionIndex].spec,
+                            latestDetailVersion.spec,
+                          ).length === 0 ? (
+                            <p className="small muted">
+                              Especificações idênticas à versão mais recente.
+                            </p>
+                          ) : (
+                            <ul className="diff-list">
+                              {describeTemplateDifferences(
+                                detail.versions[previewVersionIndex].spec,
+                                latestDetailVersion.spec,
+                              ).map((diff, idx) => (
+                                <li key={idx}>
+                                  <strong>{diff.label}:</strong>{" "}
+                                  {diff.beforeDescription} ➔{" "}
+                                  {diff.afterDescription}
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      )}
                   </div>
                 </div>
               )}
@@ -1919,6 +2317,9 @@ export function DesignTemplateManager({
                   ))}
                 </div>
               </div>
+
+              {/* Painel de Orçamento Vertical e Safe Area */}
+              <LayoutBudgetCard layoutBudget={layoutBudget} />
             </div>
           </div>
         </div>
@@ -2046,6 +2447,71 @@ export function DesignTemplateManager({
                 className="quiet"
                 onClick={() => setArchivingTemplate(null)}
                 disabled={archiving}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 4: CONFIRMAÇÃO EXPLÍCITA DE CONTRASTE REPROVADO                    */}
+      {/* ========================================================================= */}
+      {contrastConfirmDialog && contrastConfirmDialog.isOpen && (
+        <div
+          className="modal-backdrop"
+          role="dialog"
+          aria-modal="true"
+          data-testid="contrast-confirm-modal"
+        >
+          <div className="publish-modal">
+            <div className="modal-header-warning">
+              <span className="warning-icon" aria-hidden="true">
+                ⚠️
+              </span>
+              <h3>Confirmação de Contraste Reprovado</h3>
+            </div>
+            <p>
+              A paleta de cores configurada possui elementos que{" "}
+              <strong>
+                não atendem aos critérios mínimos de contraste da WCAG 2.1
+              </strong>
+              :
+            </p>
+            {contrastConfirmDialog.isEstimated && (
+              <p className="notice small">
+                Aviso: Com imagem de fundo ativa, a análise de contraste é
+                estimada sobre o fundo médio calculado.
+              </p>
+            )}
+            <div className="contrast-failure-list">
+              {contrastConfirmDialog.failedElements.map((elem, i) => (
+                <div key={i} className="contrast-failure-item">
+                  <strong>{elem.label}:</strong> {elem.statusLabel} (
+                  {elem.ratio})<p className="small muted">{elem.explanation}</p>
+                </div>
+              ))}
+            </div>
+            <p className="muted small">
+              Salvar combinações com baixo contraste pode prejudicar a
+              legibilidade dos textos em redes sociais. Deseja prosseguir e
+              salvar mesmo assim?
+            </p>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="warning-btn"
+                data-testid="confirm-contrast-save-btn"
+                onClick={contrastConfirmDialog.onConfirm}
+              >
+                Confirmar e Salvar Mesmo Assim
+              </button>
+              <button
+                type="button"
+                className="quiet"
+                data-testid="cancel-contrast-save-btn"
+                onClick={() => setContrastConfirmDialog(null)}
               >
                 Cancelar
               </button>
