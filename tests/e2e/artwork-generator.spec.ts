@@ -12,6 +12,7 @@ test.afterAll(async () => {
 });
 
 async function loginAndOpenClient(page: Page, email: string) {
+  await page.context().clearCookies();
   await page.goto("/");
   await page.getByLabel("E-mail").fill(email);
   await page
@@ -673,8 +674,11 @@ test.describe("Fase 6: Gerador de Artes Individual", () => {
     await retryBtn.click();
     await expect(
       generator.getByText(
-        "Nenhuma imagem encontrada na biblioteca deste cliente.",
+        "Não foi possível carregar as imagens da biblioteca.",
       ),
+    ).toHaveCount(0);
+    await expect(
+      generator.locator(".media-selector-box").first(),
     ).toBeVisible();
   });
 

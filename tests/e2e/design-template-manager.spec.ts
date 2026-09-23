@@ -16,6 +16,7 @@ test.afterAll(async () => {
 });
 
 async function loginAndOpenClient(page: Page, email: string) {
+  await page.context().clearCookies();
   await page.goto("/");
   await page.getByLabel("E-mail").fill(email);
   await page

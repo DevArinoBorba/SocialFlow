@@ -297,11 +297,14 @@ small {
 }
 .brand-grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 16px;
   background: var(--paper);
   padding: 16px;
   border-radius: var(--radius);
+}
+.brand-item {
+  min-width: 0;
 }
 .brand-item strong {
   display: block;
@@ -315,6 +318,7 @@ small {
   margin: 0;
   font-size: 0.9rem;
   overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .form-actions {
   display: flex;
@@ -1677,6 +1681,7 @@ button.secondary:hover {
 }
 
 .template-select-card {
+  min-width: 0;
   background: white;
   border: 2px solid var(--line);
   border-radius: var(--radius);
@@ -1755,12 +1760,16 @@ button.secondary:hover {
   font-size: 0.85rem;
 }
 
+.template-aspect-box,
 .format-indicator-box {
   margin-top: auto;
   border: 1px dashed var(--line);
   background: #fafafa;
   border-radius: 4px;
   align-self: center;
+  width: 44px;
+  max-height: 54px;
+  pointer-events: none;
 }
 
 .format-indicator-box.ratio-square {
@@ -1780,7 +1789,7 @@ button.secondary:hover {
 
 .artwork-workspace-grid {
   display: grid;
-  grid-template-columns: 1.15fr 0.85fr;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
   gap: 32px;
   align-items: start;
   margin-top: 18px;
@@ -1918,9 +1927,17 @@ button.secondary:hover {
 }
 
 /* Coluna da Prévia */
-.artwork-preview-column {
+.artwork-preview-column,
+.artwork-preview-container {
   position: sticky;
   top: 20px;
+}
+
+@media (max-width: 900px) {
+  .artwork-preview-column,
+  .artwork-preview-container {
+    position: static;
+  }
 }
 
 .preview-heading {
@@ -2378,6 +2395,7 @@ button.secondary:hover {
 }
 
 .template-card {
+  min-width: 0;
   background: white;
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -2491,7 +2509,7 @@ button.secondary:hover {
 /* Layout do Editor (Formulário à Esquerda, Prévia à Direita) */
 .template-editor-layout {
   display: grid;
-  grid-template-columns: 1fr 380px;
+  grid-template-columns: minmax(0, 1fr) 380px;
   gap: 28px;
   align-items: flex-start;
   margin-top: 16px;
