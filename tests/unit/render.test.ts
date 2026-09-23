@@ -135,4 +135,87 @@ describe("static artwork renderer", () => {
     expect(hashTemplateSpec({ ...original, safeArea: 120 })).not.toBe(hash1);
     expect(hashTemplateSpec({ ...original, format: "SQUARE" })).not.toBe(hash1);
   });
+
+  it("1. Renderer e contrato puro compartilham as mesmas regras de layout sem divergência", async () => {
+    const { RENDER_LAYOUT_RULES } =
+      await import("../../packages/contracts/src/design.js");
+
+    // Validação estrita dos valores efetivos compartilhados
+    expect(RENDER_LAYOUT_RULES.logo).toEqual({
+      width: 180,
+      height: 90,
+      marginBottom: 32,
+    });
+
+    expect(RENDER_LAYOUT_RULES.eyebrow).toEqual({
+      fontSize: 30,
+      fontWeight: 700,
+    });
+
+    expect(RENDER_LAYOUT_RULES.title.fontSize).toEqual({
+      SQUARE: 72,
+      PORTRAIT: 72,
+      STORY: 82,
+    });
+    expect(RENDER_LAYOUT_RULES.title.fontWeight).toBe(700);
+    expect(RENDER_LAYOUT_RULES.title.lineHeight).toBe(1.08);
+    expect(RENDER_LAYOUT_RULES.title.marginTopWithEyebrow).toBe(28);
+    expect(RENDER_LAYOUT_RULES.title.marginTopWithoutEyebrow).toBe(0);
+
+    expect(RENDER_LAYOUT_RULES.subtitle).toEqual({
+      fontSize: 34,
+      lineHeight: 1.3,
+      marginTop: 36,
+      maxLines: 3,
+    });
+
+    expect(RENDER_LAYOUT_RULES.callToAction.fontSize).toBe(28);
+    expect(RENDER_LAYOUT_RULES.callToAction.fontWeight).toBe(700);
+    expect(RENDER_LAYOUT_RULES.callToAction.borderRadius).toBe(999);
+    expect(RENDER_LAYOUT_RULES.callToAction.padding).toBe("22px 40px");
+
+    // Constantes conservadoras de estimativa permanecem isoladas sob .estimation
+    expect(RENDER_LAYOUT_RULES.estimation.logoTotalHeight).toBe(122);
+    expect(RENDER_LAYOUT_RULES.estimation.eyebrowLineHeightPx).toBe(36);
+    expect(RENDER_LAYOUT_RULES.estimation.titleLineHeightPx.SQUARE).toBeCloseTo(
+      77.76,
+    );
+    expect(RENDER_LAYOUT_RULES.estimation.titleLineHeightPx.STORY).toBeCloseTo(
+      88.56,
+    );
+    expect(RENDER_LAYOUT_RULES.estimation.subtitleLineHeightPx).toBeCloseTo(
+      44.2,
+    );
+    expect(RENDER_LAYOUT_RULES.estimation.callToActionHeight).toBeCloseTo(77.6);
+    expect(RENDER_LAYOUT_RULES.estimation.callToActionMinMarginTop).toBe(32);
+  });
+
+  it("2. Código-fonte do renderer consome diretamente RENDER_LAYOUT_RULES de @socialflow/contracts", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { resolve } = await import("node:path");
+    const rendererSource = readFileSync(
+      resolve(process.cwd(), "packages/render/src/index.ts"),
+      "utf8",
+    );
+
+    // Certifica que o renderer importa e utiliza RENDER_LAYOUT_RULES
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.logo.width");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.logo.height");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.logo.marginBottom");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.eyebrow.fontSize");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.title.fontSize");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.title.lineHeight");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.subtitle.fontSize");
+    expect(rendererSource).toContain("RENDER_LAYOUT_RULES.subtitle.lineHeight");
+    expect(rendererSource).toContain(
+      "RENDER_LAYOUT_RULES.callToAction.fontSize",
+    );
+    expect(rendererSource).toContain(
+      "RENDER_LAYOUT_RULES.callToAction.padding",
+    );
+    expect(rendererSource).toContain(
+      "RENDER_LAYOUT_RULES.callToAction.borderRadius",
+    );
+  });
 });

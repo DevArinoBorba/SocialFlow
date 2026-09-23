@@ -63,18 +63,21 @@ export type DesignTemplateVersionInput = z.infer<
   typeof designTemplateVersionInputSchema
 >;
 
+/**
+ * Regras e dimensões puras compartilhadas entre o renderer definitivo (Satori/Sharp)
+ * e o subsistema de orçamento de layout / prévia client-side.
+ *
+ * Módulo seguro para navegador: não importa Satori, Sharp, node:fs nem dependências do worker.
+ */
 export const RENDER_LAYOUT_RULES = {
   logo: {
     width: 180,
     height: 90,
     marginBottom: 32,
-    totalHeight: 122,
   },
   eyebrow: {
     fontSize: 30,
     fontWeight: 700,
-    lineHeight: 1.2,
-    height: 36,
   },
   title: {
     fontSize: {
@@ -82,28 +85,51 @@ export const RENDER_LAYOUT_RULES = {
       PORTRAIT: 72,
       STORY: 82,
     },
+    fontWeight: 700,
     lineHeight: 1.08,
-    lineHeightPx: {
-      SQUARE: 72 * 1.08,
-      PORTRAIT: 72 * 1.08,
-      STORY: 82 * 1.08,
-    },
     marginTopWithEyebrow: 28,
     marginTopWithoutEyebrow: 0,
   },
   subtitle: {
     fontSize: 34,
     lineHeight: 1.3,
-    lineHeightPx: 34 * 1.3,
     marginTop: 36,
     maxLines: 3,
   },
   callToAction: {
     fontSize: 28,
-    lineHeight: 1.2,
-    paddingVertical: 44,
-    height: 28 * 1.2 + 44,
-    minMarginTop: 32,
+    fontWeight: 700,
+    paddingVertical: 22,
+    paddingHorizontal: 40,
+    padding: "22px 40px",
+    borderRadius: 999,
+  },
+  /**
+   * Constantes e heurísticas conservadoras utilizadas exclusivamente para estimativa de layout vertical
+   * na prévia e validação de orçamento (calculateLayoutBudget).
+   *
+   * Partes conservadoras documentadas:
+   * 1. Logotipo: totalHeight considera altura (90px) + margem inferior (32px) = 122px.
+   * 2. Eyebrow: entrelinha estimada em 36px (fontSize 30 * 1.2 conservador).
+   * 3. Título: entrelinhas nominais (72 * 1.08 = 77.76px, 82 * 1.08 = 88.56px).
+   * 4. Subtítulo: entrelinha nominal (34 * 1.3 = 44.2px) com margem superior fixa de 36px.
+   * 5. Call to Action: no renderer real, o botão utiliza marginTop: 'auto' para ancorar no rodapé.
+   *    Para a estimativa de risco de corte/orçamento, adota-se minMarginTop: 32px como margem mínima
+   *    conservadora para que o botão não sobreponha ou colida visualmente com o conteúdo acima.
+   *    A altura do CTA na estimativa (77.6px) soma a linha de texto estimada (28 * 1.2 = 33.6px)
+   *    ao padding vertical total (22 * 2 = 44px).
+   */
+  estimation: {
+    logoTotalHeight: 90 + 32,
+    eyebrowLineHeightPx: 36,
+    titleLineHeightPx: {
+      SQUARE: 72 * 1.08,
+      PORTRAIT: 72 * 1.08,
+      STORY: 82 * 1.08,
+    },
+    subtitleLineHeightPx: 34 * 1.3,
+    callToActionHeight: 28 * 1.2 + 44,
+    callToActionMinMarginTop: 32,
   },
 } as const;
 
@@ -182,7 +208,7 @@ export function calculateLayoutBudget(
   const responsibleBlocks: string[] = [];
 
   if (hasLogo) {
-    const h = RENDER_LAYOUT_RULES.logo.totalHeight;
+    const h = RENDER_LAYOUT_RULES.estimation.logoTotalHeight;
     breakdown.push({
       block: "Logotipo",
       height: h,
@@ -192,7 +218,7 @@ export function calculateLayoutBudget(
   }
 
   if (hasEyebrow && spec.showEyebrow) {
-    const h = RENDER_LAYOUT_RULES.eyebrow.height;
+    const h = RENDER_LAYOUT_RULES.estimation.eyebrowLineHeightPx;
     breakdown.push({
       block: "Chamada superior",
       height: h,
@@ -201,7 +227,8 @@ export function calculateLayoutBudget(
     usedHeight += h;
   }
 
-  const titleLineH = RENDER_LAYOUT_RULES.title.lineHeightPx[spec.format];
+  const titleLineH =
+    RENDER_LAYOUT_RULES.estimation.titleLineHeightPx[spec.format];
   const titleMargin =
     hasEyebrow && spec.showEyebrow
       ? RENDER_LAYOUT_RULES.title.marginTopWithEyebrow
@@ -218,7 +245,7 @@ export function calculateLayoutBudget(
   }
 
   if (spec.showSubtitle && subtitleLines > 0) {
-    const subLineH = RENDER_LAYOUT_RULES.subtitle.lineHeightPx;
+    const subLineH = RENDER_LAYOUT_RULES.estimation.subtitleLineHeightPx;
     const subHeight =
       Math.round(subtitleLines * subLineH) +
       RENDER_LAYOUT_RULES.subtitle.marginTop;
@@ -235,8 +262,8 @@ export function calculateLayoutBudget(
 
   if (hasCta && spec.showCallToAction) {
     const ctaH =
-      Math.round(RENDER_LAYOUT_RULES.callToAction.height) +
-      RENDER_LAYOUT_RULES.callToAction.minMarginTop;
+      Math.round(RENDER_LAYOUT_RULES.estimation.callToActionHeight) +
+      RENDER_LAYOUT_RULES.estimation.callToActionMinMarginTop;
     breakdown.push({
       block: "Chamada para Ação (CTA)",
       height: ctaH,

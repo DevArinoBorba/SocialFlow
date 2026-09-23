@@ -7,6 +7,7 @@ import {
   artworkInputSchema,
   designDimensions,
   designTemplateSpecSchema,
+  RENDER_LAYOUT_RULES,
   type ArtworkInput,
   type DesignTemplateSpec,
 } from "@socialflow/contracts";
@@ -166,15 +167,22 @@ export async function renderArtwork(
       type: "img",
       props: {
         src: logo,
-        width: 180,
-        height: 90,
-        style: { objectFit: "contain", marginBottom: 32 },
+        width: RENDER_LAYOUT_RULES.logo.width,
+        height: RENDER_LAYOUT_RULES.logo.height,
+        style: {
+          objectFit: "contain",
+          marginBottom: RENDER_LAYOUT_RULES.logo.marginBottom,
+        },
       },
     });
   if (spec.showEyebrow && input.eyebrow)
     content.push(
       element(
-        { color: spec.accentColor, fontSize: 30, fontWeight: 700 },
+        {
+          color: spec.accentColor,
+          fontSize: RENDER_LAYOUT_RULES.eyebrow.fontSize,
+          fontWeight: RENDER_LAYOUT_RULES.eyebrow.fontWeight,
+        },
         input.eyebrow,
       ),
     );
@@ -183,13 +191,15 @@ export async function renderArtwork(
       {
         display: "block",
         color: spec.textColor,
-        fontSize: spec.format === "STORY" ? 82 : 72,
-        fontWeight: 700,
-        lineHeight: 1.08,
+        fontSize: RENDER_LAYOUT_RULES.title.fontSize[spec.format],
+        fontWeight: RENDER_LAYOUT_RULES.title.fontWeight,
+        lineHeight: RENDER_LAYOUT_RULES.title.lineHeight,
         lineClamp: spec.titleMaxLines,
         textAlign: spec.textAlign,
         textWrap: "balance",
-        marginTop: input.eyebrow ? 28 : 0,
+        marginTop: input.eyebrow
+          ? RENDER_LAYOUT_RULES.title.marginTopWithEyebrow
+          : RENDER_LAYOUT_RULES.title.marginTopWithoutEyebrow,
         overflow: "hidden",
       },
       input.title,
@@ -201,11 +211,11 @@ export async function renderArtwork(
         {
           display: "block",
           color: spec.mutedTextColor,
-          fontSize: 34,
-          lineHeight: 1.3,
-          lineClamp: 3,
+          fontSize: RENDER_LAYOUT_RULES.subtitle.fontSize,
+          lineHeight: RENDER_LAYOUT_RULES.subtitle.lineHeight,
+          lineClamp: RENDER_LAYOUT_RULES.subtitle.maxLines,
           textAlign: spec.textAlign,
-          marginTop: 36,
+          marginTop: RENDER_LAYOUT_RULES.subtitle.marginTop,
           overflow: "hidden",
         },
         input.subtitle,
@@ -218,10 +228,10 @@ export async function renderArtwork(
           marginTop: "auto",
           backgroundColor: spec.accentColor,
           color: spec.backgroundColor,
-          borderRadius: 999,
-          padding: "22px 40px",
-          fontSize: 28,
-          fontWeight: 700,
+          borderRadius: RENDER_LAYOUT_RULES.callToAction.borderRadius,
+          padding: RENDER_LAYOUT_RULES.callToAction.padding,
+          fontSize: RENDER_LAYOUT_RULES.callToAction.fontSize,
+          fontWeight: RENDER_LAYOUT_RULES.callToAction.fontWeight,
         },
         input.callToAction,
       ),

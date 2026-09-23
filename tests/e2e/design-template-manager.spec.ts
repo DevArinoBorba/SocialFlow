@@ -6,6 +6,9 @@ const db = createDatabase(process.env.MIGRATION_DATABASE_URL!);
 
 test.beforeEach(async () => {
   await db.rateLimit.deleteMany();
+  await db.designTemplate.deleteMany({
+    where: { clientId: "client-a", systemKey: null },
+  });
 });
 
 test.afterAll(async () => {
@@ -29,13 +32,39 @@ async function ensureDefaultTemplates(page: Page) {
   const manager = page.getByRole("region", { name: "Modelos de design" });
   await expect(manager).toBeVisible();
 
+  const square = await db.designTemplate.findFirst({
+    where: { clientId: "client-a", systemKey: "EDITORIAL_SQUARE" },
+  });
+  if (
+    square &&
+    (square.name !== "Editorial Square" || square.status !== "ACTIVE")
+  ) {
+    await db.designTemplate.update({
+      where: { id: square.id },
+      data: { name: "Editorial Square", status: "ACTIVE" },
+    });
+  }
+
+  const portrait = await db.designTemplate.findFirst({
+    where: { clientId: "client-a", systemKey: "EDITORIAL_PORTRAIT" },
+  });
+  if (
+    portrait &&
+    (portrait.name !== "Editorial Portrait" || portrait.status !== "ACTIVE")
+  ) {
+    await db.designTemplate.update({
+      where: { id: portrait.id },
+      data: { name: "Editorial Portrait", status: "ACTIVE" },
+    });
+  }
+
   const initBtn = manager.getByRole("button", {
     name: "Inicializar modelos padrão",
   });
   if (await initBtn.isVisible()) {
     await initBtn.click({ force: true });
-    await expect(manager.getByText("Editorial Square")).toBeVisible();
   }
+  await expect(manager.getByText("Editorial Square")).toBeVisible();
 }
 
 test.describe("Fase 6: Editor Básico de Templates de Design", () => {
@@ -100,6 +129,9 @@ test.describe("Fase 6: Editor Básico de Templates de Design", () => {
     await manager
       .getByRole("button", { name: "Criar modelo" })
       .click({ force: true });
+    await expect(
+      manager.getByRole("heading", { name: "Criar novo modelo de design" }),
+    ).toBeVisible();
 
     // Tenta submeter com nome contendo tag HTML
     await manager

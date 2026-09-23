@@ -20,11 +20,14 @@ import {
   analyzeTemplateContrast,
   type DesignContrastAnalysis,
 } from "./design-contrast";
+import { describeTemplateDifferences, areSpecsEqual } from "./design-diff";
 import {
-  describeTemplateDifferences,
-  areSpecsEqual,
-  type TemplateDifferenceItem,
-} from "./design-diff";
+  type ConflictState,
+  canReapplyConflict,
+  canDiscardConflict,
+  validateVersionSubmission,
+  TemplateDetailLifecycleController,
+} from "./design-template-concurrency";
 
 export interface DesignTemplateManagerProps {
   org: string;
@@ -304,13 +307,23 @@ export function DesignTemplateManager({
   const [isReappliedDirty, setIsReappliedDirty] = useState(false);
 
   // Conflito de Concorrência Otimista (409)
-  const [conflictState, setConflictState] = useState<{
-    hasConflict: boolean;
-    baseVersionNumber: number;
-    serverVersion: number;
-    serverSpec: DesignTemplateSpec;
-    diffItems: TemplateDifferenceItem[];
-  } | null>(null);
+  const [conflictState, setConflictState] = useState<ConflictState | null>(
+    null,
+  );
+
+  const lifecycleRef = useRef<TemplateDetailLifecycleController | null>(null);
+  if (!lifecycleRef.current) {
+    lifecycleRef.current = new TemplateDetailLifecycleController(org, clientId);
+  }
+  useEffect(() => {
+    lifecycleRef.current?.updateContext(org, clientId, selectedTemplateId);
+  }, [org, clientId, selectedTemplateId]);
+
+  useEffect(() => {
+    return () => {
+      lifecycleRef.current?.abortAll("Component unmounted");
+    };
+  }, []);
 
   // Confirmação Explícita de Contraste Reprovado (WCAG)
   const [contrastConfirmDialog, setContrastConfirmDialog] = useState<{
@@ -361,8 +374,9 @@ export function DesignTemplateManager({
 
   const isVersionDirty = useMemo(() => {
     if (!isEditingVersion || !baseSpec) return false;
+    if (conflictState?.hasConflict) return true;
     return isReappliedDirty || !areSpecsEqual(editSpec, baseSpec);
-  }, [isEditingVersion, editSpec, baseSpec, isReappliedDirty]);
+  }, [isEditingVersion, editSpec, baseSpec, isReappliedDirty, conflictState]);
 
   const isCreateDirty = useMemo(() => {
     if (viewMode !== "create") return false;
@@ -437,45 +451,159 @@ export function DesignTemplateManager({
     void loadCatalog();
   }, [loadCatalog]);
 
-  // Carrega Detalhe do Template Selecionado
-  const loadDetail = useCallback(
-    async (templateId: string, preserveDraft = false) => {
+  // Carrega Detalhe do Template Selecionado (Normal)
+  const loadInitialTemplateDetail = useCallback(
+    async (templateId: string) => {
+      if (!lifecycleRef.current) return;
+      const { signal, requestId, isCurrent } =
+        lifecycleRef.current.startDetailRequest(templateId);
+
       try {
         setLoadingDetail(true);
         setGeneralError("");
         const data = await requestApi<TemplateDetail>(
           `${templatesBase}/${templateId}`,
+          {},
+          signal,
         );
+
+        if (!isCurrent(requestId)) {
+          // Resposta obsoleta descartada
+          return;
+        }
+
         setDetail(data);
         setPreviewVersionIndex(null);
-        // Inicializa o spec de edição com o mais recente se não estiver preservando rascunho
         const latest = [...data.versions].sort(
           (a, b) => b.version - a.version,
         )[0];
         if (latest) {
           setBaseVersionNumber(latest.version);
           setBaseSpec(JSON.parse(JSON.stringify(latest.spec)));
-          if (!preserveDraft) {
-            setEditSpec(JSON.parse(JSON.stringify(latest.spec)));
-            setConflictState(null);
-          }
+          setEditSpec(JSON.parse(JSON.stringify(latest.spec)));
+          setConflictState(null);
+          setIsEditingVersion(false);
+          setIsReappliedDirty(false);
         }
       } catch (err: unknown) {
-        setGeneralError((err as Error).message);
+        if ((err as Error)?.name === "AbortError") {
+          return;
+        }
+        if (isCurrent(requestId)) {
+          setGeneralError((err as Error).message);
+        }
       } finally {
-        setLoadingDetail(false);
+        if (isCurrent(requestId)) {
+          setLoadingDetail(false);
+        }
       }
     },
     [templatesBase],
   );
 
+  // Recarrega versão do servidor especificamente durante ou após conflito de concorrência
+  const reloadConflictServerVersion = useCallback(
+    async (targetTemplateId: string, currentBase: number) => {
+      if (!lifecycleRef.current) return;
+      const { signal, requestId, isCurrent } =
+        lifecycleRef.current.startConflictRequest(targetTemplateId);
+
+      setConflictState((prev) =>
+        prev
+          ? { ...prev, isLoadingServerVersion: true, fetchError: null }
+          : {
+              hasConflict: true,
+              baseVersionNumber: currentBase,
+              serverVersion: null,
+              serverSpec: null,
+              diffItems: [],
+              fetchError: null,
+              isLoadingServerVersion: true,
+            },
+      );
+
+      try {
+        const freshDetail = await requestApi<TemplateDetail>(
+          `${templatesBase}/${targetTemplateId}`,
+          {},
+          signal,
+        );
+
+        if (!isCurrent(requestId)) {
+          // Resposta de conflito obsoleta descartada
+          return;
+        }
+
+        const serverLatest = [...freshDetail.versions].sort(
+          (a, b) => b.version - a.version,
+        )[0];
+
+        if (!serverLatest) {
+          throw new Error("Nenhuma versão válida encontrada no modelo.");
+        }
+
+        const diffs = describeTemplateDifferences(serverLatest.spec, editSpec);
+
+        setConflictState({
+          hasConflict: true,
+          baseVersionNumber: currentBase,
+          serverVersion: serverLatest.version,
+          serverSpec: serverLatest.spec,
+          diffItems: diffs,
+          fetchError: null,
+          isLoadingServerVersion: false,
+        });
+
+        // Atualiza a listagem de versões do detalhe
+        setDetail((prev) =>
+          prev?.id === targetTemplateId ? freshDetail : prev,
+        );
+      } catch (err: unknown) {
+        if ((err as Error)?.name === "AbortError") {
+          return;
+        }
+        if (!isCurrent(requestId)) {
+          return;
+        }
+
+        const msg =
+          (err as Error)?.message ||
+          "Não foi possível carregar a versão atual do servidor.";
+
+        // NUNCA engole a falha!
+        setConflictState((prev) =>
+          prev
+            ? {
+                ...prev,
+                fetchError: msg,
+                isLoadingServerVersion: false,
+              }
+            : {
+                hasConflict: true,
+                baseVersionNumber: currentBase,
+                serverVersion: null,
+                serverSpec: null,
+                diffItems: [],
+                fetchError: msg,
+                isLoadingServerVersion: false,
+              },
+        );
+        setGeneralError(
+          "Conflito de concorrência detectado, mas não foi possível carregar a versão atual do servidor. Verifique sua conexão e tente novamente.",
+        );
+      }
+    },
+    [templatesBase, editSpec],
+  );
+
   useEffect(() => {
     if (selectedTemplateId) {
-      void loadDetail(selectedTemplateId);
+      void loadInitialTemplateDetail(selectedTemplateId);
     } else {
       setDetail(null);
+      setConflictState(null);
     }
-  }, [selectedTemplateId, loadDetail]);
+  }, [selectedTemplateId, loadInitialTemplateDetail]);
 
   // Navegação Segura com Alerta de Alterações Pendentes
   function confirmDiscardChanges(): boolean {
@@ -529,27 +657,29 @@ export function DesignTemplateManager({
 
   // Reaplicar rascunho sobre a versão atual do servidor
   function handleReapplyOverServerVersion() {
-    if (!conflictState) return;
-    setBaseVersionNumber(conflictState.serverVersion);
-    setBaseSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
+    if (!canReapplyConflict(conflictState)) return;
+    const { serverVersion, serverSpec } = conflictState!;
+    setBaseVersionNumber(serverVersion!);
+    setBaseSpec(JSON.parse(JSON.stringify(serverSpec!)));
     setIsReappliedDirty(true);
     setConflictState(null);
     setGeneralNotice(
-      `Rascunho mantido e reaplicado sobre a versão ${conflictState.serverVersion}. Revise e confirme o envio para salvar.`,
+      `Rascunho mantido e reaplicado sobre a versão ${serverVersion}. Revise e confirme o envio para salvar.`,
     );
   }
 
   // Descartar rascunho e carregar a versão mais recente do servidor
   function handleDiscardDraft() {
-    if (!conflictState) return;
-    setEditSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
-    setBaseVersionNumber(conflictState.serverVersion);
-    setBaseSpec(JSON.parse(JSON.stringify(conflictState.serverSpec)));
+    if (!canDiscardConflict(conflictState)) return;
+    const { serverVersion, serverSpec } = conflictState!;
+    setEditSpec(JSON.parse(JSON.stringify(serverSpec!)));
+    setBaseVersionNumber(serverVersion!);
+    setBaseSpec(JSON.parse(JSON.stringify(serverSpec!)));
     setIsReappliedDirty(false);
     setConflictState(null);
     setIsEditingVersion(false);
     setGeneralNotice(
-      `Rascunho descartado. O formulário foi atualizado para a versão ${conflictState.serverVersion}.`,
+      `Rascunho descartado. O formulário foi atualizado para a versão ${serverVersion}.`,
     );
   }
 
@@ -638,50 +768,17 @@ export function DesignTemplateManager({
       setIsReappliedDirty(false);
       setConflictState(null);
       onTemplatesModified?.();
-      await loadDetail(targetTemplateId, false);
+      await loadInitialTemplateDetail(targetTemplateId);
       await loadCatalog();
     } catch (err: unknown) {
       const errorObj = err as { status?: number; message?: string };
       if (errorObj.status === 409) {
-        // Conflito de concorrência: preservar o rascunho do usuário integralmente!
-        // Não substituir editSpec. Buscar dados atualizados do servidor com proteção contra resposta obsoleta:
-        try {
-          const freshDetail = await requestApi<TemplateDetail>(
-            `${templatesBase}/${targetTemplateId}`,
-          );
-          // Proteger contra resposta de outro template ou se o usuário mudou de contexto
-          if (
-            freshDetail.id !== targetTemplateId ||
-            selectedTemplateId !== targetTemplateId
-          ) {
-            return;
-          }
-
-          setDetail((prev) =>
-            prev?.id === targetTemplateId ? freshDetail : prev,
-          );
-          const serverLatest = [...freshDetail.versions].sort(
-            (a, b) => b.version - a.version,
-          )[0];
-          if (serverLatest) {
-            const diffs = describeTemplateDifferences(
-              serverLatest.spec,
-              editSpec,
-            );
-            setConflictState({
-              hasConflict: true,
-              baseVersionNumber: currentBaseVersion,
-              serverVersion: serverLatest.version,
-              serverSpec: serverLatest.spec,
-              diffItems: diffs,
-            });
-          }
-        } catch {
-          // fallback se busca fresh falhar
-        }
+        // Conflito de concorrência: rascunho do usuário (editSpec) preservado integralmente!
+        // isEditingVersion e isVersionDirty permanecem ativos.
         setGeneralError(
           "Conflito de concorrência: a versão mais recente do servidor já foi alterada por outro usuário. Nenhuma alteração foi salva. Seu rascunho foi preservado abaixo.",
         );
+        await reloadConflictServerVersion(targetTemplateId, currentBaseVersion);
       } else {
         setGeneralError(errorObj.message ?? "Falha ao salvar nova versão.");
       }
@@ -694,8 +791,15 @@ export function DesignTemplateManager({
   async function handleSubmitVersion(e: FormEvent) {
     e.preventDefault();
     if (!detail) return;
-    if (!isVersionDirty) {
-      setGeneralError("Nenhuma alteração detectada em relação à versão atual.");
+
+    const validation = validateVersionSubmission({
+      isEditingVersion,
+      isVersionDirty,
+      conflictState,
+    });
+
+    if (!validation.allowed) {
+      setGeneralError(validation.reason ?? "Não é possível salvar.");
       return;
     }
 
@@ -1754,55 +1858,113 @@ export function DesignTemplateManager({
                     </div>
                   </div>
 
-                  <div className="conflict-meta-box">
-                    <div>
-                      <strong>Versão em que sua edição começou:</strong> v
-                      {conflictState.baseVersionNumber}
+                  {conflictState.fetchError ? (
+                    <div
+                      className="conflict-fetch-error-box"
+                      data-testid="conflict-fetch-error-box"
+                      style={{
+                        margin: "12px 0",
+                        padding: "10px 14px",
+                        background: "rgba(239, 68, 68, 0.1)",
+                        border: "1px solid rgba(239, 68, 68, 0.3)",
+                        borderRadius: 6,
+                      }}
+                    >
+                      <p
+                        style={{
+                          color: "#ef4444",
+                          margin: 0,
+                          fontSize: "13px",
+                        }}
+                      >
+                        <strong>Aviso:</strong> O conflito foi detectado, mas
+                        não foi possível carregar a versão atual do servidor (
+                        {conflictState.fetchError}).
+                      </p>
+                      <button
+                        type="button"
+                        className="quiet"
+                        style={{ marginTop: 8 }}
+                        data-testid="retry-load-conflict-btn"
+                        onClick={() => {
+                          if (detail) {
+                            void reloadConflictServerVersion(
+                              detail.id,
+                              conflictState.baseVersionNumber,
+                            );
+                          }
+                        }}
+                      >
+                        🔄 Tentar carregar versão atual novamente
+                      </button>
                     </div>
-                    <div>
-                      <strong>Versão atual mais recente no servidor:</strong> v
-                      {conflictState.serverVersion}
+                  ) : conflictState.isLoadingServerVersion ? (
+                    <div
+                      className="conflict-loading-box"
+                      style={{ margin: "12px 0" }}
+                    >
+                      <p className="small muted">
+                        Carregando versão mais recente do servidor para
+                        comparação…
+                      </p>
                     </div>
-                  </div>
+                  ) : (
+                    <>
+                      <div className="conflict-meta-box">
+                        <div>
+                          <strong>Versão em que sua edição começou:</strong> v
+                          {conflictState.baseVersionNumber}
+                        </div>
+                        <div>
+                          <strong>
+                            Versão atual mais recente no servidor:
+                          </strong>{" "}
+                          v{conflictState.serverVersion}
+                        </div>
+                      </div>
 
-                  {conflictState.diffItems.length > 0 && (
-                    <div className="conflict-diff-box">
-                      <h5>
-                        Diferenças entre a nova versão-base (v
-                        {conflictState.serverVersion}) e seu rascunho
-                        preservado:
-                      </h5>
-                      <ul className="diff-list">
-                        {conflictState.diffItems.map((item, idx) => (
-                          <li key={idx}>
-                            <strong>{item.label}:</strong>{" "}
-                            {item.beforeDescription} ➔{" "}
-                            <em>{item.afterDescription}</em>
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+                      {conflictState.diffItems.length > 0 && (
+                        <div className="conflict-diff-box">
+                          <h5>
+                            Diferenças entre a nova versão-base (v
+                            {conflictState.serverVersion}) e seu rascunho
+                            preservado:
+                          </h5>
+                          <ul className="diff-list">
+                            {conflictState.diffItems.map((item, idx) => (
+                              <li key={idx}>
+                                <strong>{item.label}:</strong>{" "}
+                                {item.beforeDescription} ➔{" "}
+                                <em>{item.afterDescription}</em>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+
+                      <div className="conflict-actions">
+                        <button
+                          type="button"
+                          className="primary-btn"
+                          data-testid="reapply-draft-btn"
+                          disabled={!canReapplyConflict(conflictState)}
+                          onClick={handleReapplyOverServerVersion}
+                        >
+                          Reaplicar sobre a versão atual (v
+                          {conflictState.serverVersion})
+                        </button>
+                        <button
+                          type="button"
+                          className="quiet danger"
+                          data-testid="discard-draft-btn"
+                          disabled={!canDiscardConflict(conflictState)}
+                          onClick={handleDiscardDraft}
+                        >
+                          Descartar meu rascunho
+                        </button>
+                      </div>
+                    </>
                   )}
-
-                  <div className="conflict-actions">
-                    <button
-                      type="button"
-                      className="primary-btn"
-                      data-testid="reapply-draft-btn"
-                      onClick={handleReapplyOverServerVersion}
-                    >
-                      Reaplicar sobre a versão atual (v
-                      {conflictState.serverVersion})
-                    </button>
-                    <button
-                      type="button"
-                      className="quiet danger"
-                      data-testid="discard-draft-btn"
-                      onClick={handleDiscardDraft}
-                    >
-                      Descartar meu rascunho
-                    </button>
-                  </div>
                 </div>
               )}
 
@@ -2089,7 +2251,13 @@ export function DesignTemplateManager({
                   <div className="form-actions">
                     <button
                       type="submit"
-                      disabled={savingVersion || !isVersionDirty}
+                      disabled={
+                        savingVersion ||
+                        !isVersionDirty ||
+                        (conflictState?.hasConflict &&
+                          (conflictState.serverVersion === null ||
+                            Boolean(conflictState.fetchError)))
+                      }
                     >
                       {savingVersion ? "Salvando…" : "Salvar nova versão"}
                     </button>
