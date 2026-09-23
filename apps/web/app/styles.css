@@ -104,6 +104,65 @@ h2 {
 p {
   line-height: 1.6;
 }
+/* Prevenção de interceptação de cliques por elementos tipográficos ou estruturais */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p,
+small,
+strong,
+em,
+header,
+.account,
+.page-heading,
+.content-header,
+.brand-header,
+.preview-header,
+.form-header,
+.section-header,
+.artwork-preview-container,
+.artwork-preview-column,
+.editor-preview-column,
+.preview-viewport-wrapper,
+.preview-artboard,
+.template-aspect-box,
+.format-indicator-box,
+.empty {
+  pointer-events: none;
+}
+
+button,
+a,
+input,
+select,
+textarea,
+label,
+summary,
+[role="button"],
+[role="radio"],
+[role="checkbox"],
+[role="tab"],
+[role="option"],
+.brand-card,
+.media-item,
+.post-card,
+.template-card,
+.template-select-card,
+.media-option-card,
+.modal-box,
+button *,
+a *,
+label *,
+summary *,
+[role="button"] *,
+[role="radio"] *,
+[role="checkbox"] * {
+  pointer-events: auto;
+}
+
 .muted,
 .help,
 small {
