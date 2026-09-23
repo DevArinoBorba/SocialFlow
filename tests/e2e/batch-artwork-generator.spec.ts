@@ -42,10 +42,37 @@ async function ensureDefaultTemplates(page: Page) {
   ).toBeVisible();
 }
 
+async function ensureSamplePosts() {
+  const count = await db.post.count({
+    where: { clientId: "client-a", organizationId: "org-a" },
+  });
+  if (count < 2) {
+    await db.post.createMany({
+      data: [
+        {
+          organizationId: "org-a",
+          clientId: "client-a",
+          title: "Post de Exemplo 1",
+          caption: "Legenda de exemplo para renderização em lote segura.",
+          status: "DRAFT",
+        },
+        {
+          organizationId: "org-a",
+          clientId: "client-a",
+          title: "Post de Exemplo 2",
+          caption: "Outra legenda de exemplo para lote.",
+          status: "DRAFT",
+        },
+      ],
+    });
+  }
+}
+
 test.describe("Fase 6 Incremento 3: Geração de Artes em Lote (E2E)", () => {
   test("1. Seleção múltipla de posts, validação prévia e abertura do modal de lote", async ({
     page,
   }) => {
+    await ensureSamplePosts();
     await loginAndOpenClient(page, "admin-a@socialflow.test");
     await ensureDefaultTemplates(page);
 
