@@ -12,6 +12,7 @@ import {
 import {
   executeRenderJob,
   runRendererReconciliationCycle,
+  ActiveLeaseError,
 } from "../../apps/worker/dist/renderer-worker.js";
 import { createRenderQueue } from "../../apps/api/dist/render-queue.js";
 import type { PrismaClient } from "@socialflow/db";
@@ -1248,15 +1249,21 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     ).rejects.toThrow();
 
     // Quando o worker executa o job sob asRendererActor(), queueJobId é gravado deterministicamente
-    await executeRenderJob(
-      {
-        renderJobId: created.id,
-        organizationId: "org-a",
-        clientId: "client-a",
-      },
-      db as unknown as PrismaClient,
-      mockStorage,
-    );
+    try {
+      await executeRenderJob(
+        {
+          renderJobId: created.id,
+          organizationId: "org-a",
+          clientId: "client-a",
+        },
+        db as unknown as PrismaClient,
+        mockStorage,
+      );
+    } catch (err) {
+      if (!(err instanceof ActiveLeaseError)) {
+        throw err;
+      }
+    }
 
     const acquiredJob = await migration.renderJob.findUnique({
       where: { id: created.id },

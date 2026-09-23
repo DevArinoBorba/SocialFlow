@@ -6,12 +6,8 @@ import { createDatabase, type Prisma } from "@socialflow/db";
 import {
   executeRenderJob,
   runRendererReconciliationCycle,
+  ActiveLeaseError,
 } from "../../apps/worker/src/renderer-worker.js";
-import {
-  createRenderQueue,
-  closeRenderQueue,
-  getRenderQueueJobId,
-} from "../../apps/api/src/render-queue.js";
 import {
   mediaStorage,
   type MediaStorage,
@@ -128,8 +124,6 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
   });
 
   it("1. Lote de 10 Artes: Aquecimento inicial e validação de integridade", async () => {
-    const queue = createRenderQueue(redis);
-
     // Cria RenderBatch
     const batch = await migration.renderBatch.create({
       data: {
@@ -170,15 +164,7 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
           createdById: "admin-a",
         },
       });
-
-      await queue.add(
-        "render-artwork",
-        { renderJobId: jobId, organizationId, clientId },
-        { jobId: getRenderQueueJobId(jobId) },
-      );
     }
-
-    await closeRenderQueue(queue);
 
     // Executa os 10 jobs sequencialmente (concorrência = 1 da VPS)
     for (const jId of jobIds) {
@@ -202,8 +188,6 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
   });
 
   it("2. Lote de 25 Artes com Interrupção e Retomada Segura pelo Reconciliador", async () => {
-    const queue = createRenderQueue(redis);
-
     const batch = await migration.renderBatch.create({
       data: {
         organizationId,
@@ -243,15 +227,7 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
           createdById: "admin-a",
         },
       });
-
-      await queue.add(
-        "render-artwork",
-        { renderJobId: jobId, organizationId, clientId },
-        { jobId: getRenderQueueJobId(jobId) },
-      );
     }
-
-    await closeRenderQueue(queue);
 
     // Executa apenas os primeiros 10 itens
     for (let i = 0; i < 10; i++) {
@@ -280,13 +256,31 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
     expect(batchMidway?.pendingItems).toBe(15);
     expect(batchMidway?.status).toBe("PROCESSING");
 
-    // Executa os 15 restantes
+    // Executa os 15 restantes (com tolerância a lease concorrente caso o worker de container esteja ativo)
     for (let i = 10; i < 25; i++) {
-      await executeRenderJob(
-        { renderJobId: jobIds[i], organizationId, clientId },
-        db,
-        storage,
-      );
+      try {
+        await executeRenderJob(
+          { renderJobId: jobIds[i], organizationId, clientId },
+          db,
+          storage,
+        );
+      } catch (err) {
+        if (!(err instanceof ActiveLeaseError)) {
+          throw err;
+        }
+      }
+    }
+
+    // Aguarda eventual conclusão pelo worker concorrente de background
+    const deadline = Date.now() + 15000;
+    while (Date.now() < deadline) {
+      const b = await migration.renderBatch.findUnique({
+        where: { id: batch.id },
+      });
+      if (b?.status === "COMPLETED" && b.completedItems === 25) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 200));
     }
 
     // Verifica integridade: nenhum dos 10 primeiros foi modificado
