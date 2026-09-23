@@ -42,6 +42,7 @@ async function fingerprint(db: PrismaClient) {
     db.designTemplate.findMany({ orderBy: { id: "asc" } }),
     db.designTemplateVersion.findMany({ orderBy: { id: "asc" } }),
     db.renderJob.findMany({ orderBy: { id: "asc" } }),
+    db.renderBatch.findMany({ orderBy: { id: "asc" } }),
     db.$queryRaw`SELECT migration_name, checksum, finished_at FROM _prisma_migrations ORDER BY migration_name`,
   ]);
   return createHash("sha256")
@@ -75,7 +76,7 @@ try {
       const migrations = await source.$queryRaw<
         { count: bigint }[]
       >`SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL`;
-      assert.equal(Number(migrations[0]?.count), 19);
+      assert.equal(Number(migrations[0]?.count), 20);
       break;
     }
     case "seed": {
@@ -187,8 +188,8 @@ try {
         { relrowsecurity: boolean; relforcerowsecurity: boolean }[]
       >`
         SELECT relrowsecurity, relforcerowsecurity FROM pg_class
-        WHERE oid IN ('"Client"'::regclass, '"Brand"'::regclass, '"MediaAsset"'::regclass, '"ContentBatch"'::regclass, '"Post"'::regclass, '"Organization"'::regclass, '"Membership"'::regclass, '"AuditLog"'::regclass, '"DesignTemplate"'::regclass, '"DesignTemplateVersion"'::regclass, '"RenderJob"'::regclass)`;
-      assert.equal(rls.length, 11);
+        WHERE oid IN ('"Client"'::regclass, '"Brand"'::regclass, '"MediaAsset"'::regclass, '"ContentBatch"'::regclass, '"Post"'::regclass, '"Organization"'::regclass, '"Membership"'::regclass, '"AuditLog"'::regclass, '"DesignTemplate"'::regclass, '"DesignTemplateVersion"'::regclass, '"RenderJob"'::regclass, '"RenderBatch"'::regclass)`;
+      assert.equal(rls.length, 12);
       assert.ok(rls.every((r) => r.relrowsecurity && r.relforcerowsecurity));
       assert.equal(await runtime.client.count(), 0);
       assert.equal(await runtime.brand.count(), 0);
@@ -196,6 +197,7 @@ try {
       assert.equal(await runtime.post.count(), 0);
       assert.equal(await runtime.designTemplate.count(), 0);
       assert.equal(await runtime.renderJob.count(), 0);
+      assert.equal(await runtime.renderBatch.count(), 0);
       for (const suffix of ["a", "b"]) {
         const rows = await asActor(runtime, `admin-${suffix}`, (tx) =>
           tx.client.findMany(),

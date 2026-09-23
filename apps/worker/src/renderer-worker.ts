@@ -1,7 +1,12 @@
 import { Worker, type Job, UnrecoverableError } from "bullmq";
 import type { Redis } from "ioredis";
 import { randomUUID, createHash } from "node:crypto";
-import { asRendererActor, type PrismaClient } from "@socialflow/db";
+import {
+  asRendererActor,
+  asSystemRendererDiscovery,
+  type PrismaClient,
+  type Prisma,
+} from "@socialflow/db";
 import {
   RENDER_QUEUE_NAME,
   type RenderJobData,
@@ -24,6 +29,7 @@ import {
   designTemplateSpecSchema,
   artworkInputSchema,
   sanitizeErrorMessage,
+  computeBatchAggregateStatus,
 } from "@socialflow/contracts";
 import { z } from "zod";
 
@@ -46,6 +52,92 @@ export class ActiveLeaseError extends Error {
 }
 
 export { sanitizeErrorMessage };
+
+export async function updateBatchCounters(
+  tx: Prisma.TransactionClient,
+  batchId: string,
+  organizationId: string,
+  clientId: string,
+): Promise<void> {
+  const [
+    pendingItems,
+    processingItems,
+    completedItems,
+    failedItems,
+    cancelledItems,
+  ] = await Promise.all([
+    tx.renderJob.count({
+      where: { organizationId, clientId, batchId, status: "PENDING" },
+    }),
+    tx.renderJob.count({
+      where: { organizationId, clientId, batchId, status: "PROCESSING" },
+    }),
+    tx.renderJob.count({
+      where: { organizationId, clientId, batchId, status: "COMPLETED" },
+    }),
+    tx.renderJob.count({
+      where: { organizationId, clientId, batchId, status: "FAILED" },
+    }),
+    tx.renderJob.count({
+      where: { organizationId, clientId, batchId, status: "CANCELLED" },
+    }),
+  ]);
+
+  const batch = await tx.renderBatch.findFirst({
+    where: { id: batchId, organizationId, clientId },
+    select: { cancelRequestedAt: true, status: true, totalItems: true },
+  });
+
+  if (!batch) return;
+
+  const isBatchTerminal = pendingItems === 0 && processingItems === 0;
+  const newBatchStatus = computeBatchAggregateStatus({
+    totalItems: batch.totalItems,
+    pendingItems,
+    processingItems,
+    completedItems,
+    failedItems,
+    cancelledItems,
+    cancelRequestedAt: batch.cancelRequestedAt,
+  });
+
+  const now = new Date();
+  await tx.renderBatch.update({
+    where: { id: batchId },
+    data: {
+      pendingItems,
+      processingItems,
+      completedItems,
+      failedItems,
+      cancelledItems,
+      status: newBatchStatus,
+      completedAt:
+        isBatchTerminal && newBatchStatus !== "CANCELLED" ? now : null,
+      cancelCompletedAt:
+        isBatchTerminal && Boolean(batch.cancelRequestedAt) ? now : null,
+    },
+  });
+
+  if (isBatchTerminal) {
+    let action = "batch.completed";
+    if (newBatchStatus === "CANCELLED") action = "batch.cancelled";
+    else if (
+      newBatchStatus === "FAILED" ||
+      newBatchStatus === "PARTIALLY_FAILED"
+    ) {
+      action = "batch.completed_with_failures";
+    }
+
+    await tx.auditLog.create({
+      data: {
+        organizationId,
+        actorUserId: "system:renderer",
+        entityId: batchId,
+        action,
+      },
+    });
+  }
+}
 
 const renderPayloadSchema = z.strictObject({
   renderJobId: z.string().min(1),
@@ -109,7 +201,11 @@ export async function executeRenderJob(
           return { status: "SKIPPED", reason: "NOT_FOUND" };
         }
 
-        if (existing.status === "COMPLETED" || existing.status === "FAILED") {
+        if (
+          existing.status === "COMPLETED" ||
+          existing.status === "FAILED" ||
+          existing.status === "CANCELLED"
+        ) {
           return { status: "SKIPPED", reason: `ALREADY_${existing.status}` };
         }
 
@@ -269,6 +365,19 @@ export async function executeRenderJob(
               action: "render.failed",
             },
           });
+
+          const currentJob = await tx.renderJob.findFirst({
+            where: { id: renderJobId, organizationId, clientId },
+            select: { batchId: true },
+          });
+          if (currentJob?.batchId) {
+            await updateBatchCounters(
+              tx,
+              currentJob.batchId,
+              organizationId,
+              clientId,
+            );
+          }
         }
       });
     } catch (err) {
@@ -334,6 +443,7 @@ export async function executeRenderJob(
                 template: true,
               },
             },
+            batch: true,
             backgroundMediaAsset: true,
             logoMediaAsset: true,
           },
@@ -343,6 +453,41 @@ export async function executeRenderJob(
 
     if (!jobData) {
       throw new Error("Render job lost or superseded during execution");
+    }
+
+    // Cancelamento cooperativo: se o lote solicitou cancelamento, pular com segurança
+    if (jobData.batch?.cancelRequestedAt) {
+      await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+        await tx.renderJob.updateMany({
+          where: {
+            id: renderJobId,
+            organizationId,
+            clientId,
+            executionToken,
+          },
+          data: {
+            status: "CANCELLED",
+            executionToken: null,
+            leaseExpiresAt: null,
+          },
+        });
+        if (jobData.batchId) {
+          await updateBatchCounters(
+            tx,
+            jobData.batchId,
+            organizationId,
+            clientId,
+          );
+        }
+      });
+      console.info(
+        JSON.stringify({
+          event: "render_job_cancelled_due_to_batch",
+          renderJobId,
+          batchId: jobData.batchId,
+        }),
+      );
+      return;
     }
 
     if (!jobData.templateVersion) {
@@ -527,8 +672,57 @@ export async function executeRenderJob(
       throw new UnrecoverableError("Artwork rendering failed");
     }
 
-    // 9. Reservar o MediaAsset determinístico (id = renderJobId)
+    // Cancelamento cooperativo antes do upload: se o lote solicitou cancelamento, não gravar no storage
+    if (jobData.batchId) {
+      const batchState = await asRendererActor(
+        db,
+        { organizationId, clientId },
+        async (tx) => {
+          return tx.renderBatch.findFirst({
+            where: { id: jobData.batchId!, organizationId, clientId },
+            select: { cancelRequestedAt: true },
+          });
+        },
+      );
+
+      if (batchState?.cancelRequestedAt) {
+        await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+          await tx.renderJob.updateMany({
+            where: {
+              id: renderJobId,
+              organizationId,
+              clientId,
+              executionToken,
+            },
+            data: {
+              status: "CANCELLED",
+              executionToken: null,
+              leaseExpiresAt: null,
+            },
+          });
+          if (jobData.batchId) {
+            await updateBatchCounters(
+              tx,
+              jobData.batchId,
+              organizationId,
+              clientId,
+            );
+          }
+        });
+        console.info(
+          JSON.stringify({
+            event: "render_job_cancelled_before_storage_upload",
+            renderJobId,
+            batchId: jobData.batchId,
+          }),
+        );
+        return;
+      }
+    }
+
+    // 9. Reservar o MediaAsset determinístico (Opção C: armazenamento por job ID em conformidade com RLS e check constraints)
     const targetStorageKey = `media/${organizationId}/${clientId}/${renderJobId}`;
+    const targetMediaAssetId = renderJobId;
 
     await asRendererActor(db, { organizationId, clientId }, async (tx) => {
       const current = await tx.renderJob.findFirst({
@@ -547,13 +741,11 @@ export async function executeRenderJob(
           id: renderJobId,
           organizationId,
           clientId,
-          name: `Artwork render ${renderJobId}`,
+          name: `Artwork render ${jobData.inputHash.slice(0, 12)}`,
           storageKey: targetStorageKey,
           status: "pending",
         },
-        update: {
-          // Idempotente: não sobrescrever se já existir
-        },
+        update: {},
       });
     });
 
@@ -637,7 +829,7 @@ export async function executeRenderJob(
 
     await asRendererActor(db, { organizationId, clientId }, async (tx) => {
       await tx.mediaAsset.update({
-        where: { id: renderJobId },
+        where: { id: targetMediaAssetId },
         data: {
           status: "ready",
           mimeType: "image/png",
@@ -657,7 +849,7 @@ export async function executeRenderJob(
         },
         data: {
           status: "COMPLETED",
-          outputMediaAssetId: renderJobId,
+          outputMediaAssetId: targetMediaAssetId,
           completedAt: new Date(),
           leaseExpiresAt: null,
           executionToken: null,
@@ -678,6 +870,15 @@ export async function executeRenderJob(
           action: "render.completed",
         },
       });
+
+      if (jobData.batchId) {
+        await updateBatchCounters(
+          tx,
+          jobData.batchId,
+          organizationId,
+          clientId,
+        );
+      }
     });
 
     console.info(
@@ -715,20 +916,23 @@ export async function runRendererReconciliationCycle(
   const queue = createRenderQueue(redis);
 
   try {
-    const candidates = await db.$queryRaw<
-      Array<{
-        renderJobId: string;
-        organizationId: string;
-        clientId: string;
-        status: "PENDING" | "PROCESSING";
-        queueJobId: string | null;
-        leaseExpiresAt: Date | null;
-        updatedAt: Date;
-      }>
-    >`
-      SELECT "renderJobId", "organizationId", "clientId", status, "queueJobId", "leaseExpiresAt", "updatedAt"
-      FROM discover_reconcilable_render_jobs()
-    `;
+    const candidates = await asSystemRendererDiscovery(db, async (tx) => {
+      return tx.$queryRaw<
+        Array<{
+          renderJobId: string;
+          organizationId: string;
+          clientId: string;
+          status: "PENDING" | "PROCESSING";
+          queueJobId: string | null;
+          leaseExpiresAt: Date | null;
+          updatedAt: Date;
+          batchId: string | null;
+        }>
+      >`
+        SELECT "renderJobId", "organizationId", "clientId", status, "queueJobId", "leaseExpiresAt", "updatedAt", "batchId"
+        FROM discover_reconcilable_render_jobs()
+      `;
+    });
 
     for (const candidate of candidates) {
       const expectedJobId = getRenderQueueJobId(candidate.renderJobId);
@@ -810,6 +1014,47 @@ export async function runRendererReconciliationCycle(
             renderJobId: candidate.renderJobId,
             error: sanitizeErrorMessage(
               jobErr instanceof Error ? jobErr.message : String(jobErr),
+            ),
+          }),
+        );
+      }
+    }
+
+    // Reconciliar contadores e status de lotes ativos através de contexto protegido do reconciliador
+    const activeBatches = await asSystemRendererDiscovery(db, async (tx) => {
+      return tx.$queryRaw<
+        Array<{
+          batchId: string;
+          organizationId: string;
+          clientId: string;
+        }>
+      >`
+        SELECT "batchId", "organizationId", "clientId"
+        FROM discover_active_render_batches()
+      `;
+    });
+
+    for (const b of activeBatches) {
+      try {
+        await asRendererActor(
+          db,
+          { organizationId: b.organizationId, clientId: b.clientId },
+          async (tx) => {
+            await updateBatchCounters(
+              tx,
+              b.batchId,
+              b.organizationId,
+              b.clientId,
+            );
+          },
+        );
+      } catch (batchErr) {
+        console.error(
+          JSON.stringify({
+            event: "renderer_reconciliation_batch_error",
+            batchId: b.batchId,
+            error: sanitizeErrorMessage(
+              batchErr instanceof Error ? batchErr.message : String(batchErr),
             ),
           }),
         );

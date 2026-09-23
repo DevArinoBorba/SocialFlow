@@ -5,10 +5,15 @@ import type { AddressInfo } from "node:net";
 import sharp from "sharp";
 import { Redis } from "ioredis";
 import { UnrecoverableError } from "bullmq";
-import { createDatabase, type Prisma } from "@socialflow/db";
+import {
+  createDatabase,
+  asSystemRendererDiscovery,
+  type Prisma,
+} from "@socialflow/db";
 import {
   executeRenderJob,
   runRendererStartupReconciliation,
+  runRendererReconciliationCycle,
   RendererReconciler,
   ActiveLeaseError,
   createRendererWorker,
@@ -101,6 +106,7 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
       where: { action: { startsWith: "render." } },
     });
     await migration.renderJob.deleteMany({});
+    await migration.renderBatch.deleteMany({});
     await migration.mediaAsset.deleteMany({});
     await migration.designTemplateVersion.deleteMany({});
     await migration.designTemplate.deleteMany({});
@@ -861,9 +867,11 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
 
       const queue = createRenderQueue(redis);
 
-      const candidateJobs = await db.$queryRaw<Array<{ renderJobId: string }>>`
-        SELECT "renderJobId" FROM discover_reconcilable_render_jobs()
-      `;
+      const candidateJobs = await asSystemRendererDiscovery(db, async (tx) => {
+        return tx.$queryRaw<Array<{ renderJobId: string }>>`
+          SELECT "renderJobId" FROM discover_reconcilable_render_jobs()
+        `;
+      });
 
       const candidateIds = candidateJobs.map((c) => c.renderJobId);
       expect(candidateIds).not.toContain(completedFixture.job.id);
@@ -1171,5 +1179,373 @@ describe("Fase 6: Artwork Render Worker e Pipeline de Armazenamento", () => {
         expect(count).toBe(1);
       });
     }
+  });
+
+  describe("Fase 6 Incremento 3: Render Batch no Worker e Reconciliador", () => {
+    it("deve atualizar contadores do RenderBatch atomicamente a cada job concluído", async () => {
+      const { version, organizationId, clientId } = await createTestFixture();
+
+      // Criar um RenderBatch com 2 jobs
+      const batch = await migration.renderBatch.create({
+        data: {
+          organizationId,
+          clientId,
+          templateVersionId: version.id,
+          sourceType: "POSTS_SELECTION",
+          format: "PORTRAIT",
+          status: "PENDING",
+          totalItems: 2,
+          pendingItems: 2,
+          idempotencyKey: `worker-batch-test-${randomUUID()}`,
+          requestHash: "req-hash-worker-1",
+          createdById: "admin-a",
+        },
+      });
+
+      const job1 = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: hashRenderInput(defaultSpec, defaultInput),
+          idempotencyKey: `job1-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      const job2 = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: hashRenderInput(defaultSpec, defaultInput),
+          idempotencyKey: `job2-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      // Executa job1
+      await executeRenderJob(
+        { renderJobId: job1.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      const batchAfterJob1 = await migration.renderBatch.findUnique({
+        where: { id: batch.id },
+      });
+      expect(batchAfterJob1?.completedItems).toBe(1);
+      expect(batchAfterJob1?.pendingItems).toBe(1);
+      expect(batchAfterJob1?.status).toBe("PROCESSING");
+
+      // Executa job2
+      await executeRenderJob(
+        { renderJobId: job2.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      const batchAfterJob2 = await migration.renderBatch.findUnique({
+        where: { id: batch.id },
+      });
+      expect(batchAfterJob2?.completedItems).toBe(2);
+      expect(batchAfterJob2?.pendingItems).toBe(0);
+      expect(batchAfterJob2?.status).toBe("COMPLETED");
+      expect(batchAfterJob2?.completedAt).toBeDefined();
+    });
+
+    it("deve cancelar cooperativamente o job se o RenderBatch tiver cancelRequestedAt", async () => {
+      const { version, organizationId, clientId } = await createTestFixture();
+
+      const batch = await migration.renderBatch.create({
+        data: {
+          organizationId,
+          clientId,
+          templateVersionId: version.id,
+          sourceType: "POSTS_SELECTION",
+          format: "PORTRAIT",
+          status: "PENDING",
+          totalItems: 1,
+          pendingItems: 1,
+          cancelRequestedAt: new Date(),
+          idempotencyKey: `worker-batch-cancel-${randomUUID()}`,
+          requestHash: "req-hash-worker-2",
+          createdById: "admin-a",
+        },
+      });
+
+      const job = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: hashRenderInput(defaultSpec, defaultInput),
+          idempotencyKey: `job-cancelled-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      // Executa o job; o worker deve detectar cancelRequestedAt e marcar CANCELLED
+      await executeRenderJob(
+        { renderJobId: job.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      const dbJob = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(dbJob?.status).toBe("CANCELLED");
+
+      const dbBatch = await migration.renderBatch.findUnique({
+        where: { id: batch.id },
+      });
+      expect(dbBatch?.status).toBe("CANCELLED");
+      expect(dbBatch?.cancelledItems).toBe(1);
+      expect(dbBatch?.pendingItems).toBe(0);
+      expect(dbBatch?.cancelCompletedAt).toBeDefined();
+    });
+
+    it("deve sincronizar contadores no reconciliador de renderização", async () => {
+      const { version, organizationId, clientId } = await createTestFixture();
+
+      // Batch com contadores desatualizados propositalmente
+      const batch = await migration.renderBatch.create({
+        data: {
+          organizationId,
+          clientId,
+          templateVersionId: version.id,
+          sourceType: "POSTS_SELECTION",
+          format: "PORTRAIT",
+          status: "PROCESSING",
+          totalItems: 1,
+          pendingItems: 1,
+          completedItems: 0,
+          idempotencyKey: `worker-batch-reconcile-${randomUUID()}`,
+          requestHash: "req-hash-worker-3",
+          createdById: "admin-a",
+        },
+      });
+
+      // Job já concluído no banco
+      await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "COMPLETED",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: hashRenderInput(defaultSpec, defaultInput),
+          idempotencyKey: `job-reconcile-${randomUUID()}`,
+          createdById: "admin-a",
+          completedAt: new Date(),
+        },
+      });
+
+      // Roda reconciliação
+      await runRendererReconciliationCycle(db, redis);
+
+      const reconciledBatch = await migration.renderBatch.findUnique({
+        where: { id: batch.id },
+      });
+      expect(reconciledBatch?.completedItems).toBe(1);
+      expect(reconciledBatch?.pendingItems).toBe(0);
+      expect(reconciledBatch?.status).toBe("COMPLETED");
+
+      // Chamada repetida do reconciliador deve ser estritamente idempotente
+      await expect(
+        runRendererReconciliationCycle(db, redis),
+      ).resolves.not.toThrow();
+    });
+
+    it("deve processar jobs com entradas idênticas de forma independente, determinística e sem colisão de chave (Opção C)", async () => {
+      const { version, organizationId, clientId } = await createTestFixture();
+
+      const batch = await migration.renderBatch.create({
+        data: {
+          organizationId,
+          clientId,
+          templateVersionId: version.id,
+          sourceType: "POSTS_SELECTION",
+          format: "PORTRAIT",
+          status: "PENDING",
+          totalItems: 2,
+          pendingItems: 2,
+          idempotencyKey: `dedup-batch-${randomUUID()}`,
+          requestHash: "req-hash-dedup",
+          createdById: "admin-a",
+        },
+      });
+
+      const sharedInputHash = hashRenderInput(defaultSpec, defaultInput);
+
+      // Job 1
+      const job1 = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: sharedInputHash,
+          idempotencyKey: `job-dedup-1-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      // Job 2 com MESMO input e MESMO spec (mesmo inputHash)
+      const job2 = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: defaultInput as unknown as Prisma.InputJsonValue,
+          inputHash: sharedInputHash,
+          idempotencyKey: `job-dedup-2-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      // Executa Job 1 (renderiza e salva no storage sob seu ID)
+      await executeRenderJob(
+        { renderJobId: job1.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      const dbJob1 = await migration.renderJob.findUnique({
+        where: { id: job1.id },
+      });
+      expect(dbJob1?.status).toBe("COMPLETED");
+      expect(dbJob1?.outputMediaAssetId).toBe(job1.id);
+
+      // Executa Job 2 (renderiza e salva no storage sob seu próprio ID, sem colisão e em total isolamento)
+      await executeRenderJob(
+        { renderJobId: job2.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      const dbJob2 = await migration.renderJob.findUnique({
+        where: { id: job2.id },
+      });
+      expect(dbJob2?.status).toBe("COMPLETED");
+      expect(dbJob2?.outputMediaAssetId).toBe(job2.id);
+
+      // Ambos os arquivos no storage devem existir e possuir o mesmo hash SHA-256
+      const asset1 = await migration.mediaAsset.findUnique({
+        where: { id: job1.id },
+      });
+      const asset2 = await migration.mediaAsset.findUnique({
+        where: { id: job2.id },
+      });
+      expect(asset1?.sha256).toBe(asset2?.sha256);
+      expect(asset1?.byteSize).toBe(asset2?.byteSize);
+      expect(asset1?.storageKey).toBe(
+        `media/${organizationId}/${clientId}/${job1.id}`,
+      );
+      expect(asset2?.storageKey).toBe(
+        `media/${organizationId}/${clientId}/${job2.id}`,
+      );
+    });
+
+    it("deve preservar snapshot imutável: editar o post original não afeta a arte gerada", async () => {
+      const { version, organizationId, clientId } = await createTestFixture();
+
+      // 1. Cria post com texto original
+      const originalTitle = `Título Original Reserva ${randomUUID()}`;
+      const post = await migration.post.create({
+        data: {
+          organizationId,
+          clientId,
+          title: originalTitle,
+          caption: "Legenda de teste snapshot",
+          status: "DRAFT",
+        },
+      });
+
+      const inputSnapshot = artworkInputSchema.parse({
+        title: originalTitle,
+        eyebrow: "Snapshot Test",
+        subtitle: "Subtítulo Imutável",
+        callToAction: "Ver mais",
+        backgroundMediaAssetId: null,
+        logoMediaAssetId: null,
+      });
+
+      const batch = await migration.renderBatch.create({
+        data: {
+          organizationId,
+          clientId,
+          templateVersionId: version.id,
+          sourceType: "POSTS_SELECTION",
+          format: "PORTRAIT",
+          status: "PENDING",
+          totalItems: 1,
+          pendingItems: 1,
+          idempotencyKey: `snapshot-batch-${randomUUID()}`,
+          requestHash: "req-hash-snapshot",
+          createdById: "admin-a",
+        },
+      });
+
+      const job = await migration.renderJob.create({
+        data: {
+          organizationId,
+          clientId,
+          batchId: batch.id,
+          postId: post.id,
+          templateVersionId: version.id,
+          status: "PENDING",
+          input: inputSnapshot as unknown as Prisma.InputJsonValue,
+          inputHash: hashRenderInput(defaultSpec, inputSnapshot),
+          idempotencyKey: `job-snapshot-${randomUUID()}`,
+          createdById: "admin-a",
+        },
+      });
+
+      // 2. EDITA O POST ORIGINAL no banco antes do worker rodar
+      await migration.$transaction(async (tx) => {
+        await tx.$executeRaw`
+          SELECT set_config('app.user_id', 'admin-a', true)
+        `;
+        await tx.post.update({
+          where: { id: post.id },
+          data: {
+            title: "TEXTO COMPLETAMENTE MODIFICADO DEPOIS DA RESERVA",
+            caption: "LEGENDA MODIFICADA",
+          },
+        });
+      });
+
+      // 3. Executa o job
+      await executeRenderJob(
+        { renderJobId: job.id, organizationId, clientId },
+        db,
+        storage,
+      );
+
+      // 4. Job deve ler do snapshot persistido em RenderJob.input
+      const completedJob = await migration.renderJob.findUnique({
+        where: { id: job.id },
+      });
+      expect(completedJob?.status).toBe("COMPLETED");
+      const jobInput = completedJob?.input as unknown as ArtworkInput;
+      expect(jobInput.title).toBe(originalTitle);
+      expect(jobInput.title).not.toContain("MODIFICADO");
+    });
   });
 });

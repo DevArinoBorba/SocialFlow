@@ -1,4 +1,5 @@
-export type RenderJobStatus = "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
+export type RenderJobStatus =
+  "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED" | "CANCELLED";
 
 export interface PollingJob {
   id: string;
@@ -242,7 +243,11 @@ export class ArtworkPollingController {
       this.abortController = null;
       this.handleJobResult(updated);
 
-      if (updated.status === "COMPLETED" || updated.status === "FAILED") {
+      if (
+        updated.status === "COMPLETED" ||
+        updated.status === "FAILED" ||
+        updated.status === "CANCELLED"
+      ) {
         // Encerra polling ao atingir estado terminal
         this.stopPolling();
         return;

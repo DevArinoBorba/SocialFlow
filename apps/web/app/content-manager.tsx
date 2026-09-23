@@ -14,6 +14,7 @@ import {
   DEFAULT_TIMEZONE,
   parseLocalDateTimeToUtc,
 } from "@socialflow/contracts";
+import { BatchArtworkModal } from "./batch-artwork-modal";
 
 const COMMON_TIMEZONES = [
   { value: "America/Cuiaba", label: "America/Cuiaba (Cuiabá / MT - UTC-4)" },
@@ -186,6 +187,31 @@ export function ContentManager({
     useState<PublicationScheduleDto | null>(null);
   const [cancelReason, setCancelReason] = useState("");
   const [cancelBusy, setCancelBusy] = useState(false);
+
+  // Estado de Seleção em Lote de Posts (Fase 6 Incremento 3)
+  const [selectedPostIds, setSelectedPostIds] = useState<string[]>([]);
+  const [showBatchModal, setShowBatchModal] = useState(false);
+
+  const handleTogglePostSelection = (id: string) => {
+    setSelectedPostIds((prev) =>
+      prev.includes(id) ? prev.filter((pId) => pId !== id) : [...prev, id],
+    );
+  };
+
+  const handleToggleSelectAll = () => {
+    if (
+      filteredPosts.length > 0 &&
+      filteredPosts.every((p) => selectedPostIds.includes(p.id))
+    ) {
+      setSelectedPostIds([]);
+    } else {
+      setSelectedPostIds(filteredPosts.map((p) => p.id));
+    }
+  };
+
+  const handleClearSelection = () => {
+    setSelectedPostIds([]);
+  };
 
   const refresh = useCallback(() => setRevision((v) => v + 1), []);
 
@@ -1153,6 +1179,55 @@ export function ContentManager({
         </div>
       )}
 
+      {/* Barra de Seleção Múltipla para Lote */}
+      <div className="batch-selection-bar">
+        <div className="batch-selection-info">
+          <label className="batch-select-all-label">
+            <input
+              type="checkbox"
+              checked={
+                filteredPosts.length > 0 &&
+                filteredPosts.every((p) => selectedPostIds.includes(p.id))
+              }
+              onChange={handleToggleSelectAll}
+            />
+            <span>Selecionar todos ({filteredPosts.length})</span>
+          </label>
+          {selectedPostIds.length > 0 && (
+            <span className="batch-selected-count">
+              {selectedPostIds.length} selecionada(s)
+            </span>
+          )}
+        </div>
+        <div className="batch-selection-actions">
+          {selectedPostIds.length > 0 && (
+            <>
+              <button
+                type="button"
+                className="batch-btn batch-btn-primary"
+                onClick={() => setShowBatchModal(true)}
+              >
+                Gerar Artes em Lote ({selectedPostIds.length})
+              </button>
+              <button
+                type="button"
+                className="quiet"
+                onClick={handleClearSelection}
+              >
+                Limpar seleção
+              </button>
+            </>
+          )}
+          <button
+            type="button"
+            className="quiet link-button"
+            onClick={() => setShowBatchModal(true)}
+          >
+            Lotes de Artes
+          </button>
+        </div>
+      </div>
+
       {/* Listagem de Posts */}
       {loading ? (
         <p role="status">Carregando publicações…</p>
@@ -1167,6 +1242,15 @@ export function ContentManager({
                 key={post.id}
                 className={`post-card ${getStatusClass(post.status)}`}
               >
+                <div className="post-card-selection">
+                  <input
+                    type="checkbox"
+                    id={`select-post-${post.id}`}
+                    checked={selectedPostIds.includes(post.id)}
+                    onChange={() => handleTogglePostSelection(post.id)}
+                    aria-label={`Selecionar publicação ${post.title || post.caption.slice(0, 20)}`}
+                  />
+                </div>
                 <div className="post-card-header">
                   <span className={`badge ${getStatusClass(post.status)}`}>
                     {getStatusLabel(post.status)}
@@ -2069,6 +2153,16 @@ export function ContentManager({
           </div>
         </div>
       )}
+
+      {/* Modal de Geração de Artes em Lote */}
+      <BatchArtworkModal
+        isOpen={showBatchModal}
+        onClose={() => setShowBatchModal(false)}
+        org={org}
+        clientId={clientId}
+        selectedPosts={posts.filter((p) => selectedPostIds.includes(p.id))}
+        onArtworkBatchCompleted={refresh}
+      />
     </section>
   );
 }

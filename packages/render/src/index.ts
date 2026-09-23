@@ -88,6 +88,33 @@ export function hashRenderInput(spec: DesignTemplateSpec, input: ArtworkInput) {
   return createHash("sha256").update(normalized).digest("hex");
 }
 
+export function computeBatchRequestFingerprint(params: {
+  organizationId: string;
+  clientId: string;
+  templateVersionId: string;
+  format: string;
+  sourceType: "POSTS_SELECTION" | "CONTENT_BATCH";
+  resolvedPostIds: string[];
+  defaults?: {
+    backgroundMediaAssetId?: string | null;
+    logoMediaAssetId?: string | null;
+  };
+}): string {
+  const normalized = JSON.stringify(
+    stable({
+      organizationId: params.organizationId,
+      clientId: params.clientId,
+      templateVersionId: params.templateVersionId,
+      format: params.format,
+      sourceType: params.sourceType,
+      resolvedPostIds: [...params.resolvedPostIds].sort(),
+      backgroundMediaAssetId: params.defaults?.backgroundMediaAssetId ?? null,
+      logoMediaAssetId: params.defaults?.logoMediaAssetId ?? null,
+    }),
+  );
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
 async function imageDataUrl(data: Buffer | undefined) {
   if (!data) return undefined;
   if (!data.length || data.length > MAX_RENDER_SOURCE_BYTES)

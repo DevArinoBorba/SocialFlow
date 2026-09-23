@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   asActor,
   asRendererActor,
+  asSystemRendererDiscovery,
   assertRuntimeRole,
   createDatabase,
 } from "../../packages/db/src/index.js";
@@ -630,11 +631,34 @@ describe("renderer system actor RLS", () => {
         data: { status: "FAILED", errorCode: "RENDER_ERROR" },
       });
 
-      const rows = await runtime.$queryRaw<
-        { renderJobId: string; organizationId: string; clientId: string }[]
-      >`
-        SELECT * FROM discover_reconcilable_render_jobs()
-      `;
+      // 1. Runtime sem app.user_id recebe erro 42501 (insufficient_privilege)
+      await expect(
+        runtime.$queryRaw`SELECT * FROM discover_reconcilable_render_jobs()`,
+      ).rejects.toThrow(/insufficient_privilege/);
+
+      // 2. Usuário comum (inclusive OWNER/ADMIN) recebe erro 42501
+      await expect(
+        asActor(runtime, "admin-a", async (tx) => {
+          return tx.$queryRaw`SELECT * FROM discover_reconcilable_render_jobs()`;
+        }),
+      ).rejects.toThrow(/insufficient_privilege/);
+
+      // 3. Usuário de Tenant A não consegue executar descoberta nem enumerar Tenant B
+      await expect(
+        asActor(runtime, "admin-b", async (tx) => {
+          return tx.$queryRaw`SELECT * FROM discover_reconcilable_render_jobs()`;
+        }),
+      ).rejects.toThrow(/insufficient_privilege/);
+
+      // 4. Somente system:renderer com contexto explícito executa com sucesso
+      const rows = await asSystemRendererDiscovery(runtime, async (tx) => {
+        return tx.$queryRaw<
+          { renderJobId: string; organizationId: string; clientId: string }[]
+        >`
+          SELECT * FROM discover_reconcilable_render_jobs()
+        `;
+      });
+
       const ids = new Set(rows.map((row) => row.renderJobId));
       expect(ids.has(pending.jobId)).toBe(true);
       expect(ids.has(expired.jobId)).toBe(true);

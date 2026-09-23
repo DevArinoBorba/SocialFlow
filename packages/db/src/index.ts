@@ -108,4 +108,16 @@ export function asSchedulerActor<T>(
   });
 }
 
+// System renderer discovery actor: used exclusively by the reconciler to discover
+// expired or pending jobs across tenants with minimal privilege.
+export function asSystemRendererDiscovery<T>(
+  db: PrismaClient,
+  action: (tx: Prisma.TransactionClient) => Promise<T>,
+): Promise<T> {
+  return db.$transaction(async (tx) => {
+    await tx.$executeRaw`SELECT set_config('app.user_id', 'system:renderer', true)`;
+    return action(tx);
+  });
+}
+
 export * from "./crypto.js";

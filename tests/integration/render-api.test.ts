@@ -338,6 +338,7 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
   afterAll(async () => {
     await migration.auditLog.deleteMany({});
     await migration.renderJob.deleteMany({});
+    await migration.renderBatch.deleteMany({});
     await migration.post.deleteMany({});
     await migration.mediaAsset.deleteMany({});
     await migration.designTemplateVersion.deleteMany({});

@@ -104,10 +104,10 @@ const listQuerySchema = z.strictObject({
   status: z.enum(["PENDING", "PROCESSING", "COMPLETED", "FAILED"]).optional(),
 });
 
-const disallowedContentPattern =
+export const disallowedContentPattern =
   /<[a-zA-Z/][^>]*>|(?:https?|ftp|file|javascript|data):|(?:url\(|@import|expression\()/i;
 
-function validateArtworkInputText(input: ArtworkInput) {
+export function validateArtworkInputText(input: ArtworkInput) {
   const fieldsToCheck = [
     input.title,
     input.eyebrow,
@@ -125,11 +125,11 @@ function validateArtworkInputText(input: ArtworkInput) {
   }
 }
 
-const ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"];
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const SHA256_HEX_REGEX = /^[0-9a-fA-F]{64}$/;
+export const ALLOWED_IMAGE_MIMES = ["image/jpeg", "image/png", "image/webp"];
+export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+export const SHA256_HEX_REGEX = /^[0-9a-fA-F]{64}$/;
 
-function validateMediaAssetRecord(
+export function validateMediaAssetRecord(
   asset: {
     status: string;
     archived: boolean;
@@ -160,7 +160,7 @@ function validateMediaAssetRecord(
   }
 }
 
-function normalizeInput(input: ArtworkInput) {
+export function normalizeInput(input: ArtworkInput) {
   return {
     title: input.title,
     eyebrow: input.eyebrow ?? "",

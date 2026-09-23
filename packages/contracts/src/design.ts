@@ -340,3 +340,212 @@ export const renderRequestSchema = z.strictObject({
   idempotencyKey: z.string().trim().min(16).max(128),
 });
 export type RenderRequest = z.infer<typeof renderRequestSchema>;
+
+export const renderJobStatuses = [
+  "PENDING",
+  "PROCESSING",
+  "COMPLETED",
+  "FAILED",
+  "CANCELLED",
+] as const;
+export type RenderJobStatus = (typeof renderJobStatuses)[number];
+
+export const renderBatchStatuses = [
+  "PENDING",
+  "PROCESSING",
+  "CANCELLING",
+  "COMPLETED",
+  "PARTIALLY_FAILED",
+  "FAILED",
+  "CANCELLED",
+] as const;
+export type RenderBatchStatus = (typeof renderBatchStatuses)[number];
+
+export const renderBatchSourceTypes = [
+  "POSTS_SELECTION",
+  "CONTENT_BATCH",
+] as const;
+export type RenderBatchSourceType = (typeof renderBatchSourceTypes)[number];
+
+export const renderBatchSourceSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("POSTS_SELECTION"),
+    postIds: z.array(z.string().uuid()).min(1).max(100),
+  }),
+  z.strictObject({
+    type: z.literal("CONTENT_BATCH"),
+    contentBatchId: z.string().uuid(),
+  }),
+]);
+export type RenderBatchSource = z.infer<typeof renderBatchSourceSchema>;
+
+export const renderBatchDefaultsSchema = z.strictObject({
+  backgroundMediaAssetId: z.string().uuid().nullable().optional().default(null),
+  logoMediaAssetId: z.string().uuid().nullable().optional().default(null),
+});
+export type RenderBatchDefaults = z.infer<typeof renderBatchDefaultsSchema>;
+
+export const renderBatchCreateSchema = z.strictObject({
+  templateVersionId: z.string().uuid(),
+  format: z.enum(designFormats),
+  source: renderBatchSourceSchema,
+  defaults: renderBatchDefaultsSchema.optional(),
+  idempotencyKey: z.string().trim().min(16).max(128),
+});
+export type RenderBatchCreate = z.infer<typeof renderBatchCreateSchema>;
+
+export const renderBatchValidateSchema = z.strictObject({
+  templateVersionId: z.string().uuid(),
+  format: z.enum(designFormats),
+  source: renderBatchSourceSchema,
+  defaults: renderBatchDefaultsSchema.optional(),
+});
+export type RenderBatchValidate = z.infer<typeof renderBatchValidateSchema>;
+
+export const renderBatchListQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(50).optional().default(20),
+  cursor: z.string().uuid().optional(),
+  status: z.enum(renderBatchStatuses).optional(),
+});
+export type RenderBatchListQuery = z.infer<typeof renderBatchListQuerySchema>;
+
+export const renderBatchItemsQuerySchema = z.strictObject({
+  limit: z.coerce.number().int().min(1).max(100).optional().default(50),
+  cursor: z.string().uuid().optional(),
+  status: z.enum(renderJobStatuses).optional(),
+});
+export type RenderBatchItemsQuery = z.infer<typeof renderBatchItemsQuerySchema>;
+
+export const renderBatchRetryFailedSchema = z.strictObject({
+  idempotencyKey: z.string().trim().min(16).max(128),
+});
+export type RenderBatchRetryFailed = z.infer<
+  typeof renderBatchRetryFailedSchema
+>;
+
+export interface BatchStatusCounters {
+  totalItems: number;
+  pendingItems: number;
+  processingItems: number;
+  completedItems: number;
+  failedItems: number;
+  cancelledItems: number;
+  cancelRequestedAt?: Date | string | null;
+}
+
+export function computeBatchAggregateStatus(
+  counters: BatchStatusCounters,
+): RenderBatchStatus {
+  const sum =
+    counters.pendingItems +
+    counters.processingItems +
+    counters.completedItems +
+    counters.failedItems +
+    counters.cancelledItems;
+
+  const isConsistent = sum === counters.totalItems;
+
+  // Se os contadores forem inconsistentes:
+  // - não produza status terminal enganoso;
+  // - deixe o lote recuperável pelo reconciliador (CANCELLING se cancelamento solicitado, senão PROCESSING).
+  if (!isConsistent) {
+    return counters.cancelRequestedAt ? "CANCELLING" : "PROCESSING";
+  }
+
+  const isTerminal =
+    counters.pendingItems === 0 && counters.processingItems === 0;
+
+  // Enquanto houver itens ativos:
+  // - cancelRequestedAt presente -> CANCELLING;
+  // - algum item iniciado/terminal -> PROCESSING;
+  // - nenhum iniciado -> PENDING.
+  if (!isTerminal) {
+    if (counters.cancelRequestedAt) {
+      return "CANCELLING";
+    }
+    const hasStartedOrTerminal =
+      counters.processingItems > 0 ||
+      counters.completedItems > 0 ||
+      counters.failedItems > 0 ||
+      counters.cancelledItems > 0;
+
+    return hasStartedOrTerminal ? "PROCESSING" : "PENDING";
+  }
+
+  // Quando todos forem terminais:
+  // - todos COMPLETED -> COMPLETED;
+  if (counters.completedItems === counters.totalItems) {
+    return "COMPLETED";
+  }
+
+  // - todos FAILED -> FAILED;
+  if (counters.failedItems === counters.totalItems) {
+    return "FAILED";
+  }
+
+  // - todos CANCELLED -> CANCELLED;
+  if (counters.cancelledItems === counters.totalItems) {
+    return "CANCELLED";
+  }
+
+  // - qualquer mistura que contenha FAILED -> PARTIALLY_FAILED;
+  if (counters.failedItems > 0) {
+    return "PARTIALLY_FAILED";
+  }
+
+  // - mistura de COMPLETED + CANCELLED sem FAILED -> CANCELLED,
+  //   indicando encerramento por cancelamento com resultados preservados.
+  if (counters.cancelledItems > 0 && counters.completedItems > 0) {
+    return "CANCELLED";
+  }
+
+  return "COMPLETED";
+}
+
+export interface RenderBatchDto {
+  id: string;
+  templateVersionId: string;
+  sourceType: RenderBatchSourceType;
+  contentBatchId: string | null;
+  parentBatchId: string | null;
+  format: DesignFormat;
+  status: RenderBatchStatus;
+  requestHash: string;
+  totalItems: number;
+  pendingItems: number;
+  processingItems: number;
+  completedItems: number;
+  failedItems: number;
+  cancelledItems: number;
+  cancelRequestedAt: string | null;
+  cancelCompletedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface RenderBatchItemDto {
+  id: string;
+  status: RenderJobStatus;
+  templateVersionId: string;
+  postId: string | null;
+  backgroundMediaAssetId: string | null;
+  logoMediaAssetId: string | null;
+  outputMediaAssetId: string | null;
+  outputMediaUrl: string | null;
+  attemptNumber: number;
+  errorCode: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface RenderBatchValidateResult {
+  valid: boolean;
+  totalRequested: number;
+  validItemsCount: number;
+  invalidItemsCount: number;
+  validItems: Array<{ index: number; postId?: string; input: ArtworkInput }>;
+  invalidItems: Array<{ index: number; postId?: string; reasons: string[] }>;
+  estimatedDurationMs: number;
+}

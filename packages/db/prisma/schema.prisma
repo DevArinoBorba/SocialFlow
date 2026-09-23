@@ -27,6 +27,7 @@ model User {
   oauthDiscoveryConsumptions OAuthDiscoveryConsumption[]
   publicationSchedules PublicationSchedule[]
   renderJobs RenderJob[]
+  renderBatches RenderBatch[]
 }
 model Session {
   id String @id
@@ -91,6 +92,7 @@ model Organization {
   designTemplates DesignTemplate[]
   designTemplateVersions DesignTemplateVersion[]
   renderJobs RenderJob[]
+  renderBatches RenderBatch[]
 }
 model Client {
   id String @id @default(uuid())
@@ -112,6 +114,7 @@ model Client {
   designTemplates DesignTemplate[]
   designTemplateVersions DesignTemplateVersion[]
   renderJobs RenderJob[]
+  renderBatches RenderBatch[]
   @@unique([organizationId, slug])
   @@unique([organizationId, id])
 }
@@ -215,6 +218,7 @@ model ContentBatch {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
   posts          Post[]
+  renderBatches  RenderBatch[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
@@ -428,6 +432,22 @@ enum RenderJobStatus {
   PROCESSING
   COMPLETED
   FAILED
+  CANCELLED
+}
+
+enum RenderBatchStatus {
+  PENDING
+  PROCESSING
+  CANCELLING
+  COMPLETED
+  PARTIALLY_FAILED
+  FAILED
+  CANCELLED
+}
+
+enum RenderBatchSourceType {
+  POSTS_SELECTION
+  CONTENT_BATCH
 }
 
 model DesignTemplate {
@@ -464,11 +484,52 @@ model DesignTemplateVersion {
   rendererVersion String
   createdAt       DateTime       @default(now())
   renderJobs      RenderJob[]
+  renderBatches   RenderBatch[]
 
   @@unique([organizationId, id])
   @@unique([organizationId, clientId, id])
   @@unique([templateId, version])
   @@index([organizationId, clientId, templateId, version])
+}
+
+model RenderBatch {
+  id                 String                @id @default(uuid())
+  organizationId     String
+  organization       Organization          @relation(fields: [organizationId], references: [id])
+  clientId           String
+  client             Client                @relation(fields: [organizationId, clientId], references: [organizationId, id])
+  templateVersionId  String
+  templateVersion    DesignTemplateVersion @relation(fields: [organizationId, clientId, templateVersionId], references: [organizationId, clientId, id], onDelete: Restrict)
+  sourceType         RenderBatchSourceType @default(POSTS_SELECTION)
+  contentBatchId     String?
+  contentBatch       ContentBatch?         @relation(fields: [organizationId, clientId, contentBatchId], references: [organizationId, clientId, id], onDelete: Restrict)
+  format             DesignFormat
+  status             RenderBatchStatus     @default(PENDING)
+  requestHash        String
+  idempotencyKey     String
+  parentBatchId      String?
+  parentBatch        RenderBatch?          @relation("BatchRetries", fields: [organizationId, clientId, parentBatchId], references: [organizationId, clientId, id], onDelete: Restrict)
+  retryBatches       RenderBatch[]         @relation("BatchRetries")
+  createdById        String
+  createdBy          User                  @relation(fields: [createdById], references: [id])
+  totalItems         Int
+  pendingItems       Int
+  processingItems    Int                   @default(0)
+  completedItems     Int                   @default(0)
+  failedItems        Int                   @default(0)
+  cancelledItems     Int                   @default(0)
+  cancelRequestedAt  DateTime?
+  cancelCompletedAt  DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime              @default(now())
+  updatedAt          DateTime              @updatedAt
+  jobs               RenderJob[]
+
+  @@unique([organizationId, id])
+  @@unique([organizationId, clientId, id])
+  @@unique([organizationId, clientId, idempotencyKey])
+  @@index([organizationId, clientId, status, createdAt])
+  @@index([organizationId, clientId, parentBatchId])
 }
 
 model RenderJob {
@@ -479,6 +540,8 @@ model RenderJob {
   client             Client                @relation(fields: [organizationId, clientId], references: [organizationId, id])
   templateVersionId  String
   templateVersion    DesignTemplateVersion @relation(fields: [organizationId, clientId, templateVersionId], references: [organizationId, clientId, id], onDelete: Restrict)
+  batchId            String?
+  batch              RenderBatch?          @relation(fields: [organizationId, clientId, batchId], references: [organizationId, clientId, id], onDelete: Restrict)
   postId             String?
   post               Post?                 @relation(fields: [organizationId, clientId, postId], references: [organizationId, clientId, id], onDelete: Restrict)
   backgroundMediaAssetId String?
@@ -507,6 +570,7 @@ model RenderJob {
   @@unique([organizationId, clientId, id])
   @@unique([organizationId, clientId, idempotencyKey])
   @@index([organizationId, clientId, status, createdAt])
+  @@index([organizationId, clientId, batchId, status])
   @@index([status, leaseExpiresAt])
   @@index([templateVersionId])
   @@index([postId])

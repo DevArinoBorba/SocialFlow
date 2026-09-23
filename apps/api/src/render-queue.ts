@@ -8,6 +8,7 @@ export interface RenderJobData {
   renderJobId: string;
   organizationId: string;
   clientId: string;
+  batchId?: string;
 }
 
 export function getRenderQueueJobId(renderJobId: string): string {
