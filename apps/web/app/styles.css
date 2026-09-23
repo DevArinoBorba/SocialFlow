@@ -33,6 +33,7 @@ input,
 select,
 textarea {
   font: inherit;
+  scroll-margin: 64px;
 }
 button {
   border: 1px solid var(--accent);
@@ -217,6 +218,7 @@ small {
   justify-content: space-between;
   gap: 24px;
   margin-bottom: 32px;
+  scroll-margin: 64px;
 }
 .page-heading p {
   margin: 0;
@@ -275,6 +277,7 @@ small {
   border-radius: var(--radius);
   background: white;
   padding: 24px;
+  scroll-margin: 64px;
 }
 .brand-header {
   display: flex;
@@ -325,6 +328,9 @@ small {
   align-items: center;
   gap: 12px;
   margin-top: 20px;
+  position: relative;
+  z-index: 2;
+  scroll-margin: 64px;
 }
 .create-form {
   border: 1px solid var(--line);
@@ -406,6 +412,7 @@ footer {
 }
 .media-item {
   min-width: 0;
+  scroll-margin: 64px;
   overflow-wrap: anywhere;
 }
 .media-item img {
@@ -581,6 +588,7 @@ button.secondary:hover {
   border: 1px solid var(--line);
   border-radius: var(--radius);
   position: relative;
+  scroll-margin: 64px;
 }
 .post-card h3 {
   margin: 8px 0 12px;
@@ -1682,6 +1690,7 @@ button.secondary:hover {
 
 .template-select-card {
   min-width: 0;
+  scroll-margin: 64px;
   background: white;
   border: 2px solid var(--line);
   border-radius: var(--radius);
@@ -2396,6 +2405,7 @@ button.secondary:hover {
 
 .template-card {
   min-width: 0;
+  scroll-margin: 64px;
   background: white;
   border: 1px solid var(--line);
   border-radius: var(--radius);
