@@ -7,6 +7,7 @@ import { randomUUID } from "node:crypto";
 import { createApplication } from "../../apps/api/dist/app.js";
 import { RENDERER_VERSION } from "../../packages/render/src/index.js";
 import type { MediaStorage } from "../../apps/api/src/media-storage.js";
+import { isRenderBatchListResponse } from "../../packages/contracts/src/design.js";
 
 const db = createDatabase(process.env.DATABASE_URL!);
 const migration = createDatabase(process.env.MIGRATION_DATABASE_URL!);
@@ -516,7 +517,9 @@ describe("Phase 6 Increment 3: Render Batch API", () => {
       );
       expect(res.status).toBe(200);
       const data = await res.json();
+      expect(isRenderBatchListResponse(data)).toBe(true);
       expect(data.batches).toBeInstanceOf(Array);
+      expect((data as { items?: unknown }).items).toBeUndefined();
       expect(data.batches.length).toBeGreaterThanOrEqual(1);
       const found = data.batches.find(
         (b: { id: string }) => b.id === createdBatchId,

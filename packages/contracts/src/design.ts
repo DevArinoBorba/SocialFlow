@@ -524,6 +524,21 @@ export interface RenderBatchDto {
   updatedAt: string;
 }
 
+export interface RenderBatchListResponse {
+  batches: RenderBatchDto[];
+  nextCursor: string | null;
+}
+
+export function isRenderBatchListResponse(
+  data: unknown,
+): data is RenderBatchListResponse {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    Array.isArray((data as { batches?: unknown }).batches)
+  );
+}
+
 export interface RenderBatchItemDto {
   id: string;
   status: RenderJobStatus;

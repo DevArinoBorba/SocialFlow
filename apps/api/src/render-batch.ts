@@ -18,6 +18,7 @@ import {
   type RenderBatchValidate,
   type RenderBatchRetryFailed,
   type RenderBatchDto,
+  type RenderBatchListResponse,
   designTemplateSpecSchema,
   type ArtworkInput,
 } from "@socialflow/contracts";
@@ -1040,7 +1041,7 @@ export function registerRenderBatch(
       }
       const { limit, cursor, status } = queryParse.data;
 
-      const result = await access(
+      const result: RenderBatchListResponse = await access(
         req,
         ["OWNER", "ADMIN", "EDITOR", "APPROVER", "CLIENT_VIEWER"],
         async (tx) => {

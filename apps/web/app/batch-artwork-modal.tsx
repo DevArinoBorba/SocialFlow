@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import type {
-  DesignFormat,
-  Post,
-  RenderBatchDto,
-  RenderBatchItemDto,
-  RenderBatchValidateResult,
+import {
+  type DesignFormat,
+  type Post,
+  type RenderBatchDto,
+  type RenderBatchItemDto,
+  type RenderBatchValidateResult,
+  type RenderBatchListResponse,
+  isRenderBatchListResponse,
 } from "@socialflow/contracts";
 import { BatchPollingController } from "./batch-polling-controller";
 
@@ -435,29 +437,46 @@ export function BatchArtworkModal({
   };
 
   // Carrega histórico de lotes
-  const loadHistory = useCallback(async () => {
-    try {
-      setLoadingHistory(true);
-      const data = await requestApi<{ items: RenderBatchDto[] }>(
-        `${batchesBase}?limit=20`,
-      );
-      setHistoryBatches(data.items);
-    } catch (err) {
-      setError(
-        err instanceof Error
-          ? err.message
-          : "Erro ao carregar histórico de lotes.",
-      );
-    } finally {
-      setLoadingHistory(false);
-    }
-  }, [batchesBase]);
+  const loadHistory = useCallback(
+    async (signal?: { cancelled: boolean }) => {
+      try {
+        setLoadingHistory(true);
+        setError("");
+        const data = await requestApi<RenderBatchListResponse>(
+          `${batchesBase}?limit=20`,
+        );
+        if (signal?.cancelled) return;
+        if (!isRenderBatchListResponse(data)) {
+          throw new Error(
+            "Resposta inválida da API ao carregar o histórico de lotes.",
+          );
+        }
+        setHistoryBatches(data.batches);
+      } catch (err) {
+        if (signal?.cancelled) return;
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Erro ao carregar histórico de lotes.",
+        );
+      } finally {
+        if (!signal?.cancelled) {
+          setLoadingHistory(false);
+        }
+      }
+    },
+    [batchesBase],
+  );
 
   useEffect(() => {
-    if (tab === "history") {
-      void loadHistory();
+    const signal = { cancelled: false };
+    if (isOpen && tab === "history") {
+      void loadHistory(signal);
     }
-  }, [tab, loadHistory]);
+    return () => {
+      signal.cancelled = true;
+    };
+  }, [isOpen, tab, loadHistory]);
 
   if (!isOpen) return null;
 
