@@ -29,7 +29,7 @@ import { tmpdir } from "node:os";
 
 const IS_WIN = process.platform === "win32";
 const RCLONE_IMAGE = "rclone/rclone:1.68.2";
-const MINIO_IMAGE = "quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z";
+const MINIO_IMAGE = "cgr.dev/chainguard/minio:latest";
 
 const testRunId = `drill-${Date.now()}-${randomBytes(3).toString("hex")}`;
 const baseDir = resolve(".local", testRunId);

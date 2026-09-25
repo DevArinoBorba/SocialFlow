@@ -45,7 +45,7 @@ services:
     build: { context: . }
     ports: ["127.0.0.1:${WEB_PORT:-3000}:3000"]
   media-storage:
-    image: quay.io/minio/minio:RELEASE.2024-11-07T00-52-20Z
+    image: cgr.dev/chainguard/minio:latest
     entrypoint:
       [
         "sh",
