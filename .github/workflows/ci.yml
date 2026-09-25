@@ -57,6 +57,14 @@ jobs:
       - name: Install Playwright browsers
         run: pnpm exec playwright install --with-deps chromium
 
+      - name: Verify Docker daemon
+        run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "Docker daemon not running; starting docker service..."
+            sudo systemctl start docker
+          fi
+          docker compose version
+
       - name: Run foundation drill
         run: pnpm test:foundation
 

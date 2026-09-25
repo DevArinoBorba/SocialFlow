@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 
@@ -66,10 +66,29 @@ const composeArgs = [
   "-p",
   project,
 ];
+function logToSummary(title, content) {
+  if (process.env.GITHUB_STEP_SUMMARY) {
+    try {
+      appendFileSync(
+        process.env.GITHUB_STEP_SUMMARY,
+        `### ${title}\n\`\`\`\n${content}\n\`\`\`\n\n`,
+      );
+    } catch {
+      // Ignored if step summary file is not writable
+    }
+  }
+}
 function run(command, args, extra = {}) {
+  console.info(`[drill] -> ${command} ${args.join(" ")}`);
   const result = spawnSync(command, args, { env, stdio: "inherit", ...extra });
-  if (result.error || result.status !== 0)
-    throw new Error("Foundation drill step failed");
+  if (result.error || result.status !== 0) {
+    const errorDetails = `Command failed: ${command} ${args.join(" ")}\nexit status: ${result.status}\nerror: ${result.error?.stack || result.error?.message || result.error}`;
+    console.error(`[drill] FAILED:\n${errorDetails}`);
+    logToSummary("Foundation Drill Step Failure", errorDetails);
+    throw new Error(
+      `Foundation drill step failed: ${command} ${args.join(" ")}`,
+    );
+  }
 }
 const compose = (...args) => run(docker, [...composeArgs, ...args]);
 const pnpm = (...args) => {
@@ -87,7 +106,7 @@ const verify = (mode) =>
 const started = Date.now();
 let passed = false;
 try {
-  compose("config", "--quiet");
+  compose("config");
   for (const server of reserved) await new Promise((ok) => server.close(ok));
   compose("up", "--build", "--wait", "--wait-timeout", "240");
   verify("empty");
@@ -189,7 +208,14 @@ try {
 } finally {
   for (const server of reserved) if (server.listening) server.close();
   // Preserve volumes for inspection, even on failure. No down -v or prune.
-  compose("down");
+  try {
+    compose("down");
+  } catch (downErr) {
+    console.warn(
+      "[drill] compose down cleanup warning:",
+      downErr?.message || downErr,
+    );
+  }
   if (!passed)
     console.error(
       `Foundation drill failed; isolated volumes preserved: ${project}`,
