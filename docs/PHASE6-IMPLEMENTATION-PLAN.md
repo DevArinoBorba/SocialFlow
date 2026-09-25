@@ -130,8 +130,9 @@ Em 25/09/2026, o drill completo da fundação passou em ambiente isolado com
 checks dos serviços e verificação de restore. A homologação controlada em
 `socialflow-homolog` também foi aprovada: 10/10 smoke tests, paridade de
 imagem, isolamento multi-tenant, cancelamento, retry e download de PNG.
-O aceite formal da Fase 6 e a promoção para produção permanecem pendentes de
-aprovação do responsável pelo ambiente.
+O aceite formal foi aprovado e a mesma imagem imutável foi promovida para
+`socialflow-production` em 25/09/2026. Os seis serviços ficaram saudáveis,
+sem build local, com as 20 migrations aplicadas e sem disparo social.
 
 O procedimento operacional está em
 [PHASE6-HOMOLOGATION-CHECKLIST.md](PHASE6-HOMOLOGATION-CHECKLIST.md).
