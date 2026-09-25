@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { resolve } from "node:path";
 
@@ -66,25 +66,45 @@ const composeArgs = [
   "-p",
   project,
 ];
-function logToSummary(title, content) {
-  if (process.env.GITHUB_STEP_SUMMARY) {
-    try {
-      appendFileSync(
-        process.env.GITHUB_STEP_SUMMARY,
-        `### ${title}\n\`\`\`\n${content}\n\`\`\`\n\n`,
-      );
-    } catch {
-      // Ignored if step summary file is not writable
-    }
-  }
-}
+process.on("uncaughtException", (err) => {
+  const msg = (err?.stack || err?.message || String(err)).replace(
+    /\r?\n/g,
+    "%0A",
+  );
+  console.log(`::error title=DrillUncaught::${msg}`);
+  process.exit(1);
+});
+process.on("unhandledRejection", (err) => {
+  const msg = (err?.stack || err?.message || String(err)).replace(
+    /\r?\n/g,
+    "%0A",
+  );
+  console.log(`::error title=DrillUnhandledRejection::${msg}`);
+  process.exit(1);
+});
+
 function run(command, args, extra = {}) {
   console.info(`[drill] -> ${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, { env, stdio: "inherit", ...extra });
+  const result = spawnSync(command, args, {
+    env,
+    stdio: "pipe",
+    maxBuffer: 50 * 1024 * 1024,
+    ...extra,
+  });
+  if (result.stdout && result.stdout.length > 0) {
+    process.stdout.write(result.stdout);
+  }
+  if (result.stderr && result.stderr.length > 0) {
+    process.stderr.write(result.stderr);
+  }
   if (result.error || result.status !== 0) {
-    const errorDetails = `Command failed: ${command} ${args.join(" ")}\nexit status: ${result.status}\nerror: ${result.error?.stack || result.error?.message || result.error}`;
+    const stdoutSnippet = (result.stdout?.toString("utf8") || "").slice(-600);
+    const stderrSnippet = (result.stderr?.toString("utf8") || "").slice(-600);
+    const errorDetails = `Command failed: ${command} ${args.join(" ")}\nexit status: ${result.status}\nerror: ${result.error?.message || ""}\nSTDERR:\n${stderrSnippet}\nSTDOUT:\n${stdoutSnippet}`;
     console.error(`[drill] FAILED:\n${errorDetails}`);
-    logToSummary("Foundation Drill Step Failure", errorDetails);
+    console.log(
+      `::error title=StepFailed::${errorDetails.replace(/\r?\n/g, "%0A")}`,
+    );
     throw new Error(
       `Foundation drill step failed: ${command} ${args.join(" ")}`,
     );
