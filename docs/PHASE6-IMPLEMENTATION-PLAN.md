@@ -134,6 +134,9 @@ confirmar retenção/limpeza de temporários e executar homologação controlada
 infraestrutura alvo. Até esse aceite, a Fase 6 permanece aberta e a aplicação
 não deve publicar automaticamente em redes sociais após renderizar.
 
+O procedimento operacional está em
+[PHASE6-HOMOLOGATION-CHECKLIST.md](PHASE6-HOMOLOGATION-CHECKLIST.md).
+
 ### Verificação da fundação
 
 A fundação foi validada com 147 testes unitários e 174 testes de integração,
