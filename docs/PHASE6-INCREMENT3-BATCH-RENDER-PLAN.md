@@ -609,16 +609,16 @@ O gate de homologação da Fase 6 será considerado aprovado quando:
 
 ## 16. Resultados Reais da Execução do Gate e Validação
 
-Em conformidade estrita com o gate de homologação da Fase 6, foi executada a bateria completa de testes de carga e resiliência através do arquivo `tests/integration/render-batch-100-gate.test.ts`:
+Em 23/09/2026, a validação reportada para `tests/integration/render-batch-100-gate.test.ts` cobriu os cenários de carga e resiliência abaixo. Estes resultados são do gate automatizado local; o aceite operacional na infraestrutura de homologação permanece no Incremento 4.
 
 ### 16.1 Métricas Consolidadas do Gate Oficial de 100 Artes
 
 | Métrica                                 | Meta / Limite do Gate            | Resultado Obtido                                         | Status   |
 | :-------------------------------------- | :------------------------------- | :------------------------------------------------------- | :------- |
 | **Quantidade de Artes no Lote**         | Exatamente 100 artes             | 100 artes submetidas e persistidas                       | APROVADO |
-| **Tempo Total de Execução (100 artes)** | < 120 segundos                   | **40.2 segundos**                                        | APROVADO |
-| **Tempo Médio por Arte**                | < 1.2 segundos/arte              | **0.40 segundos/arte**                                   | APROVADO |
-| **Variação de Memória (Heap)**          | Sem vazamento / < 500 MB         | **-26.5 MB** (GC atuou eficazmente)                      | APROVADO |
+| **Tempo Total de Execução (100 artes)** | < 120 segundos                   | Aproximadamente **93 segundos** (0,93 s/arte em média)   | APROVADO |
+| **Tempo Médio por Arte**                | < 1.2 segundos/arte              | **0,93 segundos/arte**                                   | APROVADO |
+| **Variação de Memória (Heap)**          | Sem vazamento / < 500 MB         | Sem vazamento reportado                                  | APROVADO |
 | **Concorrência do Worker**              | Estritamente 1x (proteção VPS)   | 1 job processado por vez na fila                         | APROVADO |
 | **Duplicação de RenderJobs**            | Zero                             | 100 jobs únicos vinculados ao lote                       | APROVADO |
 | **Duplicação de MediaAssets**           | Zero                             | 100 arquivos com SHA-256 e storageKey determinística     | APROVADO |
@@ -631,6 +631,11 @@ Em conformidade estrita com o gate de homologação da Fase 6, foi executada a b
 - **TypeScript (`pnpm typecheck`)**: 100% aprovado nos 8 projetos do monorepo;
 - **ESLint (`pnpm lint`)**: 100% limpo, zero erros e zero warnings;
 - **Prettier (`pnpm format:check`)**: 100% em conformidade de estilo;
-- **Testes Unitários (`pnpm test`)**: **249 testes passando** (21 arquivos verdes);
-- **Testes de Integração (`node scripts/run-tests.mjs integration`)**: **330 testes passando** (15 arquivos verdes);
-- **Testes E2E (Playwright) (`node scripts/run-tests.mjs e2e`)**: **104 testes passando** em desktop e mobile (iPhone 13).
+- **Testes Unitários (`pnpm test`)**: **259 testes passando** (22 suítes verdes);
+- **Testes de Integração da API de lotes (`render-batch-api.test.ts`)**: **18 testes passando**;
+- **Gate de carga (`render-batch-100-gate.test.ts`)**: **4 testes passando**, incluindo interrupção, cancelamento e lote de 100 artes;
+- **Testes E2E Playwright (`batch-artwork-generator.spec.ts`)**: **6 testes passando**, 3 em Desktop Chrome e 3 em Mobile iPhone 13.
+
+Os resultados acima foram informados na validação de 23/09/2026. Typecheck, lint e
+format:check também foram reportados sem erros ou warnings. Este registro não
+substitui métricas de CPU/RAM da infraestrutura alvo nem o aceite de homologação.

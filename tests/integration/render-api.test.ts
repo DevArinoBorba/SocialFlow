@@ -1531,7 +1531,7 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     const job1 = (await res1.json()) as { id: string };
 
     const auditCountBefore = await migration.auditLog.count({
-      where: { entityId: job1.id },
+      where: { entityId: job1.id, action: "render.requested" },
     });
     expect(auditCountBefore).toBe(1);
 
@@ -1545,7 +1545,7 @@ describe("Phase 6 Increment 1: Render Jobs API", () => {
     expect(res2.status).toBe(200);
 
     const auditCountAfter = await migration.auditLog.count({
-      where: { entityId: job1.id },
+      where: { entityId: job1.id, action: "render.requested" },
     });
     expect(auditCountAfter).toBe(1);
   });

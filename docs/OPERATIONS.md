@@ -60,10 +60,16 @@ possui User/Organization; não apague dados para forçar bootstrap. Execute
 
 ## Migrations e rollback
 
-Migrations estão em `packages/db/prisma/migrations`. O primeiro SQL é gerado do
-schema; o segundo adiciona RLS, grants e constraints; o terceiro corrige leitura
-de auditoria após revogação. Prisma migrate deploy registra checksums e ignora
-migrations já aplicadas. Revisar a sequência em qualquer mudança de schema.
+Migrations estão em `packages/db/prisma/migrations` e devem ser aplicadas em
+ordem por `prisma migrate deploy`, que registra checksums e ignora migrations já
+aplicadas. A sequência inclui a fundação, isolamento/RLS, auditoria, marcas,
+mídia, conteúdo, contas sociais, publicação, scheduler e, por último,
+`202609230001_render_batch_and_job_cancellation` para lotes de renderização e
+cancelamento cooperativo. Revise todas as migrations novas e sua compatibilidade
+com a versão anterior da aplicação antes de promover uma imagem. Em particular,
+PostgreSQL não remove diretamente o valor `CANCELLED` do enum
+`RenderJobStatus`; a migration documenta a estratégia de rollback que recria o
+tipo. Rollback da imagem por si só não reverte alterações do banco.
 A senha da role runtime é criada apenas na inicialização de volume vazio;
 mudar env não muda senha no PostgreSQL existente. Rotacione por conexão de
 operador com `ALTER ROLE` e atualize o secret coordenadamente, sem colocar senha

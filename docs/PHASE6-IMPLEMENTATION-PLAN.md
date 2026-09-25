@@ -117,11 +117,20 @@ continua reservado para a Fase 7, após a revisão de licença e capacidade.
 3. Renderer puro com testes de hash e casos de overflow. **Concluído:** o pacote
    `@socialflow/render` usa fontes empacotadas, bytes de mídia já autorizados e
    limites de texto, sem aceitar HTML, CSS, URL ou caminho arbitrário.
-4. Armazenamento e fila idempotente. **Próximo passo.**
-5. API com RBAC/RLS e auditoria.
-6. Interface de prévia e geração individual.
-7. Revisão independente do Incremento 1.
-8. Editor básico e, somente depois, geração em lote.
+4. Armazenamento e fila idempotente. **Concluído.**
+5. API com RBAC/RLS e auditoria. **Concluído.**
+6. Interface de prévia e geração individual. **Concluído.**
+7. Revisão independente do Incremento 1. **Concluída.**
+8. Editor básico e geração em lote. **Incrementos 2 e 3 concluídos.**
+
+### Estado atual — Incremento 4: operação e aceite
+
+O gate automatizado de carga/resiliência do Incremento 3 e a validação de
+qualidade foram reportados como aprovados em 23/09/2026. Falta concluir o
+aceite operacional do Incremento 4: revisar métricas e limites operacionais,
+confirmar retenção/limpeza de temporários e executar homologação controlada na
+infraestrutura alvo. Até esse aceite, a Fase 6 permanece aberta e a aplicação
+não deve publicar automaticamente em redes sociais após renderizar.
 
 ### Verificação da fundação
 

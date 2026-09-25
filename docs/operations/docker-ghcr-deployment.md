@@ -11,6 +11,7 @@ O SocialFlow utiliza uma **única imagem Docker unificada e imutável por commit
 - Frontend (`@socialflow/web`)
 - Backend API (`@socialflow/api`)
 - Worker de background (`@socialflow/worker`)
+- Worker de renderização (`@socialflow/worker`, processo `start:render`)
 - Ferramentas de banco e migrações do Prisma (`@socialflow/db`)
 
 ### Especificações Técnicas:
@@ -18,7 +19,7 @@ O SocialFlow utiliza uma **única imagem Docker unificada e imutável por commit
 - **Base:** `node:24.19.0-bookworm-slim`
 - **Gerenciador de Pacotes:** `pnpm@11.19.0`
 - **Usuário de Execução:** `node` (UID 1000, não-root)
-- **Portas Expostas:** `3000` (Web), `3001` (API), `3002` (Worker)
+- **Portas Expostas pela imagem:** `3000` (Web), `3001` (API), `3002` (Worker), `3003` (Render Worker)
 - **Dimensões da Imagem Atual:**
   - **Tamanho compactado (download/transferência):** aproximadamente **351 MB**.
   - **Tamanho descompactado (armazenamento local no Docker daemon):** aproximadamente **1,6 GB** (inclui runtime Node.js, CLI do Prisma, utilitários de migration e dependências da aplicação).
@@ -32,7 +33,7 @@ O SocialFlow utiliza uma **única imagem Docker unificada e imutável por commit
 
 O workflow `.github/workflows/ci.yml` divide a esteira em jobs estritamente separados:
 
-1. **Job `foundation`:** Executado em pushes e Pull Requests para a branch `master`. Roda linter, format check, typecheck, testes unitários, testes de integração e o foundation drill.
+1. **Job `foundation`:** Executado em pushes e Pull Requests para a branch `master`. Roda build, linter, format check, typecheck, testes unitários e auditoria de dependências; o `pnpm test:foundation` executa o drill em containers efêmeros, incluindo suítes de integração e E2E.
 2. **Job `docker-validate`:** Executado **exclusivamente em Pull Requests**.
    - Possui apenas permissão `contents: read`.
    - **Não possui** permissão `packages: write`.
@@ -49,7 +50,7 @@ O workflow `.github/workflows/ci.yml` divide a esteira em jobs estritamente sepa
 ## 3. Topologia Compose e Desenvolvimento Local
 
 - O arquivo principal `compose.yaml` **não contém nenhuma diretiva `build:`**.
-- Todos os serviços de aplicação (`migrate`, `api`, `worker`, `web` e `seed`) exigem obrigatoriamente a variável `${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}`.
+- Todos os serviços de aplicação (`migrate`, `api`, `worker`, `render-worker`, `web` e `seed`) exigem obrigatoriamente a variável `${SOCIALFLOW_IMAGE:?Set SOCIALFLOW_IMAGE}`.
 - O arquivo `compose.override.yaml` foi deliberadamente removido do repositório para impedir que ferramentas de orquestração como o Coolify carreguem automaticamente blocos de compilação local.
 - Para desenvolvimento local com compilação direta, deve-se invocar explicitamente o arquivo `compose.local.yaml`:
   ```bash

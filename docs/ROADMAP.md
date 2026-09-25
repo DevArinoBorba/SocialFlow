@@ -74,5 +74,5 @@ scaling. Só executar após métricas reais demonstrarem necessidade.
 - **Fase 4 (Scheduler com BullMQ)**: Concluída, testada com agendamento real controlado em homologação e implantada em produção. O fluxo inclui jobs determinísticos, retries persistentes, reconciliação, timezone IANA, cancelamento, reprogramação e prevenção de duplicações.
 - **Infraestrutura de entrega**: Build externo no GitHub Actions, imagem imutável no GHCR e deploy por digest validados em homologação e produção. A VPS não compila a aplicação durante o deploy.
 - **Fase 5 (TikTok)**: Adiada até confirmar elegibilidade e aprovação do aplicativo na Content Posting API oficial. A avaliação pode prosseguir em paralelo, sem bloquear o produto.
-- **Fase 6 (Geração em lote)**: Próximo ciclo ativo. O plano de execução está em [PHASE6-IMPLEMENTATION-PLAN.md](PHASE6-IMPLEMENTATION-PLAN.md).
-- **Fases 7 a 10**: Planejadas e ainda não iniciadas.
+- **Fase 6 (Geração em lote)**: Incrementos 1–3 implementados e validados localmente, incluindo o gate automatizado de 100 artes. Próximo passo: Incremento 4 — observabilidade, limites operacionais, retenção e homologação controlada conforme [PHASE6-IMPLEMENTATION-PLAN.md](PHASE6-IMPLEMENTATION-PLAN.md). A Fase 6 só será concluída após o aceite operacional do gate.
+- **Fases 7 a 10**: Planejadas e ainda não iniciadas. A Fase 7 é Vídeo; Portal do Cliente consta na Fase 8.

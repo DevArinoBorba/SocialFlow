@@ -6,6 +6,7 @@ import { createDatabase, type Prisma } from "@socialflow/db";
 import {
   executeRenderJob,
   runRendererReconciliationCycle,
+  updateBatchCounters,
   ActiveLeaseError,
 } from "../../apps/worker/src/renderer-worker.js";
 import {
@@ -496,6 +497,12 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
       const currentRss = process.memoryUsage().rss;
       if (currentRss > peakRss) peakRss = currentRss;
     }
+
+    // O worker do container pode concluir a última transação em paralelo ao
+    // loop acima; reconcilia os contadores antes das asserções finais.
+    await db.$transaction(async (tx) => {
+      await updateBatchCounters(tx, batch.id, organizationId, clientId);
+    });
 
     const deadline4 = Date.now() + 30000;
     while (Date.now() < deadline4) {

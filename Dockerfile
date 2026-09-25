@@ -15,7 +15,7 @@ FROM base AS runtime
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
 COPY --from=build --chown=node:node /app /app
 USER node
-EXPOSE 3000 3001 3002
+EXPOSE 3000 3001 3002 3003
 
 ARG COMMIT_SHA=""
 ARG REPO_URL="https://github.com/DevArinoBorba/SocialFlow"
