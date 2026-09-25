@@ -27,6 +27,7 @@ const values = {
   TEST_REDIS_PORT: await port(),
   TEST_API_PORT: await port(),
   TEST_WORKER_PORT: await port(),
+  TEST_RENDER_WORKER_PORT: await port(),
   TEST_STORAGE_PORT: await port(),
   POSTGRES_PASSWORD: secret(),
   RUNTIME_DB_PASSWORD: secret(),
