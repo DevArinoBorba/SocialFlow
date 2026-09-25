@@ -125,9 +125,11 @@ continua reservado para a Fase 7, após a revisão de licença e capacidade.
 
 ### Estado atual — Incremento 4: operação e aceite
 
-O gate automatizado de carga/resiliência do Incremento 3 e a validação de
-qualidade foram reportados como aprovados em 23/09/2026. Falta concluir o
-aceite operacional do Incremento 4: revisar métricas e limites operacionais,
+Em 25/09/2026, o drill completo da fundação passou em ambiente isolado com
+330 testes de integração, 106 testes E2E, 20 migrations aplicadas, health
+checks dos serviços e verificação de restore. O gate automatizado local de
+carga/resiliência do Incremento 3 também passou. Falta concluir o aceite
+operacional do Incremento 4: revisar métricas e limites operacionais,
 confirmar retenção/limpeza de temporários e executar homologação controlada na
 infraestrutura alvo. Até esse aceite, a Fase 6 permanece aberta e a aplicação
 não deve publicar automaticamente em redes sociais após renderizar.
