@@ -746,6 +746,31 @@ export function ContentManager({
     }
   }
 
+  async function handleDeleteDraft(post: Post) {
+    if (
+      !window.confirm(
+        `Excluir o rascunho "${post.title}"? Essa ação não pode ser desfeita.`,
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setNotice("Excluindo rascunho…");
+    try {
+      await request(`${postBase}/${encodeURIComponent(post.id)}`, {
+        method: "DELETE",
+      });
+      setNotice("Rascunho excluído.");
+      refresh();
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const filteredPosts = posts.filter((p) => {
     if (brandFilter && p.brandId !== brandFilter) return false;
     return true;
@@ -1305,6 +1330,17 @@ export function ContentManager({
                         Enviar para revisão
                       </button>
                     )}
+
+                  {post.status === "DRAFT" && canWrite && (
+                    <button
+                      type="button"
+                      className="danger-btn"
+                      disabled={busy}
+                      onClick={() => void handleDeleteDraft(post)}
+                    >
+                      Excluir rascunho
+                    </button>
+                  )}
 
                   {/* Em Revisão -> Aprovar ou Rejeitar */}
                   {post.status === "IN_REVIEW" && canApprove && (

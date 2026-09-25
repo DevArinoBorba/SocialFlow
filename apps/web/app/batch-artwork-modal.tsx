@@ -944,35 +944,116 @@ export function BatchArtworkModal({
                 </p>
               ) : (
                 <div className="batch-history-list">
-                  {historyBatches.map((h) => (
-                    <div
-                      key={h.id}
-                      className="batch-history-card"
-                      onClick={() => startTrackingBatch(h)}
-                      role="button"
-                      tabIndex={0}
-                    >
-                      <div className="batch-history-info">
-                        <span className="batch-history-id">
-                          Lote #{h.id.slice(0, 8)}
-                        </span>
-                        <span className="batch-history-format">{h.format}</span>
-                        <span className="batch-history-date">
-                          {new Date(h.createdAt).toLocaleString("pt-BR")}
-                        </span>
+                  {historyBatches.map((h) => {
+                    const hTotal = h.totalItems || 1;
+                    const hFinished =
+                      (h.completedItems || 0) +
+                      (h.failedItems || 0) +
+                      (h.cancelledItems || 0);
+                    const hPercent = Math.min(
+                      100,
+                      Math.round((hFinished / hTotal) * 100),
+                    );
+
+                    return (
+                      <div
+                        key={h.id}
+                        className="batch-history-card"
+                        role="region"
+                        aria-label={`Lote ${h.id.slice(0, 8)}`}
+                      >
+                        <div className="batch-history-header-row">
+                          <div className="batch-history-title-group">
+                            <span className="batch-history-id">
+                              Lote #{h.id.slice(0, 8)}
+                            </span>
+                            <span className="batch-history-format">
+                              {h.format}
+                            </span>
+                            <span className="batch-history-date">
+                              {new Date(h.createdAt).toLocaleString("pt-BR")}
+                            </span>
+                          </div>
+                          <span
+                            className={`batch-status-badge ${formatBatchStatusBadgeClass(h.status)}`}
+                          >
+                            {formatBatchStatusLabel(h.status)}
+                          </span>
+                        </div>
+
+                        {/* Barra de Progresso */}
+                        <div className="batch-history-progress-wrap">
+                          <div className="batch-history-progress-track">
+                            <div
+                              className="batch-history-progress-fill"
+                              style={{ width: `${hPercent}%` }}
+                            />
+                          </div>
+                          <span className="batch-history-progress-label">
+                            {hPercent}% ({hFinished}/{h.totalItems})
+                          </span>
+                        </div>
+
+                        {/* Grid de Contadores do Lote */}
+                        <div className="batch-history-stats-grid">
+                          <div className="batch-history-stat-item">
+                            <span className="stat-label">Total</span>
+                            <span className="stat-val">{h.totalItems}</span>
+                          </div>
+                          <div className="batch-history-stat-item">
+                            <span className="stat-label">Concluídos</span>
+                            <span className="stat-val stat-success">
+                              {h.completedItems}
+                            </span>
+                          </div>
+                          <div className="batch-history-stat-item">
+                            <span className="stat-label">Falhos</span>
+                            <span
+                              className={`stat-val ${h.failedItems > 0 ? "stat-error" : ""}`}
+                            >
+                              {h.failedItems}
+                            </span>
+                          </div>
+                          <div className="batch-history-stat-item">
+                            <span className="stat-label">Cancelados</span>
+                            <span className="stat-val">{h.cancelledItems}</span>
+                          </div>
+                        </div>
+
+                        {/* Ações e Detalhes Expansíveis */}
+                        <div className="batch-history-footer-row">
+                          <button
+                            type="button"
+                            className="batch-btn batch-btn-primary batch-btn-sm"
+                            onClick={() => startTrackingBatch(h)}
+                          >
+                            Acompanhar progresso →
+                          </button>
+
+                          <details className="batch-history-advanced-details">
+                            <summary>Detalhes técnicos</summary>
+                            <div className="batch-advanced-specs">
+                              <p>
+                                <strong>ID do lote:</strong> <code>{h.id}</code>
+                              </p>
+                              <p>
+                                <strong>Versão do Modelo:</strong>{" "}
+                                <code>{h.templateVersionId}</code>
+                              </p>
+                              {h.completedAt && (
+                                <p>
+                                  <strong>Finalizado em:</strong>{" "}
+                                  {new Date(h.completedAt).toLocaleString(
+                                    "pt-BR",
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                          </details>
+                        </div>
                       </div>
-                      <div className="batch-history-status">
-                        <span
-                          className={`batch-status-badge ${formatBatchStatusBadgeClass(h.status)}`}
-                        >
-                          {formatBatchStatusLabel(h.status)}
-                        </span>
-                        <span className="batch-history-counters">
-                          {h.completedItems}/{h.totalItems} concluídos
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>

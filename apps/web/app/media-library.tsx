@@ -38,7 +38,8 @@ export function MediaLibrary({
   const base = `/api/organizations/${encodeURIComponent(org)}/clients/${encodeURIComponent(clientId)}/media`;
   const [items, setItems] = useState<Asset[]>([]),
     [page, setPage] = useState(1),
-    [filter, setFilter] = useState("");
+    [filter, setFilter] = useState(""),
+    [searchQuery, setSearchQuery] = useState("");
   const [hasMore, setHasMore] = useState(false),
     [available, setAvailable] = useState(false),
     [loading, setLoading] = useState(true);
@@ -137,6 +138,13 @@ export function MediaLibrary({
     }
   }
   async function archive(id: string) {
+    if (
+      !window.confirm(
+        "Arquivar esta imagem? Ela sairá da biblioteca ativa, mas poderá ser preservada para auditoria.",
+      )
+    ) {
+      return;
+    }
     setBusy(true);
     setError("");
     try {
@@ -229,23 +237,40 @@ export function MediaLibrary({
           </form>
         </details>
       )}
-      <label className="media-filter">
-        Filtrar por marca
-        <select
-          value={filter}
-          onChange={(event) => {
-            setFilter(event.target.value);
-            setPage(1);
-          }}
-        >
-          <option value="">Todas as marcas</option>
-          {brands.map((b) => (
-            <option key={b.id} value={b.id}>
-              {b.name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="media-toolbar">
+        <div className="media-search-box">
+          <label htmlFor="media-search" className="sr-only">
+            Buscar imagem
+          </label>
+          <input
+            id="media-search"
+            type="search"
+            placeholder="Buscar por nome ou descrição..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="media-search-input"
+          />
+        </div>
+
+        <label className="media-filter">
+          Filtrar por marca
+          <select
+            value={filter}
+            onChange={(event) => {
+              setFilter(event.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">Todas as marcas</option>
+            {brands.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+
       {loading ? (
         <p role="status">Carregando imagens…</p>
       ) : !items.length && !error ? (
@@ -255,66 +280,97 @@ export function MediaLibrary({
         </p>
       ) : (
         <div className="media-grid">
-          {items.map((asset) => (
-            <article
-              key={asset.id}
-              className="media-item"
-              data-asset-id={asset.id}
-            >
-              {/* Authenticated same-origin images must bypass public image optimizers. */}
-              <img
-                src={`${base}/${asset.id}/content`}
-                alt={asset.description || asset.name}
-                width={asset.width}
-                height={asset.height}
-                loading="lazy"
-              />
-              <h3>{asset.name}</h3>
-              {editing === asset.id ? (
-                <form onSubmit={(e) => edit(e, asset.id)}>
-                  {fields(asset)}
-                  <div className="form-actions">
-                    <button disabled={busy}>Salvar imagem</button>
-                    <button
-                      type="button"
-                      className="quiet"
-                      onClick={() => setEditing(null)}
-                    >
-                      Cancelar
-                    </button>
+          {items
+            .filter((asset) => {
+              if (!searchQuery.trim()) return true;
+              const q = searchQuery.toLowerCase();
+              return (
+                asset.name.toLowerCase().includes(q) ||
+                (asset.description &&
+                  asset.description.toLowerCase().includes(q))
+              );
+            })
+            .map((asset) => (
+              <article
+                key={asset.id}
+                className="media-item"
+                data-asset-id={asset.id}
+              >
+                {/* Authenticated same-origin images must bypass public image optimizers. */}
+                <div className="media-thumb-wrapper">
+                  <img
+                    src={`${base}/${asset.id}/content`}
+                    alt={asset.description || asset.name}
+                    width={asset.width}
+                    height={asset.height}
+                    loading="lazy"
+                  />
+                  <div className="media-overlay-badges">
+                    <span className="media-dimension-pill">
+                      {asset.width} × {asset.height}
+                    </span>
+                    <span className="media-status-pill">Disponível</span>
                   </div>
-                </form>
-              ) : (
-                <>
-                  <p>{asset.description}</p>
-                  <small>
-                    {asset.width} × {asset.height} ·{" "}
-                    {(asset.byteSize / 1024).toFixed(0)} KB
-                  </small>
-                  <div className="form-actions">
-                    {canWrite && (
-                      <button
-                        className="quiet"
-                        disabled={busy}
-                        onClick={() => setEditing(asset.id)}
-                      >
-                        Editar imagem
-                      </button>
-                    )}
-                    {canArchive && (
-                      <button
-                        className="quiet"
-                        disabled={busy}
-                        onClick={() => void archive(asset.id)}
-                      >
-                        Arquivar imagem
-                      </button>
-                    )}
-                  </div>
-                </>
-              )}
-            </article>
-          ))}
+                </div>
+                <div className="media-item-body">
+                  <h3>{asset.name}</h3>
+                  {editing === asset.id ? (
+                    <form onSubmit={(e) => edit(e, asset.id)}>
+                      {fields(asset)}
+                      <div className="form-actions">
+                        <button disabled={busy}>Salvar imagem</button>
+                        <button
+                          type="button"
+                          className="quiet"
+                          onClick={() => setEditing(null)}
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </form>
+                  ) : (
+                    <>
+                      {asset.description && (
+                        <p className="media-description-text">
+                          {asset.description}
+                        </p>
+                      )}
+                      <div className="media-item-meta">
+                        <span>{(asset.byteSize / 1024).toFixed(0)} KB</span>
+                      </div>
+                      <div className="form-actions media-actions-row">
+                        <a
+                          href={`${base}/${asset.id}/content`}
+                          download={asset.name}
+                          className="quiet media-download-link"
+                          title="Baixar arquivo original"
+                        >
+                          Baixar
+                        </a>
+                        {canWrite && (
+                          <button
+                            className="quiet"
+                            disabled={busy}
+                            onClick={() => setEditing(asset.id)}
+                          >
+                            Editar imagem
+                          </button>
+                        )}
+                        {canArchive && (
+                          <button
+                            className="quiet"
+                            disabled={busy}
+                            onClick={() => void archive(asset.id)}
+                          >
+                            Arquivar imagem
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </article>
+            ))}
         </div>
       )}
       {(page > 1 || hasMore) && (

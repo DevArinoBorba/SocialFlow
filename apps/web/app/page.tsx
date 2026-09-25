@@ -4,6 +4,7 @@ import { ArtworkGenerator } from "./artwork-generator";
 import { DesignTemplateManager } from "./design-template-manager";
 import { ContentManager } from "./content-manager";
 import { SocialAccountsManager } from "./social-accounts-manager";
+import { DashboardSummary } from "./dashboard-summary";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   isAdmin,
@@ -58,6 +59,25 @@ export default function Home() {
     targetAudience: "",
     toneOfVoice: "",
   });
+  const [activeNav, setActiveNav] = useState<
+    "inicio" | "conteudo" | "artes" | "biblioteca" | "configuracoes"
+  >("inicio");
+
+  const navigateToSection = useCallback(
+    (
+      sectionId:
+        "inicio" | "conteudo" | "artes" | "biblioteca" | "configuracoes",
+    ) => {
+      setActiveNav(sectionId);
+      if (typeof document !== "undefined") {
+        const el = document.getElementById(sectionId);
+        if (el) {
+          el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+      }
+    },
+    [],
+  );
 
   const clearMetaParams = useCallback(() => {
     setDiscoveryIdParam(null);
@@ -227,6 +247,32 @@ export default function Home() {
       const message = (e as Error).message;
       setError(message);
       if (message.startsWith("Sessão")) setMe(null);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function archiveClient(client: Client) {
+    if (
+      !window.confirm(
+        `Arquivar o cliente "${client.name}"? Ele sairá da lista ativa, mas os dados serão preservados.`,
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      await api(`/organizations/${org}/clients/${client.id}`, {
+        method: "DELETE",
+      });
+      setClients((previous) => previous.filter((item) => item.id !== client.id));
+      if (selectedClientId === client.id) setSelectedClientId(null);
+      setNotice(`Cliente ${client.name} arquivado.`);
+    } catch (e) {
+      setError((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -464,12 +510,56 @@ export default function Home() {
       <a className="skip" href="#content">
         Ir para o conteúdo principal
       </a>
-      <header>
-        <a href="/" className="wordmark">
-          SocialFlow<span aria-hidden="true">.</span>
-        </a>
+      <header className="workspace-header">
+        <div className="header-brand-wrap">
+          <a href="/" className="wordmark">
+            SocialFlow<span aria-hidden="true">.</span>
+          </a>
+          <span className="operational-badge">Operacional</span>
+        </div>
+
+        {selectedClientId && (
+          <nav className="header-nav-tabs" aria-label="Navegação principal">
+            <button
+              type="button"
+              className={`nav-tab-item ${activeNav === "inicio" ? "active" : ""}`}
+              onClick={() => navigateToSection("inicio")}
+            >
+              Início
+            </button>
+            <button
+              type="button"
+              className={`nav-tab-item ${activeNav === "conteudo" ? "active" : ""}`}
+              onClick={() => navigateToSection("conteudo")}
+            >
+              Conteúdo
+            </button>
+            <button
+              type="button"
+              className={`nav-tab-item ${activeNav === "artes" ? "active" : ""}`}
+              onClick={() => navigateToSection("artes")}
+            >
+              Artes
+            </button>
+            <button
+              type="button"
+              className={`nav-tab-item ${activeNav === "biblioteca" ? "active" : ""}`}
+              onClick={() => navigateToSection("biblioteca")}
+            >
+              Biblioteca
+            </button>
+            <button
+              type="button"
+              className={`nav-tab-item ${activeNav === "configuracoes" ? "active" : ""}`}
+              onClick={() => navigateToSection("configuracoes")}
+            >
+              Configurações
+            </button>
+          </nav>
+        )}
+
         <div className="account">
-          <span>{me.user.name}</span>
+          <span className="user-name">{me.user.name}</span>
           <button className="quiet" onClick={logout} disabled={busy}>
             Sair
           </button>
@@ -556,292 +646,359 @@ export default function Home() {
               </p>
             )}
 
-            {creatingBrand && canWriteBrands && (
-              <form
-                id="create-brand"
-                className="create-form"
-                onSubmit={createBrand}
-              >
-                <h2>Nova marca</h2>
-                <div className="fields">
-                  <div>
-                    <label htmlFor="brand-name">Nome da marca *</label>
-                    <input
-                      id="brand-name"
-                      name="name"
-                      required
-                      minLength={2}
-                      maxLength={120}
-                      value={brandForm.name}
-                      onChange={(e) =>
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          name: e.target.value,
-                        }))
-                      }
-                      placeholder="Ex.: Café Origens"
-                    />
-                    <small>Obrigatório. Entre 2 e 120 caracteres.</small>
-                  </div>
-                  <div>
-                    <label htmlFor="brand-description">Descrição</label>
-                    <textarea
-                      id="brand-description"
-                      name="description"
-                      maxLength={2000}
-                      value={brandForm.description}
-                      onChange={(e) =>
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          description: e.target.value,
-                        }))
-                      }
-                      placeholder="Resumo do posicionamento da marca…"
-                    />
-                    <small>Opcional. Até 2000 caracteres.</small>
-                  </div>
-                  <div>
-                    <label htmlFor="brand-targetAudience">Público-alvo</label>
-                    <textarea
-                      id="brand-targetAudience"
-                      name="targetAudience"
-                      maxLength={1000}
-                      value={brandForm.targetAudience}
-                      onChange={(e) =>
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          targetAudience: e.target.value,
-                        }))
-                      }
-                      placeholder="Perfil do consumidor ou audiência-chave…"
-                    />
-                    <small>Opcional. Até 1000 caracteres.</small>
-                  </div>
-                  <div>
-                    <label htmlFor="brand-toneOfVoice">Tom de voz</label>
-                    <textarea
-                      id="brand-toneOfVoice"
-                      name="toneOfVoice"
-                      maxLength={1000}
-                      value={brandForm.toneOfVoice}
-                      onChange={(e) =>
-                        setBrandForm((prev) => ({
-                          ...prev,
-                          toneOfVoice: e.target.value,
-                        }))
-                      }
-                      placeholder="Ex.: Informal, acolhedor, inspirador…"
-                    />
-                    <small>Opcional. Até 1000 caracteres.</small>
-                  </div>
-                </div>
-                <div className="form-actions">
-                  <button disabled={busy} type="submit">
-                    {busy ? "Criando…" : "Criar marca"}
-                  </button>
-                  <button
-                    type="button"
-                    className="quiet"
-                    onClick={() => setCreatingBrand(false)}
-                    disabled={busy}
-                  >
-                    Cancelar
-                  </button>
-                </div>
-              </form>
+            {/* 1. Início (Dashboard Resumido) */}
+            {currentClient && (
+              <DashboardSummary
+                org={org}
+                client={currentClient}
+                brands={brands}
+                me={me}
+                canWrite={canWriteBrands}
+                canApprove={canApprove}
+                canGenerate={canGenerate}
+                onNavigate={(sec) => navigateToSection(sec)}
+              />
             )}
 
-            {listingBrands ? (
-              <p role="status" className="empty">
-                Carregando marcas…
-              </p>
-            ) : brands.length ? (
-              <section aria-label="Marcas do cliente" className="brand-list">
-                {brands.map((brand) =>
-                  editingBrandId === brand.id ? (
-                    <form
-                      key={brand.id}
-                      className="create-form"
-                      onSubmit={(e) => updateBrand(e, brand.id)}
-                    >
-                      <h2>Editar marca: {brand.name}</h2>
-                      <div className="fields">
-                        <div>
-                          <label htmlFor={`edit-name-${brand.id}`}>
-                            Nome da marca *
-                          </label>
-                          <input
-                            id={`edit-name-${brand.id}`}
-                            name="name"
-                            required
-                            minLength={2}
-                            maxLength={120}
-                            value={editBrandForm.name}
-                            onChange={(e) =>
-                              setEditBrandForm((prev) => ({
-                                ...prev,
-                                name: e.target.value,
-                              }))
-                            }
-                          />
-                          <small>Obrigatório. Entre 2 e 120 caracteres.</small>
-                        </div>
-                        <div>
-                          <label htmlFor={`edit-description-${brand.id}`}>
-                            Descrição
-                          </label>
-                          <textarea
-                            id={`edit-description-${brand.id}`}
-                            name="description"
-                            maxLength={2000}
-                            value={editBrandForm.description}
-                            onChange={(e) =>
-                              setEditBrandForm((prev) => ({
-                                ...prev,
-                                description: e.target.value,
-                              }))
-                            }
-                          />
-                          <small>Opcional. Até 2000 caracteres.</small>
-                        </div>
-                        <div>
-                          <label htmlFor={`edit-targetAudience-${brand.id}`}>
-                            Público-alvo
-                          </label>
-                          <textarea
-                            id={`edit-targetAudience-${brand.id}`}
-                            name="targetAudience"
-                            maxLength={1000}
-                            value={editBrandForm.targetAudience}
-                            onChange={(e) =>
-                              setEditBrandForm((prev) => ({
-                                ...prev,
-                                targetAudience: e.target.value,
-                              }))
-                            }
-                          />
-                          <small>Opcional. Até 1000 caracteres.</small>
-                        </div>
-                        <div>
-                          <label htmlFor={`edit-toneOfVoice-${brand.id}`}>
-                            Tom de voz
-                          </label>
-                          <textarea
-                            id={`edit-toneOfVoice-${brand.id}`}
-                            name="toneOfVoice"
-                            maxLength={1000}
-                            value={editBrandForm.toneOfVoice}
-                            onChange={(e) =>
-                              setEditBrandForm((prev) => ({
-                                ...prev,
-                                toneOfVoice: e.target.value,
-                              }))
-                            }
-                          />
-                          <small>Opcional. Até 1000 caracteres.</small>
-                        </div>
-                      </div>
-                      <div className="form-actions">
-                        <button disabled={busy} type="submit">
-                          {busy ? "Salvando…" : "Salvar alterações"}
-                        </button>
-                        <button
-                          type="button"
-                          className="quiet"
-                          onClick={() => setEditingBrandId(null)}
-                          disabled={busy}
-                        >
-                          Cancelar
-                        </button>
-                      </div>
-                    </form>
-                  ) : (
-                    <article key={brand.id} className="brand-card">
-                      <div className="brand-header">
-                        <h3>{brand.name}</h3>
-                        {canWriteBrands && (
-                          <button
-                            className="quiet"
-                            onClick={() => startEditingBrand(brand)}
-                          >
-                            Editar
-                          </button>
-                        )}
-                      </div>
-                      <p className="brand-description">
-                        {brand.description || "Sem descrição informada."}
-                      </p>
-                      <div className="brand-grid">
-                        <div className="brand-item">
-                          <strong>Público-alvo</strong>
-                          <p>{brand.targetAudience || "Não definido"}</p>
-                        </div>
-                        <div className="brand-item">
-                          <strong>Tom de voz</strong>
-                          <p>{brand.toneOfVoice || "Não definido"}</p>
-                        </div>
-                      </div>
-                    </article>
-                  ),
-                )}
-              </section>
-            ) : (
-              !error && (
-                <section className="empty">
-                  <h2>Nenhuma marca por aqui ainda</h2>
-                  <p>
-                    {canWriteBrands
-                      ? "Crie a primeira marca deste cliente para começar."
-                      : "Nenhuma marca cadastrada para este cliente."}
+            {/* 2. Conteúdo e Publicações */}
+            <div id="conteudo" className="workspace-area-block">
+              <ContentManager
+                key={`content-${org}/${selectedClientId}`}
+                org={org}
+                clientId={selectedClientId}
+                brands={brands}
+                canWrite={canWriteBrands}
+                canApprove={canApprove}
+                canSubmitReview={canWriteBrands}
+              />
+            </div>
+
+            {/* 3. Gerador e Lotes de Artes */}
+            <div id="artes" className="workspace-area-block">
+              <ArtworkGenerator
+                key={`artwork-${org}/${selectedClientId}`}
+                org={org}
+                clientId={selectedClientId}
+                canGenerate={canGenerate}
+                canInitializeTemplates={canInitializeTemplates}
+                onArtworkCompleted={() => setMediaRevision((r) => r + 1)}
+                refreshKey={templateRevision}
+              />
+            </div>
+
+            {/* 4. Biblioteca de Imagens */}
+            <div id="biblioteca" className="workspace-area-block">
+              <MediaLibrary
+                key={`${org}/${selectedClientId}`}
+                org={org}
+                clientId={selectedClientId}
+                brands={brands}
+                canWrite={canWriteBrands}
+                canArchive={canCreateClient}
+                refreshKey={mediaRevision}
+              />
+            </div>
+
+            {/* 5. Configurações (Subáreas Contextuais: Marcas, Templates, Contas Sociais) */}
+            <div
+              id="configuracoes"
+              className="workspace-area-block settings-contextual-panel"
+            >
+              <div className="settings-panel-header">
+                <h2>Configurações do Cliente</h2>
+                <p className="muted">
+                  Gestão integrada de marcas, modelos visuais declarativos e
+                  conexões sociais de <strong>{currentClient?.name}</strong>.
+                </p>
+              </div>
+
+              {/* Subárea A: Marcas */}
+              <div className="settings-subarea">
+                <div className="subarea-header">
+                  <h3>Marcas</h3>
+                  <p className="muted">
+                    Perfis de público, tom de voz e diretrizes da marca.
                   </p>
-                </section>
-              )
-            )}
-            <SocialAccountsManager
-              key={`social-${org}/${selectedClientId}`}
-              org={org}
-              clientId={selectedClientId}
-              canWrite={canManageSocial}
-              initialDiscoveryId={discoveryIdParam}
-              initialMetaError={metaErrorParam}
-              onClearMetaParams={clearMetaParams}
-            />
-            <MediaLibrary
-              key={`${org}/${selectedClientId}`}
-              org={org}
-              clientId={selectedClientId}
-              brands={brands}
-              canWrite={canWriteBrands}
-              canArchive={canCreateClient}
-              refreshKey={mediaRevision}
-            />
-            <DesignTemplateManager
-              key={`templates-${org}/${selectedClientId}`}
-              org={org}
-              clientId={selectedClientId}
-              canEditTemplates={canEditTemplates}
-              canReactivateTemplates={canReactivateTemplates}
-              canInitializeTemplates={canInitializeTemplates}
-              onTemplatesModified={() => setTemplateRevision((r) => r + 1)}
-            />
-            <ArtworkGenerator
-              key={`artwork-${org}/${selectedClientId}`}
-              org={org}
-              clientId={selectedClientId}
-              canGenerate={canGenerate}
-              canInitializeTemplates={canInitializeTemplates}
-              onArtworkCompleted={() => setMediaRevision((r) => r + 1)}
-              refreshKey={templateRevision}
-            />
-            <ContentManager
-              key={`content-${org}/${selectedClientId}`}
-              org={org}
-              clientId={selectedClientId}
-              brands={brands}
-              canWrite={canWriteBrands}
-              canApprove={canApprove}
-              canSubmitReview={canWriteBrands}
-            />
+                </div>
+
+                {creatingBrand && canWriteBrands && (
+                  <form
+                    id="create-brand"
+                    className="create-form"
+                    onSubmit={createBrand}
+                  >
+                    <h2>Nova marca</h2>
+                    <div className="fields">
+                      <div>
+                        <label htmlFor="brand-name">Nome da marca *</label>
+                        <input
+                          id="brand-name"
+                          name="name"
+                          required
+                          minLength={2}
+                          maxLength={120}
+                          value={brandForm.name}
+                          onChange={(e) =>
+                            setBrandForm((prev) => ({
+                              ...prev,
+                              name: e.target.value,
+                            }))
+                          }
+                          placeholder="Ex.: Café Origens"
+                        />
+                        <small>Obrigatório. Entre 2 e 120 caracteres.</small>
+                      </div>
+                      <div>
+                        <label htmlFor="brand-description">Descrição</label>
+                        <textarea
+                          id="brand-description"
+                          name="description"
+                          maxLength={2000}
+                          value={brandForm.description}
+                          onChange={(e) =>
+                            setBrandForm((prev) => ({
+                              ...prev,
+                              description: e.target.value,
+                            }))
+                          }
+                          placeholder="Resumo do posicionamento da marca…"
+                        />
+                        <small>Opcional. Até 2000 caracteres.</small>
+                      </div>
+                      <div>
+                        <label htmlFor="brand-targetAudience">
+                          Público-alvo
+                        </label>
+                        <textarea
+                          id="brand-targetAudience"
+                          name="targetAudience"
+                          maxLength={1000}
+                          value={brandForm.targetAudience}
+                          onChange={(e) =>
+                            setBrandForm((prev) => ({
+                              ...prev,
+                              targetAudience: e.target.value,
+                            }))
+                          }
+                          placeholder="Perfil do consumidor ou audiência-chave…"
+                        />
+                        <small>Opcional. Até 1000 caracteres.</small>
+                      </div>
+                      <div>
+                        <label htmlFor="brand-toneOfVoice">Tom de voz</label>
+                        <textarea
+                          id="brand-toneOfVoice"
+                          name="toneOfVoice"
+                          maxLength={1000}
+                          value={brandForm.toneOfVoice}
+                          onChange={(e) =>
+                            setBrandForm((prev) => ({
+                              ...prev,
+                              toneOfVoice: e.target.value,
+                            }))
+                          }
+                          placeholder="Ex.: Informal, acolhedor, inspirador…"
+                        />
+                        <small>Opcional. Até 1000 caracteres.</small>
+                      </div>
+                    </div>
+                    <div className="form-actions">
+                      <button disabled={busy} type="submit">
+                        {busy ? "Criando…" : "Criar marca"}
+                      </button>
+                      <button
+                        type="button"
+                        className="quiet"
+                        onClick={() => setCreatingBrand(false)}
+                        disabled={busy}
+                      >
+                        Cancelar
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {listingBrands ? (
+                  <p role="status" className="empty">
+                    Carregando marcas…
+                  </p>
+                ) : brands.length ? (
+                  <section
+                    aria-label="Marcas do cliente"
+                    className="brand-list"
+                  >
+                    {brands.map((brand) =>
+                      editingBrandId === brand.id ? (
+                        <form
+                          key={brand.id}
+                          className="create-form"
+                          onSubmit={(e) => updateBrand(e, brand.id)}
+                        >
+                          <h2>Editar marca: {brand.name}</h2>
+                          <div className="fields">
+                            <div>
+                              <label htmlFor={`edit-name-${brand.id}`}>
+                                Nome da marca *
+                              </label>
+                              <input
+                                id={`edit-name-${brand.id}`}
+                                name="name"
+                                required
+                                minLength={2}
+                                maxLength={120}
+                                value={editBrandForm.name}
+                                onChange={(e) =>
+                                  setEditBrandForm((prev) => ({
+                                    ...prev,
+                                    name: e.target.value,
+                                  }))
+                                }
+                              />
+                              <small>
+                                Obrigatório. Entre 2 e 120 caracteres.
+                              </small>
+                            </div>
+                            <div>
+                              <label htmlFor={`edit-description-${brand.id}`}>
+                                Descrição
+                              </label>
+                              <textarea
+                                id={`edit-description-${brand.id}`}
+                                name="description"
+                                maxLength={2000}
+                                value={editBrandForm.description}
+                                onChange={(e) =>
+                                  setEditBrandForm((prev) => ({
+                                    ...prev,
+                                    description: e.target.value,
+                                  }))
+                                }
+                              />
+                              <small>Opcional. Até 2000 caracteres.</small>
+                            </div>
+                            <div>
+                              <label
+                                htmlFor={`edit-targetAudience-${brand.id}`}
+                              >
+                                Público-alvo
+                              </label>
+                              <textarea
+                                id={`edit-targetAudience-${brand.id}`}
+                                name="targetAudience"
+                                maxLength={1000}
+                                value={editBrandForm.targetAudience}
+                                onChange={(e) =>
+                                  setEditBrandForm((prev) => ({
+                                    ...prev,
+                                    targetAudience: e.target.value,
+                                  }))
+                                }
+                              />
+                              <small>Opcional. Até 1000 caracteres.</small>
+                            </div>
+                            <div>
+                              <label htmlFor={`edit-toneOfVoice-${brand.id}`}>
+                                Tom de voz
+                              </label>
+                              <textarea
+                                id={`edit-toneOfVoice-${brand.id}`}
+                                name="toneOfVoice"
+                                maxLength={1000}
+                                value={editBrandForm.toneOfVoice}
+                                onChange={(e) =>
+                                  setEditBrandForm((prev) => ({
+                                    ...prev,
+                                    toneOfVoice: e.target.value,
+                                  }))
+                                }
+                              />
+                              <small>Opcional. Até 1000 caracteres.</small>
+                            </div>
+                          </div>
+                          <div className="form-actions">
+                            <button disabled={busy} type="submit">
+                              {busy ? "Salvando…" : "Salvar alterações"}
+                            </button>
+                            <button
+                              type="button"
+                              className="quiet"
+                              onClick={() => setEditingBrandId(null)}
+                              disabled={busy}
+                            >
+                              Cancelar
+                            </button>
+                          </div>
+                        </form>
+                      ) : (
+                        <article key={brand.id} className="brand-card">
+                          <div className="brand-header">
+                            <h3>{brand.name}</h3>
+                            {canWriteBrands && (
+                              <button
+                                className="quiet"
+                                onClick={() => startEditingBrand(brand)}
+                              >
+                                Editar
+                              </button>
+                            )}
+                          </div>
+                          <p className="brand-description">
+                            {brand.description || "Sem descrição informada."}
+                          </p>
+                          <div className="brand-grid">
+                            <div className="brand-item">
+                              <strong>Público-alvo</strong>
+                              <p>{brand.targetAudience || "Não definido"}</p>
+                            </div>
+                            <div className="brand-item">
+                              <strong>Tom de voz</strong>
+                              <p>{brand.toneOfVoice || "Não definido"}</p>
+                            </div>
+                          </div>
+                        </article>
+                      ),
+                    )}
+                  </section>
+                ) : (
+                  !error && (
+                    <section className="empty">
+                      <h2>Nenhuma marca por aqui ainda</h2>
+                      <p>
+                        {canWriteBrands
+                          ? "Crie a primeira marca deste cliente para começar."
+                          : "Nenhuma marca cadastrada para este cliente."}
+                      </p>
+                    </section>
+                  )
+                )}
+              </div>
+
+              {/* Subárea B: Modelos de Design */}
+              <div className="settings-subarea">
+                <DesignTemplateManager
+                  key={`templates-${org}/${selectedClientId}`}
+                  org={org}
+                  clientId={selectedClientId}
+                  canEditTemplates={canEditTemplates}
+                  canReactivateTemplates={canReactivateTemplates}
+                  canInitializeTemplates={canInitializeTemplates}
+                  onTemplatesModified={() => setTemplateRevision((r) => r + 1)}
+                />
+              </div>
+
+              {/* Subárea C: Contas Sociais */}
+              <div className="settings-subarea">
+                <SocialAccountsManager
+                  key={`social-${org}/${selectedClientId}`}
+                  org={org}
+                  clientId={selectedClientId}
+                  canWrite={canManageSocial}
+                  initialDiscoveryId={discoveryIdParam}
+                  initialMetaError={metaErrorParam}
+                  onClearMetaParams={clearMetaParams}
+                />
+              </div>
+            </div>
           </div>
         ) : (
           /* Visão da Lista de Clientes */
@@ -957,6 +1114,15 @@ export default function Home() {
                       >
                         Abrir cliente
                       </button>
+                      {canCreateClient && (
+                        <button
+                          className="danger-btn"
+                          disabled={busy}
+                          onClick={() => void archiveClient(client)}
+                        >
+                          Arquivar cliente
+                        </button>
+                      )}
                       <span className="status">Ativo</span>
                     </div>
                   </article>
