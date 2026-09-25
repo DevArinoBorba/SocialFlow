@@ -477,6 +477,36 @@ export function registerContent(server: Express, scoped: Scope) {
     }),
   );
 
+  // 4. Delete draft post
+  server.delete(
+    `${postRoot}/:postId`,
+    handler(async (req, res) => {
+      const postId = param(req, "postId");
+      await access(
+        req,
+        ["OWNER", "ADMIN", "EDITOR"],
+        async (tx, userId) => {
+          const result = await tx.post.deleteMany({
+            where: {
+              id: postId,
+              organizationId: param(req, "org"),
+              clientId: param(req, "clientId"),
+              status: "DRAFT",
+            },
+          });
+          if (!result.count) {
+            throw new ContentError(
+              409,
+              "Somente posts em rascunho podem ser excluídos.",
+            );
+          }
+          await audit(tx, req, userId, postId, "post.deleted");
+        },
+      );
+      res.json({ deleted: true });
+    }),
+  );
+
   // 4. Update post content
   server.patch(
     `${postRoot}/:postId`,
