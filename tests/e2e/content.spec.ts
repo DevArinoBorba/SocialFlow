@@ -59,7 +59,7 @@ test("admin creates a post, verifies persistence after reload, and submits for r
     .filter({ has: page.getByRole("heading", { name: title, exact: true }) });
 
   await expect(postCard).toBeVisible();
-  await expect(postCard.getByText("Rascunho")).toBeVisible();
+  await expect(postCard.locator("span.badge-draft")).toBeVisible();
   await expect(postCard.getByText(caption)).toBeVisible();
 
   // Enviar para revisão
@@ -119,7 +119,7 @@ test("admin can delete a draft post with confirmation dialog", async ({
     .getByRole("button", { name: "Novo post", exact: true })
     .click();
 
-  const title = `Rascunho E2E Delete ${Date.now()}`;
+  const title = `Campanha Exclusao ${Date.now()}`;
   await contentSection.getByLabel("Título (opcional)").fill(title);
   await contentSection
     .getByLabel("Texto da publicação (legenda) *")
@@ -132,7 +132,7 @@ test("admin can delete a draft post with confirmation dialog", async ({
     .locator("article.post-card")
     .filter({ has: page.getByRole("heading", { name: title, exact: true }) });
   await expect(postCard).toBeVisible();
-  await expect(postCard.getByText("Rascunho")).toBeVisible();
+  await expect(postCard.locator("span.badge-draft")).toBeVisible();
 
   page.once("dialog", (dialog) => void dialog.accept());
   await postCard
