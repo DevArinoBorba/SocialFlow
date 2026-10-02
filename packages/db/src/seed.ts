@@ -66,7 +66,7 @@ export async function seed() {
           });
           await tx.account.upsert({
             where: { id: `account-${id}` },
-            update: { password: hashed },
+            update: {},
             create: {
               id: `account-${id}`,
               accountId: id,
