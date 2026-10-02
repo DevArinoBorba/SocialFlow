@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { randomUUID, createHash } from "node:crypto";
 import { Redis } from "ioredis";
 import sharp from "sharp";
-import { createDatabase, type Prisma } from "@socialflow/db";
+import { createDatabase, asRendererActor, type Prisma } from "@socialflow/db";
 import {
   executeRenderJob,
   runRendererReconciliationCycle,
@@ -184,6 +184,9 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
 
     const deadline1 = Date.now() + 15000;
     while (Date.now() < deadline1) {
+      await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+        await updateBatchCounters(tx, batch.id, organizationId, clientId);
+      });
       const b = await migration.renderBatch.findUnique({
         where: { id: batch.id },
       });
@@ -300,6 +303,9 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
     // Aguarda eventual conclusão pelo worker concorrente de background
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline) {
+      await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+        await updateBatchCounters(tx, batch.id, organizationId, clientId);
+      });
       const b = await migration.renderBatch.findUnique({
         where: { id: batch.id },
       });
@@ -408,6 +414,9 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
 
     const deadline3 = Date.now() + 15000;
     while (Date.now() < deadline3) {
+      await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+        await updateBatchCounters(tx, batch.id, organizationId, clientId);
+      });
       const b = await migration.renderBatch.findUnique({
         where: { id: batch.id },
       });
@@ -498,21 +507,47 @@ describe("Fase 6 Incremento 3: Gate de Carga Controlada de 10, 25, 50 e 100 Arte
       if (currentRss > peakRss) peakRss = currentRss;
     }
 
-    // O worker do container pode concluir a última transação em paralelo ao
-    // loop acima; reconcilia os contadores antes das asserções finais.
-    await db.$transaction(async (tx) => {
-      await updateBatchCounters(tx, batch.id, organizationId, clientId);
-    });
-
-    const deadline4 = Date.now() + 30000;
+    // O worker do container pode concluir jobs em paralelo ao loop acima;
+    // reconcilia e conclui quaisquer jobs pendentes ou que sofreram active lease lock.
+    const deadline4 = Date.now() + 60000;
     while (Date.now() < deadline4) {
+      const unfinished = await migration.renderJob.findMany({
+        where: {
+          batchId: batch.id,
+          status: { in: ["PENDING", "PROCESSING"] },
+        },
+        select: { id: true, status: true },
+      });
+
+      if (unfinished.length === 0) {
+        await asRendererActor(db, { organizationId, clientId }, async (tx) => {
+          await updateBatchCounters(tx, batch.id, organizationId, clientId);
+        });
+      } else {
+        for (const job of unfinished) {
+          if (job.status === "PENDING") {
+            try {
+              await executeRenderJob(
+                { renderJobId: job.id, organizationId, clientId },
+                db,
+                storage,
+              );
+            } catch (err) {
+              if (!(err instanceof ActiveLeaseError)) {
+                throw err;
+              }
+            }
+          }
+        }
+      }
+
       const b = await migration.renderBatch.findUnique({
         where: { id: batch.id },
       });
       if (b?.status === "COMPLETED" && b.completedItems === 100) {
         break;
       }
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 500));
     }
     const elapsedSeconds = (Date.now() - startTime) / 1000;
     const memoryAfter = process.memoryUsage();
