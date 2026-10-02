@@ -76,7 +76,7 @@ try {
       const migrations = await source.$queryRaw<
         { count: bigint }[]
       >`SELECT count(*) FROM _prisma_migrations WHERE finished_at IS NOT NULL`;
-      assert.equal(Number(migrations[0]?.count), 20);
+      assert.equal(Number(migrations[0]?.count), 21);
       break;
     }
     case "seed": {
@@ -235,7 +235,8 @@ try {
       check: process.argv[2],
     }),
   );
-} catch {
+} catch (err) {
+  console.error(err);
   console.error(
     JSON.stringify({
       event: "operations_verification_failed",
