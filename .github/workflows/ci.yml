@@ -74,7 +74,7 @@ jobs:
         with:
           name: browser-results
           path: |
-            test-results/*.png
+            test-results/**
             .local/socialflow-acceptance-*/result.json
           include-hidden-files: true
 

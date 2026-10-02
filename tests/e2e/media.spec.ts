@@ -62,6 +62,9 @@ test("image library uploads, previews, edits and archives", async ({
     page.getByRole("heading", { name: "Clientes", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+  ).toBeVisible();
   const reloadedLibrary = page.getByRole("region", {
     name: "Biblioteca de imagens",
   });
@@ -70,6 +73,7 @@ test("image library uploads, previews, edits and archives", async ({
     has: page.getByRole("heading", { name: `${name} editada`, exact: true }),
   });
   await expect(reloadedItem).toBeVisible();
+  page.once("dialog", (dialog) => void dialog.accept());
   await reloadedItem.getByRole("button", { name: "Arquivar imagem" }).click();
   await expect(reloadedItem).toHaveCount(0);
 });

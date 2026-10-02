@@ -79,16 +79,66 @@ test("admin creates a post, verifies persistence after reload, and submits for r
     page.getByRole("heading", { name: "Clientes", exact: true }),
   ).toBeVisible();
   await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+  ).toBeVisible();
 
   const reloadedSection = page.getByRole("region", {
     name: "Conteúdo e Publicações",
   });
+  await expect(reloadedSection).toBeVisible();
+
   const reloadedPost = reloadedSection
     .locator("article.post-card")
     .filter({ has: page.getByRole("heading", { name: title, exact: true }) });
 
   await expect(reloadedPost).toBeVisible();
   await expect(reloadedPost.getByText("Em revisão")).toBeVisible();
+});
+
+test("admin can delete a draft post with confirmation dialog", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await page.getByLabel("E-mail").fill("admin-a@socialflow.test");
+  await page
+    .getByLabel("Senha", { exact: true })
+    .fill(process.env.DEV_SEED_PASSWORD!);
+  await page.getByRole("button", { name: "Entrar", exact: true }).click();
+  await page.getByRole("button", { name: "Abrir cliente" }).first().click();
+  await expect(
+    page.getByRole("button", { name: "← Voltar para todos os clientes" }),
+  ).toBeVisible();
+
+  const contentSection = page.getByRole("region", {
+    name: "Conteúdo e Publicações",
+  });
+  await expect(contentSection).toBeVisible();
+
+  await contentSection
+    .getByRole("button", { name: "Novo post", exact: true })
+    .click();
+
+  const title = `Rascunho E2E Delete ${Date.now()}`;
+  await contentSection.getByLabel("Título (opcional)").fill(title);
+  await contentSection
+    .getByLabel("Texto da publicação (legenda) *")
+    .fill("Legenda de teste de exclusão.");
+  await contentSection
+    .getByRole("button", { name: "Salvar rascunho", exact: true })
+    .click();
+
+  const postCard = contentSection
+    .locator("article.post-card")
+    .filter({ has: page.getByRole("heading", { name: title, exact: true }) });
+  await expect(postCard).toBeVisible();
+  await expect(postCard.getByText("Rascunho")).toBeVisible();
+
+  page.once("dialog", (dialog) => void dialog.accept());
+  await postCard
+    .getByRole("button", { name: "Excluir rascunho", exact: true })
+    .click();
+  await expect(postCard).toHaveCount(0);
 });
 
 test("import batch CSV with mixed valid and invalid rows displays report and creates valid drafts", async ({

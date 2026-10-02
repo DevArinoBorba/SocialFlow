@@ -4,6 +4,8 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
+  timeout: 60000,
+  reporter: process.env.CI ? [["list"]] : "list",
   use: {
     baseURL: process.env.APP_URL ?? "http://localhost:3000",
     // Traces contain credentials and authenticated request data.

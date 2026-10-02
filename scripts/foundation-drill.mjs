@@ -98,8 +98,8 @@ function run(command, args, extra = {}) {
     process.stderr.write(result.stderr);
   }
   if (result.error || result.status !== 0) {
-    const stdoutSnippet = (result.stdout?.toString("utf8") || "").slice(-600);
-    const stderrSnippet = (result.stderr?.toString("utf8") || "").slice(-600);
+    const stdoutSnippet = (result.stdout?.toString("utf8") || "").slice(-20000);
+    const stderrSnippet = (result.stderr?.toString("utf8") || "").slice(-20000);
     const errorDetails = `Command failed: ${command} ${args.join(" ")}\nexit status: ${result.status}\nerror: ${result.error?.message || ""}\nSTDERR:\n${stderrSnippet}\nSTDOUT:\n${stdoutSnippet}`;
     console.error(`[drill] FAILED:\n${errorDetails}`);
     console.log(
