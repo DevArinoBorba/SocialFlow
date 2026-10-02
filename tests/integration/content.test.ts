@@ -100,6 +100,64 @@ describe("PostgreSQL runtime RLS, constraints and triggers for ContentBatch and 
     );
   });
 
+  it("enforces RLS DELETE policy on Post with runtime role: allows only DRAFT within actor scope and rejects non-draft or cross-tenant", async () => {
+    // 1. Verificar existência da política post_delete no catálogo do Postgres
+    const policies = await migration.$queryRaw<
+      { policyname: string; cmd: string }[]
+    >`
+      SELECT policyname, cmd FROM pg_policies
+      WHERE tablename = 'Post' AND policyname = 'post_delete'
+    `;
+    expect(policies.length).toBe(1);
+    expect(policies[0]?.cmd).toBe("DELETE");
+
+    // 2. Criar posts de teste via migration (dono do schema)
+    const draftPost = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Draft para RLS direto",
+        status: "DRAFT",
+      },
+    });
+
+    const approvedPost = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        caption: "Approved para RLS direto",
+        status: "APPROVED",
+      },
+    });
+
+    // 3. Tentativa de delete direto usando a conexão runtime sem ator definido deve deletar 0 linhas
+    const deleteNoActor = await db.post.deleteMany({
+      where: { id: draftPost.id },
+    });
+    expect(deleteNoActor.count).toBe(0);
+
+    // 4. Executando como editor autorizado de org-a/client-a
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT set_config('app.user_id', 'editor-a', true)`;
+      // Tentar deletar post APPROVED deve ser bloqueado pela política RLS (deleta 0 linhas)
+      const deleteApproved = await tx.post.deleteMany({
+        where: { id: approvedPost.id },
+      });
+      expect(deleteApproved.count).toBe(0);
+
+      // Tentar deletar post DRAFT com ator autorizado deve ter sucesso
+      const deleteDraft = await tx.post.deleteMany({
+        where: { id: draftPost.id },
+      });
+      expect(deleteDraft.count).toBe(1);
+    });
+
+    // Limpeza
+    await migration.post.deleteMany({
+      where: { id: { in: [draftPost.id, approvedPost.id] } },
+    });
+  });
+
   it("triggers protect_batch_scope and protect_post_scope prevent scope mutation", async () => {
     const batch = await migration.contentBatch.create({
       data: {
@@ -501,5 +559,315 @@ describe("Content Batch and Post Lifecycle API Tests", () => {
       cookie,
     );
     expect(res.status).toBe(404);
+  });
+
+  it("allows editor and admin to safely delete draft posts with audit logging and prevents deleting non-draft posts", async () => {
+    const editorCookie = await login("editor-a");
+    const approverCookie = await login("approver-a");
+    const viewerCookie = await login("viewer-a");
+
+    // 1. Criar post em rascunho
+    const createRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      editorCookie,
+      "POST",
+      { caption: "Post para teste de exclusão" },
+    );
+    expect(createRes.status).toBe(201);
+    const post = (await createRes.json()) as { id: string; status: string };
+    expect(post.status).toBe("DRAFT");
+
+    // 2. CLIENT_VIEWER não pode excluir post (403)
+    const viewerDelete = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}`,
+      viewerCookie,
+      "DELETE",
+    );
+    expect(viewerDelete.status).toBe(403);
+
+    // 3. APPROVER não pode excluir post (403)
+    const approverDelete = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}`,
+      approverCookie,
+      "DELETE",
+    );
+    expect(approverDelete.status).toBe(403);
+
+    // 4. EDITOR tenta excluir post inexistente (404)
+    const nonExistentDelete = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${randomUUID()}`,
+      editorCookie,
+      "DELETE",
+    );
+    expect(nonExistentDelete.status).toBe(404);
+
+    // 5. EDITOR submete para revisão (DRAFT -> IN_REVIEW)
+    await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}/status`,
+      editorCookie,
+      "PATCH",
+      { status: "IN_REVIEW" },
+    );
+
+    // 6. Tentativa de excluir post em IN_REVIEW falha (409)
+    const inReviewDelete = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}`,
+      editorCookie,
+      "DELETE",
+    );
+    expect(inReviewDelete.status).toBe(409);
+
+    // 7. Criar outro post em DRAFT para exclusão bem-sucedida
+    const draftRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      editorCookie,
+      "POST",
+      { caption: "Rascunho que será excluído com sucesso" },
+    );
+    expect(draftRes.status).toBe(201);
+    const draftPost = (await draftRes.json()) as { id: string };
+
+    // 8. EDITOR exclui post DRAFT com sucesso (200)
+    const deleteRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${draftPost.id}`,
+      editorCookie,
+      "DELETE",
+    );
+    expect(deleteRes.status).toBe(200);
+    const deleteJson = (await deleteRes.json()) as { deleted: boolean };
+    expect(deleteJson.deleted).toBe(true);
+
+    // 9. Verificar que o post não existe mais no banco
+    const found = await migration.post.findUnique({
+      where: { id: draftPost.id },
+    });
+    expect(found).toBeNull();
+
+    // 10. Verificar registro no AuditLog
+    const auditLogs = await migration.auditLog.findMany({
+      where: { entityId: draftPost.id, action: "post.deleted" },
+    });
+    expect(auditLogs.length).toBe(1);
+    expect(auditLogs[0]?.organizationId).toBe("org-a");
+  });
+
+  it("allows ADMIN and OWNER to delete draft posts across clients", async () => {
+    const adminCookie = await login("admin-a");
+    const ownerCookie = await login("owner-a");
+
+    // 1. ADMIN cria e exclui rascunho
+    const adminPostRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      adminCookie,
+      "POST",
+      { caption: "Rascunho criado pelo admin" },
+    );
+    expect(adminPostRes.status).toBe(201);
+    const adminPost = (await adminPostRes.json()) as { id: string };
+
+    const adminDeleteRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${adminPost.id}`,
+      adminCookie,
+      "DELETE",
+    );
+    expect(adminDeleteRes.status).toBe(200);
+    expect(
+      await migration.post.findUnique({ where: { id: adminPost.id } }),
+    ).toBeNull();
+
+    // 2. OWNER cria e exclui rascunho
+    const ownerPostRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      ownerCookie,
+      "POST",
+      { caption: "Rascunho criado pelo owner" },
+    );
+    expect(ownerPostRes.status).toBe(201);
+    const ownerPost = (await ownerPostRes.json()) as { id: string };
+
+    const ownerDeleteRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${ownerPost.id}`,
+      ownerCookie,
+      "DELETE",
+    );
+    expect(ownerDeleteRes.status).toBe(200);
+    expect(
+      await migration.post.findUnique({ where: { id: ownerPost.id } }),
+    ).toBeNull();
+  });
+
+  it("rejects deleting draft post with linked RenderJob preserving history and returning 409", async () => {
+    const editorCookie = await login("editor-a");
+
+    // 1. Criar post em rascunho
+    const postRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      editorCookie,
+      "POST",
+      { caption: "Post rascunho com arte vinculada" },
+    );
+    expect(postRes.status).toBe(201);
+    const post = (await postRes.json()) as { id: string };
+
+    // 2. Criar template e versão de teste via migration para vincular o RenderJob
+    const template = await migration.designTemplate.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        name: "Template Post Teste",
+        status: "ACTIVE",
+      },
+    });
+
+    const version = await migration.designTemplateVersion.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        templateId: template.id,
+        version: 1,
+        format: "SQUARE",
+        spec: { format: "SQUARE", layers: [] },
+        specHash: "hash-spec-test",
+        rendererVersion: "1.0.0",
+      },
+    });
+
+    const renderJob = await migration.renderJob.create({
+      data: {
+        organizationId: "org-a",
+        clientId: "client-a",
+        templateVersionId: version.id,
+        postId: post.id,
+        status: "COMPLETED",
+        input: { headline: "Arte do Post" },
+        inputHash: "input-hash-teste",
+        idempotencyKey: `render-job-${randomUUID()}`,
+        createdById: "editor-a",
+      },
+    });
+
+    // 3. Tentar excluir o post em rascunho com RenderJob vinculado deve retornar 409
+    const deleteRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}`,
+      editorCookie,
+      "DELETE",
+    );
+    expect(deleteRes.status).toBe(409);
+    const errorBody = (await deleteRes.json()) as { message: string };
+    expect(errorBody.message).toContain("RenderJobs");
+
+    // 4. Verificar que o post e o RenderJob continuam preservados no banco
+    const postStillExists = await migration.post.findUnique({
+      where: { id: post.id },
+    });
+    expect(postStillExists).not.toBeNull();
+
+    const jobStillExists = await migration.renderJob.findUnique({
+      where: { id: renderJob.id },
+    });
+    expect(jobStillExists).not.toBeNull();
+
+    // 5. Verificar que nenhum AuditLog de post.deleted foi gerado (rollback)
+    const auditCount = await migration.auditLog.count({
+      where: { entityId: post.id, action: "post.deleted" },
+    });
+    expect(auditCount).toBe(0);
+  });
+
+  it("prevents IDOR and cross-tenant/cross-client deletion of posts", async () => {
+    const cookieA = await login("editor-a");
+
+    // 1. Criar post em org-b
+    const postB = await migration.post.create({
+      data: {
+        organizationId: "org-b",
+        clientId: "client-b",
+        caption: "Post confidencial Org B",
+        status: "DRAFT",
+      },
+    });
+
+    // Tentativa de excluir post de Org B pela URL de Org A retorna 404
+    const resA = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${postB.id}`,
+      cookieA,
+      "DELETE",
+    );
+    expect(resA.status).toBe(404);
+
+    // Tentativa de excluir passando org-b na URL sendo usuário de org-a retorna 404
+    const resCrossOrg = await request(
+      `/api/organizations/org-b/clients/client-b/posts/${postB.id}`,
+      cookieA,
+      "DELETE",
+    );
+    expect(resCrossOrg.status).toBe(404);
+
+    // Post de B continua intacto
+    const checkB = await migration.post.findUnique({ where: { id: postB.id } });
+    expect(checkB).not.toBeNull();
+  });
+
+  it("prevents deletion of posts when client is inactive", async () => {
+    const adminCookie = await login("admin-a");
+
+    const inactiveClient = await migration.client.create({
+      data: {
+        organizationId: "org-a",
+        name: "Cliente Desativado Exclusão",
+        slug: `cliente-desativado-${randomUUID().slice(0, 8)}`,
+        active: false,
+      },
+    });
+
+    const postInactive = await migration.post.create({
+      data: {
+        organizationId: "org-a",
+        clientId: inactiveClient.id,
+        caption: "Post em cliente inativo",
+        status: "DRAFT",
+      },
+    });
+
+    const res = await request(
+      `/api/organizations/org-a/clients/${inactiveClient.id}/posts/${postInactive.id}`,
+      adminCookie,
+      "DELETE",
+    );
+    expect(res.status).toBe(404);
+  });
+
+  it("rolls back audit log atomically when post deletion fails due to concurrent status change", async () => {
+    const editorCookie = await login("editor-a");
+
+    // Criar post DRAFT
+    const postRes = await request(
+      "/api/organizations/org-a/clients/client-a/posts",
+      editorCookie,
+      "POST",
+      { caption: "Post para teste de rollback de auditoria" },
+    );
+    expect(postRes.status).toBe(201);
+    const post = (await postRes.json()) as { id: string };
+
+    // Alterar status diretamente no banco para APPROVED simulando corrida concorrente
+    await migration.post.update({
+      where: { id: post.id },
+      data: { status: "APPROVED" },
+    });
+
+    // Requisição de delete deve falhar com 409
+    const deleteRes = await request(
+      `/api/organizations/org-a/clients/client-a/posts/${post.id}`,
+      editorCookie,
+      "DELETE",
+    );
+    expect(deleteRes.status).toBe(409);
+
+    // Garantir atomicidade: AuditLog não pode conter post.deleted
+    const auditCount = await migration.auditLog.count({
+      where: { entityId: post.id, action: "post.deleted" },
+    });
+    expect(auditCount).toBe(0);
   });
 });

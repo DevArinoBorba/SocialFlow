@@ -482,27 +482,80 @@ export function registerContent(server: Express, scoped: Scope) {
     `${postRoot}/:postId`,
     handler(async (req, res) => {
       const postId = param(req, "postId");
-      await access(
-        req,
-        ["OWNER", "ADMIN", "EDITOR"],
-        async (tx, userId) => {
+      await access(req, ["OWNER", "ADMIN", "EDITOR"], async (tx, userId) => {
+        const organizationId = param(req, "org");
+        const clientId = param(req, "clientId");
+
+        const post = await tx.post.findFirst({
+          where: {
+            id: postId,
+            organizationId,
+            clientId,
+          },
+        });
+
+        if (!post) {
+          throw new ContentError(404, "Post não encontrado.");
+        }
+
+        if (post.status !== "DRAFT") {
+          throw new ContentError(
+            409,
+            "Somente posts em rascunho podem ser excluídos.",
+          );
+        }
+
+        const linkedRenderJobs = await tx.renderJob.count({
+          where: {
+            organizationId,
+            clientId,
+            postId,
+          },
+        });
+
+        if (linkedRenderJobs > 0) {
+          throw new ContentError(
+            409,
+            "Não é possível excluir o post em rascunho porque existem artes (RenderJobs) vinculadas. Preserve o histórico ou arquive as mídias geradas.",
+          );
+        }
+
+        await audit(tx, req, userId, postId, "post.deleted");
+
+        try {
           const result = await tx.post.deleteMany({
             where: {
               id: postId,
-              organizationId: param(req, "org"),
-              clientId: param(req, "clientId"),
+              organizationId,
+              clientId,
               status: "DRAFT",
             },
           });
+
           if (!result.count) {
             throw new ContentError(
               409,
               "Somente posts em rascunho podem ser excluídos.",
             );
           }
-          await audit(tx, req, userId, postId, "post.deleted");
-        },
-      );
+        } catch (error) {
+          if (error instanceof ContentError) {
+            throw error;
+          }
+          if (
+            error &&
+            typeof error === "object" &&
+            "code" in error &&
+            (error.code === "P2003" || error.code === "P2014")
+          ) {
+            throw new ContentError(
+              409,
+              "Não é possível excluir o post em rascunho porque existem registros vinculados que impedem a remoção.",
+            );
+          }
+          throw error;
+        }
+      });
       res.json({ deleted: true });
     }),
   );

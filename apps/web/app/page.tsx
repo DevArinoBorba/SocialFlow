@@ -268,7 +268,9 @@ export default function Home() {
       await api(`/organizations/${org}/clients/${client.id}`, {
         method: "DELETE",
       });
-      setClients((previous) => previous.filter((item) => item.id !== client.id));
+      setClients((previous) =>
+        previous.filter((item) => item.id !== client.id),
+      );
       if (selectedClientId === client.id) setSelectedClientId(null);
       setNotice(`Cliente ${client.name} arquivado.`);
     } catch (e) {
